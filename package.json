@@ -1,0 +1,95 @@
+{
+  "name": "sqlpro-desktop",
+  "productName": "SqlPro",
+  "desktopName": "SqlPro",
+  "version": "0.2.0",
+  "description": "Ứng dụng desktop quản trị MySQL/MariaDB tương thích kết nối Navicat cho Windows và Ubuntu",
+  "main": "electron/main.cjs",
+  "homepage": "https://github.com",
+  "author": {
+    "name": "SqlPro Team",
+    "email": "noreply@sqlpro.local"
+  },
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "check": "node --check electron/main.cjs && node --check electron/preload.cjs && node --check app.js && node --check desktop.js",
+    "pack:linux": "electron-builder --linux AppImage deb",
+    "pack:windows": "electron-builder --win nsis portable",
+    "pack:windows:zip": "electron-builder --win zip",
+    "pack:dir": "electron-builder --dir"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.17.0"
+  },
+  "build": {
+    "appId": "com.sqlpro.desktop",
+    "productName": "SqlPro",
+    "asar": true,
+    "npmRebuild": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "index.html",
+      "style.css",
+      "app.js",
+      "desktop.js",
+      "electron/**/*",
+      "build/icon.png",
+      "package.json",
+      "!node_modules/cpu-features{,/**}"
+    ],
+    "linux": {
+      "syncDesktopName": true,
+      "maintainer": "SqlPro Team <noreply@sqlpro.local>",
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development",
+      "artifactName": "SqlPro-${version}-${arch}.${ext}"
+    },
+    "deb": {
+      "priority": "optional"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "artifactName": "SqlPro-Setup-${version}-${arch}.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "SqlPro"
+    },
+    "portable": {
+      "artifactName": "SqlPro-Portable-${version}-${arch}.${ext}"
+    }
+  },
+  "dependencies": {
+    "mysql2": "^3.24.6",
+    "ssh2": "^1.17.0"
+  }
+}

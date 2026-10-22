@@ -955,7 +955,15 @@ class DatabaseSession {
           rowsAsArray: true
         });
         let batch = [];
-        const rowValues = (row) => `(${row.map((value) => mysql.escape(value === undefined ? null : value)).join(', ')})`;
+        const escapeSqlValue = (value) => {
+          if (value === undefined || value === null) return 'NULL';
+          if (Buffer.isBuffer(value)) return `X'${value.toString('hex')}'`;
+          if (value instanceof Date) return mysql.escape(value);
+          if (typeof value === 'object') return mysql.escape(JSON.stringify(value));
+          if (typeof value === 'boolean') return value ? '1' : '0';
+          return mysql.escape(value);
+        };
+        const rowValues = (row) => `(${row.map(escapeSqlValue).join(', ')})`;
         const flush = async () => {
           if (!batch.length) return;
           const values = batch.map(rowValues).join(',\n  ');

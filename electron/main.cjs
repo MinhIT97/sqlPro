@@ -422,6 +422,22 @@ ipcMain.handle('file:open-json', async () => {
   return { canceled: false, filePath, contents: await fs.promises.readFile(filePath, 'utf8') };
 });
 
+ipcMain.handle('file:open-text', async (_event, payload) => {
+  const filters = Array.isArray(payload && payload.filters) && payload.filters.length
+    ? payload.filters
+    : [{ name: 'Tệp dữ liệu', extensions: ['csv', 'tsv', 'txt', 'json', 'sql'] }];
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: (payload && payload.title) || 'Chọn tệp dữ liệu',
+    properties: ['openFile'],
+    filters
+  });
+  if (result.canceled || result.filePaths.length === 0) return { canceled: true };
+  const filePath = result.filePaths[0];
+  const stat = await fs.promises.stat(filePath);
+  if (stat.size > MAX_IMPORT_BYTES) throw new Error('Tệp nhập vượt quá giới hạn 20 MB.');
+  return { canceled: false, filePath, contents: await fs.promises.readFile(filePath, 'utf8') };
+});
+
 handle('connections:list', () => store.list());
 
 handle('connections:save', (payload) => {

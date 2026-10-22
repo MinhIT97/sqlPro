@@ -78,6 +78,7 @@ contextBridge.exposeInMainWorld('sqlProDesktop', Object.freeze({
   saveState: (state) => ipcRenderer.invoke('state:save', state),
   saveTextFile: (payload) => ipcRenderer.invoke('file:save-text', payload),
   openJsonFile: () => ipcRenderer.invoke('file:open-json'),
+  openTextFile: (payload) => ipcRenderer.invoke('file:open-text', payload),
   onMenuCommand: (callback) => {
     const listener = (_event, command) => {
       if (allowedCommands.has(command)) callback(command);

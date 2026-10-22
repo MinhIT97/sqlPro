@@ -20,6 +20,7 @@
     "dev": "electron .",
     "check": "node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/database.cjs && node --check electron/sql-script.cjs && node --check electron/store-schema.cjs && node --check electron/store.cjs && node --check electron/sync-crypto.cjs && node --check electron/sync.cjs && node --check server/src/index.cjs && node --check server/src/app.cjs && node --check server/src/auth.cjs && node --check server/src/vault.cjs && node --check sql-autocomplete.js && node --check app.js && node --check desktop.js && node --check website/app.js && npm test",
     "test": "node --test test/*.test.cjs",
+    "test:renderer": "node test/run-renderer-smoke.cjs",
     "server:install": "npm install --prefix server",
     "server:start": "npm --prefix server start",
     "server:test": "npm --prefix server test",

@@ -26,6 +26,8 @@ const app = {
   page: 1,
   pageSize: 100,
   search: '',
+  orderBy: null,
+  orderDir: 'ASC',
   query: { sql: '', result: null, error: null, running: false },
   indexes: null,
   relations: null
@@ -34,6 +36,7 @@ const app = {
 let queryTabs = [{ id: 1, title: 'Query 1', sql: null, result: null, error: null, running: false }];
 let activeQuery = 0;
 let queryId = 1;
+let dataRequestId = 0;
 app.query = queryTabs[0];
 
 const sqlAutocomplete = {
@@ -135,6 +138,10 @@ async function call(promise) {
 
 function quoteId(name) {
   return `\`${String(name).replace(/`/g, '``')}\``;
+}
+
+function quoteSqlString(value) {
+  return "'" + String(value).replace(/\\/g, '\\\\').replace(/'/g, "''") + "'";
 }
 
 function defaultSql() {
@@ -417,7 +424,260 @@ function persistState() {
   }, 150);
 }
 
+function initTheme() {
+  const saved = localStorage.getItem('sqlpro-theme');
+  const isLight = document.body.classList.toggle('light-theme', saved === 'light');
+  const btn = $('#themeToggleBtn');
+  if (btn) btn.textContent = isLight ? '🌙 Tối' : '☀️ Sáng';
+}
+
+function toggleTheme() {
+  const isLight = document.body.classList.toggle('light-theme');
+  localStorage.setItem('sqlpro-theme', isLight ? 'light' : 'dark');
+  const btn = $('#themeToggleBtn');
+  if (btn) btn.textContent = isLight ? '🌙 Tối' : '☀️ Sáng';
+  toast(`Giao diện: ${isLight ? 'Sáng (Light)' : 'Tối (Dark)'}`, 'info');
+}
+
+async function showErDiagramModal() {
+  if (!desktop || !app.connection || !app.database) {
+    toast('Vui lòng chọn CSDL để xem sơ đồ quan hệ ERD.', 'error');
+    return;
+  }
+
+  const database = app.database;
+  const connectionId = app.connection.id;
+  setStatus('Đang tải dữ liệu cấu trúc và quan hệ ERD...');
+  let tablesList = [];
+  let relationsData = { outbound: [], inbound: [] };
+  const tableColumns = new Map();
+
+  try {
+    [tablesList, relationsData] = await Promise.all([
+      call(desktop.db.tables(database)), call(desktop.db.relations(database, null))
+    ]);
+
+    // Load columns for each table (up to 30 tables to avoid overload)
+    const tablesToLoad = tablesList.slice(0, 30);
+    await Promise.all(tablesToLoad.map(async (t) => {
+      try {
+        const cols = await call(desktop.db.columns(database, t.name));
+        tableColumns.set(t.name, cols);
+      } catch (e) {
+        tableColumns.set(t.name, []);
+      }
+    }));
+  } catch (err) {
+    toast(err.message || 'Lỗi khi nạp dữ liệu ERD', 'error');
+    setStatus('Lỗi ERD');
+    return;
+  }
+
+  if (database !== app.database || connectionId !== app.connection?.id) return;
+  setStatus('Sẵn sàng');
+
+  modal(`
+    <div class="modal-card erd-modal-card">
+      <div class="modal-header">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <h3>📊 Sơ Đồ Quan Hệ Thực Thể (ERD) · ${esc(database)}</h3>
+          <span style="font-size:0.85em; color:#9ca3af;">${Math.min(tablesList.length, 30)} / ${tablesList.length} bảng · ${relationsData.outbound.length} khóa ngoại</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <button class="primary" id="exportErdPngBtn" style="padding:4px 10px; font-size:0.8em;">↧ Xuất PNG</button>
+          <button class="close-btn" onclick="closeModal()">✕</button>
+        </div>
+      </div>
+      <div class="modal-body" style="padding:0; position:relative; overflow:auto; background:#0b0f19; height:72vh;">
+        <canvas id="erdCanvas" style="display:block; width:100%; height:100%; cursor:grab;"></canvas>
+        <div style="position:absolute; bottom:12px; left:12px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; font-size:0.8em; color:#94a3b8; pointer-events:none;">
+          💡 Kéo thả bảng để sắp xếp · Lăn chuột để cuộn
+        </div>
+      </div>
+    </div>
+  `);
+
+  const canvas = $('#erdCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+
+  // Set canvas logical size
+  const rect = canvas.getBoundingClientRect();
+
+  // Position tables in grid
+  const CARD_WIDTH = 200;
+  const HEADER_HEIGHT = 32;
+  const ROW_HEIGHT = 22;
+  const GAP_X = 60;
+  const GAP_Y = 50;
+  const COLS_COUNT = Math.max(1, Math.floor((rect.width - 60) / (CARD_WIDTH + GAP_X)));
+
+  const nodes = tablesList.slice(0, 30).map((t, i) => {
+    const colIdx = i % COLS_COUNT;
+    const rowIdx = Math.floor(i / COLS_COUNT);
+    const cols = tableColumns.get(t.name) || [];
+    const height = HEADER_HEIGHT + Math.min(cols.length, 10) * ROW_HEIGHT + 8;
+    return {
+      name: t.name,
+      x: 30 + colIdx * (CARD_WIDTH + GAP_X),
+      y: 30 + rowIdx * (HEADER_HEIGHT + 10 * ROW_HEIGHT + 8 + GAP_Y),
+      width: CARD_WIDTH,
+      height,
+      cols
+    };
+  });
+
+  const nodeMap = new Map(nodes.map((n) => [n.name, n]));
+  const width = Math.max(rect.width, ...nodes.map((node) => node.x + node.width + 30));
+  const height = Math.max(rect.height, ...nodes.map((node) => node.y + node.height + 30));
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  canvas.style.touchAction = 'none';
+  const pixelRatio = window.devicePixelRatio || 1;
+  canvas.width = Math.ceil(width * pixelRatio);
+  canvas.height = Math.ceil(height * pixelRatio);
+  ctx.scale(pixelRatio, pixelRatio);
+
+  function draw() {
+    ctx.fillStyle = '#0b0f19';
+    ctx.fillRect(0, 0, width, height);
+
+    // Draw background grid dots
+    ctx.fillStyle = '#1e293b';
+    for (let x = 15; x < width; x += 30) {
+      for (let y = 15; y < height; y += 30) {
+        ctx.fillRect(x, y, 1.5, 1.5);
+      }
+    }
+
+    // Draw relation lines (Bezier curves)
+    (relationsData.outbound || []).forEach((rel) => {
+      const srcNode = nodeMap.get(rel.table);
+      const dstNode = nodeMap.get(rel.refTable);
+      if (!srcNode || !dstNode || rel.refDatabase !== database) return;
+
+      const x1 = srcNode.x + srcNode.width;
+      const y1 = srcNode.y + HEADER_HEIGHT + 15;
+      const x2 = dstNode.x;
+      const y2 = dstNode.y + HEADER_HEIGHT + 15;
+
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      const cp1x = x1 + (x2 - x1) / 2;
+      const cp1y = y1;
+      const cp2x = x1 + (x2 - x1) / 2;
+      const cp2y = y2;
+      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+
+      // Arrow head at target
+      ctx.beginPath();
+      ctx.arc(x2, y2, 4, 0, Math.PI * 2);
+      ctx.fillStyle = '#38bdf8';
+      ctx.fill();
+    });
+
+    // Draw table cards
+    nodes.forEach((n) => {
+      // Card Shadow & Box
+      ctx.fillStyle = '#111827';
+      ctx.strokeStyle = '#374151';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.roundRect(n.x, n.y, n.width, n.height, 6);
+      ctx.fill();
+      ctx.stroke();
+
+      // Card Header
+      ctx.fillStyle = '#1f2937';
+      ctx.beginPath();
+      ctx.roundRect(n.x, n.y, n.width, HEADER_HEIGHT, [6, 6, 0, 0]);
+      ctx.fill();
+
+      // Table Icon & Name
+      ctx.fillStyle = '#f3f4f6';
+      ctx.font = 'bold 12px sans-serif';
+      ctx.fillText('▦ ' + (n.name.length > 20 ? n.name.slice(0, 18) + '…' : n.name), n.x + 8, n.y + 20);
+
+      // Columns list
+      ctx.font = '11px monospace';
+      const visibleCols = n.cols.slice(0, 10);
+      visibleCols.forEach((col, idx) => {
+        const itemY = n.y + HEADER_HEIGHT + (idx + 1) * ROW_HEIGHT - 6;
+        const isPk = col.key === 'PRI';
+        ctx.fillStyle = isPk ? '#fbbf24' : '#94a3b8';
+        const prefix = isPk ? '🔑 ' : '• ';
+        const colText = prefix + col.name;
+        ctx.fillText(colText.length > 22 ? colText.slice(0, 20) + '…' : colText, n.x + 8, itemY);
+      });
+      if (n.cols.length > 10) {
+        ctx.fillStyle = '#6b7280';
+        ctx.font = 'italic 10px sans-serif';
+        ctx.fillText(`+ ${n.cols.length - 10} cột khác...`, n.x + 8, n.y + n.height - 4);
+      }
+    });
+  }
+
+  draw();
+
+  // Drag interaction
+  let draggedNode = null;
+  let offsetX = 0;
+  let offsetY = 0;
+
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    const mouseX = e.offsetX;
+    const mouseY = e.offsetY;
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const n = nodes[i];
+      if (mouseX >= n.x && mouseX <= n.x + n.width && mouseY >= n.y && mouseY <= n.y + n.height) {
+        draggedNode = n;
+        offsetX = mouseX - n.x;
+        offsetY = mouseY - n.y;
+        canvas.style.cursor = 'grabbing';
+        canvas.setPointerCapture(e.pointerId);
+        break;
+      }
+    }
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (!draggedNode) return;
+    const canvasBounds = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - canvasBounds.left;
+    const mouseY = e.clientY - canvasBounds.top;
+    draggedNode.x = Math.max(0, Math.min(width - draggedNode.width, mouseX - offsetX));
+    draggedNode.y = Math.max(0, Math.min(height - draggedNode.height, mouseY - offsetY));
+    draw();
+  });
+
+  const stopDragging = () => {
+    if (draggedNode) {
+      draggedNode = null;
+      canvas.style.cursor = 'grab';
+    }
+  };
+  canvas.addEventListener('pointerup', stopDragging);
+  canvas.addEventListener('pointercancel', stopDragging);
+  canvas.addEventListener('lostpointercapture', stopDragging);
+
+  // Export PNG button
+  $('#exportErdPngBtn')?.addEventListener('click', () => {
+    const dataUrl = canvas.toDataURL('image/png');
+    const link = document.createElement('a');
+    link.download = `ERD-${database}.png`;
+    link.href = dataUrl;
+    link.click();
+    toast('Đã xuất sơ đồ ERD thành công!', 'success');
+  });
+}
+
 async function init() {
+  initTheme();
+  setupContextMenu();
   $('#treeSearch').addEventListener('input', debounce(renderSidebar, 180));
   $('#workspaceSelect').addEventListener('change', (event) => switchWorkspace(event.target.value));
   $('#connectionList').addEventListener('click', onConnectionClick);
@@ -611,12 +871,14 @@ function renderSidebar() {
     const typeLabel = connection.type === 'mariadb' ? 'MARIA' : 'MYSQL';
     return `
       <div class="connitem ${active ? 'active' : ''}" data-connection="${esc(connection.id)}">
-        <i class="dot" style="background:${active ? '#24a68b' : '#c9d3db'}"></i>
-        <span class="name">${esc(connection.name)}</span>
-        <span class="badge type">${typeLabel}</span>
-        <button class="more" data-menu="${esc(connection.id)}" title="Tùy chọn">···</button>
+        <div class="connhead">
+          <i class="dot" style="background:${active ? '#24a68b' : '#c9d3db'}"></i>
+          <span class="name">${esc(connection.name)}</span>
+          <span class="badge type">${typeLabel}</span>
+          <button class="more" data-menu="${esc(connection.id)}" title="Tùy chọn">···</button>
+        </div>
+        <div class="connmeta">${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port}${connection.ssh.enabled ? ' · SSH' : ''}</div>
       </div>
-      <div class="connmeta">${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port}${connection.ssh.enabled ? ' · SSH' : ''}</div>
     `;
   }).join('');
 
@@ -636,7 +898,12 @@ function renderSidebar() {
   if (!app.database) {
     const databases = app.databases.filter((name) => !term || name.toLowerCase().includes(term));
     tree.innerHTML = `
-      <div class="sideheading sub">DATABASES <button data-refresh-dbs="1" title="Làm mới">↻</button></div>
+      <div class="sideheading sub">DATABASES
+        <span class="headingactions">
+          <button id="createDbBtn" title="Tạo database mới">＋</button>
+          <button data-refresh-dbs="1" title="Làm mới">↻</button>
+        </span>
+      </div>
       ${databases.length
         ? databases.map((name) => `<div class="database dbitem" data-db="${esc(name)}">▱ &nbsp; ${esc(name)}</div>`).join('')
         : '<div class="empty small">Không có database phù hợp.</div>'}
@@ -652,7 +919,11 @@ function renderSidebar() {
       <button data-backup-db="1" title="Sao lưu database ra tệp .sql">⇩ Sao lưu</button>
       <button data-restore-db="1" title="Phục hồi database từ tệp .sql">⇧ Phục hồi</button>
     </div>
-    <div class="sideheading sub">TABLES <span>${tables.length}</span></div>
+    <div class="sideheading sub">TABLES <span>${tables.length}</span>
+      <span class="headingactions">
+        <button id="createTableBtn" title="Tạo bảng mới">＋</button>
+      </span>
+    </div>
     <div id="tree">
       ${tables.map((entry) => `
         <div class="treeitem ${entry.name === table ? 'selected' : ''}" data-table="${esc(entry.name)}">
@@ -669,6 +940,1005 @@ function renderSidebar() {
   `;
 }
 
+// ==========================================
+// SQLPRO ENHANCED CORE FEATURES (P0)
+// ==========================================
+
+function exportCurrentResult(format) {
+  const result = app.query?.result;
+  if (!result) {
+    toast('Không có kết quả truy vấn để xuất.', 'error');
+    return;
+  }
+  let target = null;
+  if (result.kind === 'rows') {
+    target = result;
+  } else if (result.kind === 'batch') {
+    const tabKey = app.query.resultTab;
+    const entry = (result.results || []).find((item) => item.index === Number(String(tabKey).replace('result-', '')));
+    if (entry && entry.result && entry.result.kind === 'rows') {
+      target = entry.result;
+    } else {
+      const first = (result.results || []).find((item) => item.ok && item.result?.kind === 'rows');
+      if (first) target = first.result;
+    }
+  }
+  if (!target || !target.rows || !target.rows.length) {
+    toast('Không tìm thấy dữ liệu dòng để xuất.', 'error');
+    return;
+  }
+  const cols = target.columns.map((c) => c.name);
+  if (format === 'csv') {
+    const escapeCsv = (val) => '"' + String(val ?? '').replace(/"/g, '""') + '"';
+    const csvContent = '\uFEFF' + [
+      cols.map(escapeCsv).join(','),
+      ...target.rows.map((row) => row.map(escapeCsv).join(','))
+    ].join('\r\n');
+    desktop.saveTextFile({
+      suggestedName: 'query-result.csv',
+      contents: csvContent,
+      filters: [{ name: 'CSV', extensions: ['csv'] }]
+    }).then((res) => {
+      if (!res.canceled) toast('Đã xuất ' + target.rows.length + ' dòng ra CSV');
+    }).catch((err) => toast(err.message, 'error'));
+  } else {
+    const jsonRows = target.rows.map((row) => {
+      const obj = {};
+      cols.forEach((col, idx) => { obj[col] = row[idx]; });
+      return obj;
+    });
+    desktop.saveTextFile({
+      suggestedName: 'query-result.json',
+      contents: JSON.stringify(jsonRows, null, 2),
+      filters: [{ name: 'JSON', extensions: ['json'] }]
+    }).then((res) => {
+      if (!res.canceled) toast('Đã xuất ' + target.rows.length + ' dòng ra JSON');
+    }).catch((err) => toast(err.message, 'error'));
+  }
+}
+
+function parseCsv(text) {
+  const content = String(text ?? '').replace(/^\uFEFF/, '');
+  if (!content.trim()) return { headers: [], rows: [] };
+  // Inspect the first logical record; separators inside quotes are data.
+  const counts = new Map([[',', 0], [';', 0], ['\t', 0]]);
+  let quoted = false;
+  for (let i = 0; i < content.length; i += 1) {
+    const char = content[i];
+    if (char === '"') {
+      if (quoted && content[i + 1] === '"') i += 1;
+      else quoted = !quoted;
+    } else if (!quoted) {
+      if (char === '\r' || char === '\n') {
+        if ([...counts.values()].some(Boolean) || content.slice(0, i).trim()) break;
+      } else if (counts.has(char)) counts.set(char, counts.get(char) + 1);
+    }
+  }
+  const delimiter = [...counts].sort((a, b) => b[1] - a[1])[0][0];
+
+  const rows = [];
+  let currentRow = [];
+  let currentCell = '';
+  let state = 'start';
+  let recordStarted = false;
+  const finishRecord = () => {
+    currentRow.push(currentCell);
+    if (recordStarted) rows.push(currentRow);
+    currentRow = [];
+    currentCell = '';
+    state = 'start';
+    recordStarted = false;
+  };
+
+  for (let i = 0; i < content.length; i += 1) {
+    const char = content[i];
+    const nextChar = content[i + 1];
+    if (state === 'quoted') {
+      if (char === '"' && nextChar === '"') {
+        currentCell += '"';
+        i += 1;
+      } else if (char === '"') state = 'afterQuote';
+      else currentCell += char;
+    } else if (char === delimiter) {
+      currentRow.push(currentCell);
+      currentCell = '';
+      state = 'start';
+      recordStarted = true;
+    } else if (char === '\r' || char === '\n') {
+      if (char === '\r' && nextChar === '\n') i += 1;
+      finishRecord();
+    } else if (char === '"' && state === 'start') {
+      state = 'quoted';
+      recordStarted = true;
+    } else if (state === 'afterQuote') {
+      if (char !== ' ' && char !== '\t') throw new Error('CSV không hợp lệ: ký tự sau dấu nháy đóng.');
+    } else {
+      if (char === '"') throw new Error('CSV không hợp lệ: dấu nháy trong ô chưa được escape.');
+      currentCell += char;
+      state = 'unquoted';
+      recordStarted = true;
+    }
+  }
+  if (state === 'quoted') throw new Error('CSV không hợp lệ: ô có dấu nháy chưa được đóng.');
+  if (recordStarted) finishRecord();
+  if (!rows.length) return { headers: [], rows: [] };
+  const headers = rows[0];
+  const dataRows = rows.slice(1);
+  const invalidRow = dataRows.findIndex((row) => row.length !== headers.length);
+  if (invalidRow !== -1) throw new Error(`CSV không hợp lệ: bản ghi ${invalidRow + 2} có số cột khác tiêu đề.`);
+  return { headers, rows: dataRows };
+}
+
+async function importCsvModal() {
+  if (!app.database || !table) {
+    toast('Hãy chọn một bảng trước khi nhập.', 'error');
+    return;
+  }
+  const database = app.database;
+  const targetTable = table;
+  const targetCols = app.columns.filter((c) => !/auto_increment|(?:virtual|stored) generated/i.test(c.extra));
+  try {
+    const file = await desktop.openTextFile({
+      title: 'Chọn tệp CSV / TSV để nhập',
+      filters: [{ name: 'CSV / TSV / Văn bản', extensions: ['csv', 'tsv', 'txt'] }]
+    });
+    if (file.canceled) return;
+    const parsed = parseCsv(file.contents);
+    if (!parsed.headers.length || !parsed.rows.length) {
+      toast('Tệp không có dữ liệu hợp lệ.', 'error');
+      return;
+    }
+    if (parsed.rows.length > 5000) {
+      throw new Error('Chỉ nhập tối đa 5000 bản ghi mỗi lần. Hãy chia tệp CSV thành các tệp nhỏ hơn.');
+    }
+    const previewRows = parsed.rows.slice(0, 5);
+
+    const mappingHtml = targetCols.map((col) => {
+      const matchedIdx = parsed.headers.findIndex(
+        (h) => h.toLowerCase().trim() === col.name.toLowerCase().trim()
+      );
+      const options = [
+        '<option value="-1">-- Bỏ qua cột này --</option>',
+        ...parsed.headers.map((h, i) => `<option value="${i}" ${i === matchedIdx ? 'selected' : ''}>${esc(h)}</option>`)
+      ].join('');
+      return `
+        <div class="csv-mapping-row">
+          <span><strong>${esc(col.name)}</strong> <small class="muted">${esc(col.type)}</small></span>
+          <span>→</span>
+          <select data-db-col="${esc(col.name)}">${options}</select>
+        </div>
+      `;
+    }).join('');
+
+    const previewHeader = `<tr>${parsed.headers.map((h) => `<th>${esc(h)}</th>`).join('')}</tr>`;
+    const previewBody = previewRows.map((r) => `
+      <tr>${parsed.headers.map((_, i) => `<td>${esc(r[i] ?? '')}</td>`).join('')}</tr>
+    `).join('');
+
+    modal(`
+      <div class="dialog wide extra-wide">
+        <h2>Nhập CSV vào ${esc(database)}.${esc(targetTable)}</h2>
+        <p>Phát hiện <strong>${parsed.rows.length}</strong> dòng dữ liệu • Ghép các cột tệp CSV với cột trong bảng MySQL:</p>
+        <label>Ánh xạ cột (Column Mapping)</label>
+        <div class="csv-mapping-grid">${mappingHtml}</div>
+        <label style="margin-top:14px">Xem trước 5 dòng đầu tiên từ tệp CSV</label>
+        <div class="csv-preview-table"><table><thead>${previewHeader}</thead><tbody>${previewBody}</tbody></table></div>
+        <div class="actions">
+          <button onclick="closeModal()">Hủy</button>
+          <button class="primary" id="doCsvImportBtn">Bắt đầu nhập (${parsed.rows.length} dòng)</button>
+        </div>
+      </div>
+    `, true);
+
+    const importButton = $('#doCsvImportBtn');
+    importButton.addEventListener('click', async () => {
+      const mappings = [];
+      document.querySelectorAll('.csv-mapping-row select').forEach((sel) => {
+        const fileIdx = Number(sel.value);
+        if (fileIdx >= 0) mappings.push({ dbCol: sel.dataset.dbCol, fileIdx });
+      });
+      if (!mappings.length) {
+        toast('Hãy chọn ít nhất 1 cột để nhập dữ liệu.', 'error');
+        return;
+      }
+      if (importButton.disabled) return;
+      importButton.disabled = true;
+      importButton.textContent = 'Đang nhập…';
+      try {
+        const rowsToImport = parsed.rows.map((r) => {
+          const rowObj = {};
+          mappings.forEach((m) => {
+            const raw = r[m.fileIdx];
+            rowObj[m.dbCol] = raw;
+          });
+          return rowObj;
+        });
+        const res = await call(desktop.db.importRows({ database, table: targetTable, rows: rowsToImport }));
+        closeModal();
+        toast(`Đã nhập thành công ${res.inserted} bản ghi!`);
+        await loadData();
+      } catch (err) {
+        toast(err.message, 'error');
+        importButton.disabled = false;
+        importButton.textContent = 'Bắt đầu nhập';
+      }
+    });
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+function createDatabaseModal() {
+  if (!app.connection) {
+    toast('Chưa kết nối tới máy chủ.', 'error');
+    return;
+  }
+  modal(`
+    <h2>Tạo Database mới</h2>
+    <p>Máy chủ: ${esc(app.connection.name)} (${esc(app.connection.host)})</p>
+    <label>Tên database</label>
+    <input id="newDbName" placeholder="ví dụ: my_project_db" autofocus autocomplete="off">
+    <div class="formrow" style="margin-top:10px">
+      <div>
+        <label>Bảng mã (Charset)</label>
+        <select id="newDbCharset">
+          <option value="utf8mb4" selected>utf8mb4 (Khuyên dùng)</option>
+          <option value="utf8">utf8</option>
+          <option value="latin1">latin1</option>
+        </select>
+      </div>
+      <div>
+        <label>Sắp xếp (Collation)</label>
+        <select id="newDbCollate">
+          <option value="utf8mb4_unicode_ci" selected>utf8mb4_unicode_ci</option>
+          <option value="utf8mb4_general_ci">utf8mb4_general_ci</option>
+          <option value="utf8mb4_0900_ai_ci">utf8mb4_0900_ai_ci</option>
+        </select>
+      </div>
+    </div>
+    <div class="actions">
+      <button onclick="closeModal()">Hủy</button>
+      <button class="primary" id="btnSubmitCreateDb">Tạo Database</button>
+    </div>
+  `);
+
+  $('#btnSubmitCreateDb').addEventListener('click', async () => {
+    const dbName = ($('#newDbName').value || '').trim();
+    if (!dbName) {
+      toast('Tên database không được để trống.', 'error');
+      return;
+    }
+    const charset = $('#newDbCharset').value;
+    const collate = $('#newDbCollate').value;
+    $('#btnSubmitCreateDb').disabled = true;
+    $('#btnSubmitCreateDb').textContent = 'Đang tạo…';
+    try {
+      const sql = 'CREATE DATABASE `' + dbName.replace(/`/g, '``') + '` DEFAULT CHARACTER SET ' + charset + ' COLLATE ' + collate + ';';
+      await call(desktop.db.query({ sql, timeoutMs: 15000, confirmed: true }));
+      closeModal();
+      toast('Đã tạo database ' + dbName + ' thành công!');
+      await refreshDatabases();
+      await selectDatabase(dbName);
+    } catch (err) {
+      toast(err.message, 'error');
+      $('#btnSubmitCreateDb').disabled = false;
+      $('#btnSubmitCreateDb').textContent = 'Tạo Database';
+    }
+  });
+}
+
+async function dropDatabaseAction(dbName) {
+  const targetDb = dbName || app.database;
+  if (!targetDb) return;
+  const confirmed = await confirmAction(
+    'XÓA VĨNH VIỄN database "' + targetDb + '"?',
+    'CẢNH BÁO: Toàn bộ bảng, dữ liệu và view trong database "' + targetDb + '" sẽ bị xóa hoàn toàn và không thể hoàn tác!',
+    'Xóa Database'
+  );
+  if (!confirmed) return;
+  try {
+    const sql = 'DROP DATABASE `' + targetDb.replace(/`/g, '``') + '`;';
+    await call(desktop.db.query({ sql, timeoutMs: 15000, confirmed: true }));
+    toast('Đã xóa database ' + targetDb + '.');
+    if (app.database === targetDb) {
+      app.database = null;
+      table = null;
+      app.tables = [];
+    }
+    await refreshDatabases();
+    renderSidebar();
+    renderDatabasePicker();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+function createTableModal() {
+  if (!app.database) {
+    toast('Hãy chọn một database trước.', 'error');
+    return;
+  }
+  let columnRows = [
+    { name: 'id', type: 'INT', length: '', nullable: false, pk: true, ai: true, def: '' },
+    { name: 'name', type: 'VARCHAR', length: '255', nullable: false, pk: false, ai: false, def: '' },
+    { name: 'created_at', type: 'DATETIME', length: '', nullable: true, pk: false, ai: false, def: 'CURRENT_TIMESTAMP' }
+  ];
+
+  function renderRowsHtml() {
+    return columnRows.map((col, idx) => `
+      <tr data-col-idx="${idx}">
+        <td><input class="col-name" value="${esc(col.name)}" placeholder="tên_cột" style="width:100%"></td>
+        <td>
+          <select class="col-type" style="width:100%">
+            <option ${col.type === 'INT' ? 'selected' : ''}>INT</option>
+            <option ${col.type === 'BIGINT' ? 'selected' : ''}>BIGINT</option>
+            <option ${col.type === 'VARCHAR' ? 'selected' : ''}>VARCHAR</option>
+            <option ${col.type === 'TEXT' ? 'selected' : ''}>TEXT</option>
+            <option ${col.type === 'LONGTEXT' ? 'selected' : ''}>LONGTEXT</option>
+            <option ${col.type === 'TINYINT' ? 'selected' : ''}>TINYINT</option>
+            <option ${col.type === 'DECIMAL' ? 'selected' : ''}>DECIMAL</option>
+            <option ${col.type === 'DATETIME' ? 'selected' : ''}>DATETIME</option>
+            <option ${col.type === 'DATE' ? 'selected' : ''}>DATE</option>
+            <option ${col.type === 'TIMESTAMP' ? 'selected' : ''}>TIMESTAMP</option>
+            <option ${col.type === 'JSON' ? 'selected' : ''}>JSON</option>
+          </select>
+        </td>
+        <td><input class="col-len" value="${esc(col.length)}" placeholder="ví dụ: 255" style="width:70px"></td>
+        <td style="text-align:center"><input type="checkbox" class="col-pk" ${col.pk ? 'checked' : ''}></td>
+        <td style="text-align:center"><input type="checkbox" class="col-ai" ${col.ai ? 'checked' : ''}></td>
+        <td style="text-align:center"><input type="checkbox" class="col-null" ${col.nullable ? 'checked' : ''}></td>
+        <td><input class="col-def" value="${esc(col.def)}" placeholder="Mặc định" style="width:100%"></td>
+        <td><button type="button" class="danger del-col-btn" data-del="${idx}" style="padding:4px 8px">✕</button></td>
+      </tr>
+    `).join('');
+  }
+
+  function showDesignerModal() {
+    modal(`
+      <div class="dialog wide extra-wide">
+        <h2>Thiết kế Bảng mới (Table Designer)</h2>
+        <p>Database: <strong>${esc(app.database)}</strong></p>
+        <label>Tên bảng</label>
+        <input id="newTableName" placeholder="ví dụ: users, products, orders…" autofocus style="width:320px">
+        <table class="designer-table">
+          <thead>
+            <tr>
+              <th>Tên cột</th>
+              <th>Kiểu dữ liệu</th>
+              <th>Độ dài</th>
+              <th title="Khóa chính">PK</th>
+              <th title="Tự động tăng">A_I</th>
+              <th title="Cho phép NULL">Null</th>
+              <th>Mặc định</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="designerTableBody">${renderRowsHtml()}</tbody>
+        </table>
+        <div class="designer-actions">
+          <button type="button" id="btnAddColRow">＋ Thêm cột</button>
+          <span class="muted">Storage engine: InnoDB • Charset: utf8mb4</span>
+        </div>
+        <div class="actions">
+          <button onclick="closeModal()">Hủy</button>
+          <button class="primary" id="btnSaveNewTable">Tạo bảng</button>
+        </div>
+      </div>
+    `, true);
+
+    $('#btnAddColRow').addEventListener('click', () => {
+      readCurrentForm();
+      columnRows.push({ name: '', type: 'VARCHAR', length: '255', nullable: true, pk: false, ai: false, def: '' });
+      $('#designerTableBody').innerHTML = renderRowsHtml();
+      bindRowEvents();
+    });
+
+    bindRowEvents();
+
+    $('#btnSaveNewTable').addEventListener('click', async () => {
+      readCurrentForm();
+      const tableName = ($('#newTableName').value || '').trim();
+      if (!tableName) {
+        toast('Tên bảng không được để trống.', 'error');
+        return;
+      }
+      if (!columnRows.length || !columnRows.some((c) => c.name)) {
+        toast('Bảng phải có ít nhất 1 cột.', 'error');
+        return;
+      }
+      const colDefs = [];
+      const pkCols = [];
+      for (const col of columnRows) {
+        if (!col.name) continue;
+        let typeStr = col.type;
+        if (col.length) typeStr += '(' + col.length + ')';
+        else if (col.type === 'DECIMAL') typeStr += '(10,2)';
+        let defPart = '`' + col.name.replace(/`/g, '``') + '` ' + typeStr;
+        if (!col.nullable) defPart += ' NOT NULL';
+        if (col.ai) defPart += ' AUTO_INCREMENT';
+        if (col.def) {
+          defPart += col.def.toUpperCase() === 'CURRENT_TIMESTAMP' ? ' DEFAULT CURRENT_TIMESTAMP' : " DEFAULT '" + col.def.replace(/'/g, "''") + "'";
+        }
+        colDefs.push(defPart);
+        if (col.pk) pkCols.push('`' + col.name.replace(/`/g, '``') + '`');
+      }
+      if (pkCols.length) {
+        colDefs.push('PRIMARY KEY (' + pkCols.join(', ') + ')');
+      }
+    const ddl = `CREATE TABLE ${quoteId(app.database)}.${quoteId(tableName)} (\n  ${colDefs.join(',\n  ')}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`;
+      $('#btnSaveNewTable').disabled = true;
+      $('#btnSaveNewTable').textContent = 'Đang tạo…';
+      try {
+        await call(desktop.db.query({ sql: ddl, timeoutMs: 20000, confirmed: true }));
+        closeModal();
+        toast('Đã tạo bảng ' + tableName + ' thành công!');
+        await selectDatabase(app.database);
+        await selectTable(tableName);
+      } catch (err) {
+        toast(err.message, 'error');
+        $('#btnSaveNewTable').disabled = false;
+        $('#btnSaveNewTable').textContent = 'Tạo bảng';
+      }
+    });
+  }
+
+  function readCurrentForm() {
+    const rows = document.querySelectorAll('#designerTableBody tr');
+    columnRows = [];
+    rows.forEach((r) => {
+      columnRows.push({
+        name: (r.querySelector('.col-name')?.value || '').trim(),
+        type: r.querySelector('.col-type')?.value || 'VARCHAR',
+        length: (r.querySelector('.col-len')?.value || '').trim(),
+        pk: Boolean(r.querySelector('.col-pk')?.checked),
+        ai: Boolean(r.querySelector('.col-ai')?.checked),
+        nullable: Boolean(r.querySelector('.col-null')?.checked),
+        def: (r.querySelector('.col-def')?.value || '').trim()
+      });
+    });
+  }
+
+  function bindRowEvents() {
+    document.querySelectorAll('.del-col-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        readCurrentForm();
+        const idx = Number(btn.dataset.del);
+        columnRows.splice(idx, 1);
+        $('#designerTableBody').innerHTML = renderRowsHtml();
+        bindRowEvents();
+      });
+    });
+  }
+
+  showDesignerModal();
+}
+
+async function truncateTableAction(tableName) {
+  const targetTable = tableName || table;
+  if (!app.database || !targetTable) return;
+  const confirmed = await confirmAction(
+    'XÓA SẠCH DỮ LIỆU trong bảng "' + targetTable + '"?',
+    'Lệnh TRUNCATE TABLE sẽ xóa tất cả bản ghi và reset bộ đếm auto-increment của bảng "' + targetTable + '".',
+    'Xóa sạch dữ liệu'
+  );
+  if (!confirmed) return;
+  try {
+    const sql = `TRUNCATE TABLE ${quoteId(app.database)}.${quoteId(targetTable)};`;
+    await call(desktop.db.query({ sql, timeoutMs: 15000, confirmed: true }));
+    toast('Đã xóa sạch dữ liệu bảng ' + targetTable + '.');
+    if (table === targetTable) await loadData();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function dropTableAction(tableName) {
+  const targetTable = tableName || table;
+  if (!app.database || !targetTable) return;
+  const confirmed = await confirmAction(
+    'XÓA BẢNG "' + targetTable + '"?',
+    'Bảng "' + targetTable + '" và toàn bộ dữ liệu bên trong sẽ bị xóa vĩnh viễn khỏi database ' + app.database + '.',
+    'Xóa Bảng'
+  );
+  if (!confirmed) return;
+  try {
+    const sql = `DROP TABLE ${quoteId(app.database)}.${quoteId(targetTable)};`;
+    await call(desktop.db.query({ sql, timeoutMs: 15000, confirmed: true }));
+    toast('Đã xóa bảng ' + targetTable + '.');
+    if (table === targetTable) table = null;
+    await selectDatabase(app.database);
+    if (!table) renderEmptyTable();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+
+async function showProcesslistModal() {
+  if (!desktop || !app.connection) {
+    toast('Chưa kết nối CSDL.', 'error');
+    return;
+  }
+
+  modal(`
+    <div class="modal-card processlist-card">
+      <div class="modal-header">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <h3>🖥️ Quản Lý Tiến Trình (Processlist)</h3>
+          <button class="primary" id="refreshProcesslistBtn" style="padding:3px 10px; font-size:0.85em;">↻ Làm mới</button>
+        </div>
+        <button class="close-btn" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body" style="padding:12px 16px;">
+        <div style="margin-bottom:10px; display:flex; gap:10px;">
+          <input type="search" id="processlistFilter" placeholder="🔍 Lọc theo user, db, câu lệnh..." style="flex:1; padding:6px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;">
+          <span id="processlistCount" style="align-self:center; color:#9ca3af; font-size:0.9em;">Đang tải...</span>
+        </div>
+        <div id="processlistContainer" style="max-height: 480px; overflow: auto; border:1px solid rgba(255,255,255,0.08); border-radius:4px;">
+          <div style="padding:20px; text-align:center; color:#9ca3af;">Đang truy vấn SHOW FULL PROCESSLIST...</div>
+        </div>
+      </div>
+      <div class="modal-footer" style="text-align: right; margin-top: 12px;">
+        <button class="primary" onclick="closeModal()">Đóng (Esc)</button>
+      </div>
+    </div>
+  `);
+
+  async function loadProcesslist() {
+    const container = $('#processlistContainer');
+    const countEl = $('#processlistCount');
+    if (!container) return;
+    try {
+      const res = await call(desktop.db.query({ sql: 'SHOW FULL PROCESSLIST' }));
+      if (container !== $('#processlistContainer')) return;
+      const rows = res.rows || [];
+      const filterVal = ($('#processlistFilter')?.value || '').toLowerCase().trim();
+
+      const filtered = rows.filter((r) => {
+        if (!filterVal) return true;
+        const user = String(r[1] || '').toLowerCase();
+        const db = String(r[3] || '').toLowerCase();
+        const info = String(r[7] || '').toLowerCase();
+        return user.includes(filterVal) || db.includes(filterVal) || info.includes(filterVal);
+      });
+
+      if (countEl) countEl.textContent = `${filtered.length} / ${rows.length} tiến trình`;
+
+      if (!filtered.length) {
+        container.innerHTML = '<div style="padding:20px; text-align:center; color:#9ca3af;">Không có tiến trình nào phù hợp.</div>';
+        return;
+      }
+
+      container.innerHTML = `
+        <table class="processlist-table">
+          <thead>
+            <tr>
+              <th style="width:60px;">ID</th>
+              <th style="width:100px;">User</th>
+              <th style="width:120px;">Host</th>
+              <th style="width:100px;">DB</th>
+              <th style="width:90px;">Command</th>
+              <th style="width:80px;">Thời gian</th>
+              <th style="width:100px;">State</th>
+              <th>Câu lệnh SQL</th>
+              <th style="width:70px; text-align:center;">Hành động</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filtered.map((r) => {
+              const id = r[0];
+              const user = r[1] || '';
+              const host = r[2] || '';
+              const dbName = r[3] || '';
+              const command = r[4] || '';
+              const timeSec = Number(r[5] || 0);
+              const state = r[6] || '';
+              const info = r[7] || '';
+              const isSlow = timeSec > 5 && command === 'Query';
+
+              return `
+                <tr class="${isSlow ? 'slow-process-row' : ''}">
+                  <td><strong>${esc(String(id))}</strong></td>
+                  <td>${esc(user)}</td>
+                  <td title="${esc(host)}">${esc(host.length > 18 ? host.slice(0, 18) + '…' : host)}</td>
+                  <td>${esc(dbName || '—')}</td>
+                  <td><span class="command-badge ${command === 'Query' ? 'active' : ''}">${esc(command)}</span></td>
+                  <td>${timeSec}s ${isSlow ? '⚠️' : ''}</td>
+                  <td><small>${esc(state || '—')}</small></td>
+                  <td title="${esc(info)}"><code class="process-sql">${esc(info ? (info.length > 90 ? info.slice(0, 90) + '…' : info) : '—')}</code></td>
+                  <td style="text-align:center;">
+                    <button class="danger kill-btn" data-kill-id="${id}" style="padding:2px 8px; font-size:0.75em;" title="Hủy tiến trình #${id}">🛑 Kill</button>
+                  </td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      `;
+
+      container.querySelectorAll('.kill-btn').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const killId = btn.dataset.killId;
+          if (!/^\d+$/.test(killId)) return;
+          const confirmed = await confirmAction(`Hủy tiến trình #${killId}?`, 'Kết nối hoặc truy vấn của tiến trình này sẽ bị dừng.', 'Hủy tiến trình');
+          if (!confirmed) return;
+          try {
+            await call(desktop.db.query({ sql: `KILL ${killId}`, confirmed: true }));
+            toast(`Đã hủy tiến trình #${killId}`, 'success');
+            await showProcesslistModal();
+          } catch (err) {
+            toast(err.message || 'Lỗi khi hủy tiến trình', 'error');
+          }
+        });
+      });
+    } catch (err) {
+      container.innerHTML = `<div style="padding:20px; color:#f87171;">Lỗi: ${esc(err.message)}</div>`;
+    }
+  }
+
+  loadProcesslist();
+  $('#refreshProcesslistBtn')?.addEventListener('click', loadProcesslist);
+  $('#processlistFilter')?.addEventListener('input', debounce(loadProcesslist, 300));
+}
+
+async function showServerVarsModal(defaultTab = 'variables') {
+  if (!desktop || !app.connection) {
+    toast('Chưa kết nối CSDL.', 'error');
+    return;
+  }
+
+  modal(`
+    <div class="modal-card vars-modal-card">
+      <div class="modal-header">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <h3 id="varsModalTitle">⚙️ Cấu Hình Máy Chủ MySQL</h3>
+          <div class="vars-tabs">
+            <button class="vars-tab-btn ${defaultTab === 'variables' ? 'active' : ''}" id="tabVarsBtn">Biến hệ thống (VARIABLES)</button>
+            <button class="vars-tab-btn ${defaultTab === 'status' ? 'active' : ''}" id="tabStatusBtn">Trạng thái máy chủ (STATUS)</button>
+          </div>
+        </div>
+        <button class="close-btn" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body" style="padding:12px 16px;">
+        <div style="margin-bottom:10px; display:flex; gap:10px;">
+          <input type="search" id="varsFilterInput" placeholder="🔍 Tìm biến (vd: max_connections, buffer, version...)" style="flex:1; padding:6px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;">
+          <span id="varsItemCount" style="align-self:center; color:#9ca3af; font-size:0.9em;">Đang nạp...</span>
+        </div>
+        <div id="varsTableContainer" style="max-height: 480px; overflow: auto; border:1px solid rgba(255,255,255,0.08); border-radius:4px;">
+          <div style="padding:20px; text-align:center; color:#9ca3af;">Đang tải dữ liệu cấu hình...</div>
+        </div>
+      </div>
+      <div class="modal-footer" style="text-align: right; margin-top: 12px;">
+        <button class="primary" onclick="closeModal()">Đóng (Esc)</button>
+      </div>
+    </div>
+  `);
+
+  let currentMode = defaultTab;
+  let cachedData = { variables: null, status: null };
+
+  async function loadData() {
+    const container = $('#varsTableContainer');
+    const countEl = $('#varsItemCount');
+    if (!container) return;
+
+    try {
+      if (!cachedData[currentMode]) {
+        const querySql = currentMode === 'variables' ? 'SHOW VARIABLES' : 'SHOW STATUS';
+        const modeToLoad = currentMode;
+        const res = await call(desktop.db.query({ sql: querySql }));
+        cachedData[modeToLoad] = res.rows || [];
+        if (currentMode !== modeToLoad || container !== $('#varsTableContainer')) return;
+      }
+
+      const rows = cachedData[currentMode];
+      const filterVal = ($('#varsFilterInput')?.value || '').toLowerCase().trim();
+
+      const filtered = rows.filter((r) => {
+        if (!filterVal) return true;
+        const name = String(r[0] || '').toLowerCase();
+        const val = String(r[1] || '').toLowerCase();
+        return name.includes(filterVal) || val.includes(filterVal);
+      });
+
+      if (countEl) countEl.textContent = `${filtered.length} / ${rows.length} mục`;
+
+      container.innerHTML = `
+        <table class="vars-table">
+          <thead>
+            <tr>
+              <th style="width:340px;">Tên biến / Chỉ số</th>
+              <th>Giá trị hiện tại</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filtered.map((r) => `
+              <tr>
+                <td><code>${esc(String(r[0]))}</code></td>
+                <td><span class="var-value">${esc(String(r[1]))}</span></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    } catch (err) {
+      container.innerHTML = `<div style="padding:20px; color:#f87171;">Lỗi: ${esc(err.message)}</div>`;
+    }
+  }
+
+  loadData();
+
+  $('#tabVarsBtn')?.addEventListener('click', () => {
+    currentMode = 'variables';
+    $('#tabVarsBtn').classList.add('active');
+    $('#tabStatusBtn').classList.remove('active');
+    loadData();
+  });
+
+  $('#tabStatusBtn')?.addEventListener('click', () => {
+    currentMode = 'status';
+    $('#tabStatusBtn').classList.add('active');
+    $('#tabVarsBtn').classList.remove('active');
+    loadData();
+  });
+
+  $('#varsFilterInput')?.addEventListener('input', debounce(loadData, 250));
+}
+
+async function runTableMaintenance(tableName, operation) {
+  if (!desktop || !app.connection || !app.database) {
+    toast('Chưa chọn CSDL.', 'error');
+    return;
+  }
+  const opName = operation.toUpperCase();
+  setStatus(`Đang thực thi ${opName} TABLE...`);
+  try {
+    if (!['OPTIMIZE', 'CHECK', 'ANALYZE', 'REPAIR'].includes(opName)) throw new Error('Thao tác bảo trì không hợp lệ.');
+    const res = await call(desktop.db.query({ sql: `${opName} TABLE ${quoteId(app.database)}.${quoteId(tableName)}`, confirmed: true }));
+    const rows = res.rows || [];
+
+    modal(`
+      <div class="modal-card" style="max-width:620px;">
+        <div class="modal-header">
+          <h3>🛠️ Kết Quả Bảo Trì: ${esc(opName)} TABLE</h3>
+          <button class="close-btn" onclick="closeModal()">✕</button>
+        </div>
+        <div class="modal-body" style="padding:16px;">
+          <p style="margin-bottom:12px; color:#9ca3af;">Đã thực thi trên bảng <strong>${esc(app.database)}.${esc(tableName)}</strong>:</p>
+          <table class="shortcuts-table">
+            <thead>
+              <tr>
+                <th>Bảng</th>
+                <th>Thao tác</th>
+                <th>Trạng thái</th>
+                <th>Thông báo</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map((r) => `
+                <tr>
+                  <td>${esc(String(r[0] || ''))}</td>
+                  <td>${esc(String(r[1] || ''))}</td>
+                  <td><span class="explain-badge ${String(r[2]).toLowerCase() === 'status' ? 'good' : 'warn'}">${esc(String(r[2] || ''))}</span></td>
+                  <td>${esc(String(r[3] || ''))}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+        <div class="modal-footer" style="text-align: right; margin-top: 16px;">
+          <button class="primary" onclick="closeModal()">Đóng</button>
+        </div>
+      </div>
+    `);
+    toast(`Hoàn tất ${opName} bảng ${tableName}`, 'success');
+    setStatus('Sẵn sàng');
+  } catch (err) {
+    toast(err.message || `Lỗi khi ${opName} TABLE`, 'error');
+    setStatus('Lỗi');
+  }
+}
+
+function setupContextMenu() {
+  const menu = $('#contextMenu');
+  if (!menu) return;
+
+  function closeMenu() {
+    menu.classList.add('hidden');
+    menu.innerHTML = '';
+  }
+
+  document.addEventListener('click', (e) => {
+    if (!menu.contains(e.target)) closeMenu();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeMenu();
+  });
+
+  document.addEventListener('contextmenu', (event) => {
+    const gridTd = event.target.closest('#grid table tbody td');
+    if (gridTd) {
+      const row = gridTd.closest('tr[data-row]');
+      if (!row) return;
+      event.preventDefault();
+      const rowIdx = Number(row.dataset.row);
+      const colName = gridTd.dataset.col;
+      const rowData = app.rows[rowIdx];
+      if (!rowData) return;
+
+      const cellVal = colName ? rowData[colName] : '';
+      const editable = app.primaryKey && app.primaryKey.length > 0;
+
+      menu.innerHTML = `
+        ${colName ? `<div class="context-menu-item" data-action="copy-cell"><span class="c-icon">📋</span> Sao chép ô (${esc(colName)})</div>` : ''}
+        <div class="context-menu-item" data-action="copy-row-json"><span class="c-icon">📑</span> Sao chép dòng dạng JSON</div>
+        <div class="context-menu-item" data-action="copy-row-insert"><span class="c-icon">📥</span> Sao chép dòng dạng INSERT SQL</div>
+        ${(colName && editable) ? `<div class="context-menu-item" data-action="set-cell-null"><span class="c-icon">⊘</span> Đặt ô thành NULL</div>` : ''}
+        <div class="context-menu-divider"></div>
+        ${editable ? `<div class="context-menu-item" data-action="edit-row"><span class="c-icon">✏️</span> Sửa dòng (Modal)...</div>` : ''}
+        ${editable ? `<div class="context-menu-item text-danger" data-action="delete-row"><span class="c-icon">🗑️</span> Xóa dòng này</div>` : ''}
+      `;
+      positionMenu(event.clientX, event.clientY);
+
+      menu.querySelectorAll('.context-menu-item').forEach((item) => {
+        item.addEventListener('click', async () => {
+          const action = item.dataset.action;
+          closeMenu();
+          if (action === 'copy-cell') {
+            await navigator.clipboard.writeText(cellVal === null || cellVal === undefined ? '' : String(cellVal));
+            toast('Đã sao chép giá trị ô', 'success');
+          } else if (action === 'copy-row-json') {
+            await navigator.clipboard.writeText(JSON.stringify(rowData, null, 2));
+            toast('Đã sao chép dòng dạng JSON', 'success');
+          } else if (action === 'copy-row-insert') {
+            const cols = Object.keys(rowData).map(quoteId).join(', ');
+            const vals = Object.values(rowData).map((v) => {
+              if (v === null || v === undefined) return 'NULL';
+              if (typeof v === 'number') return v;
+              return quoteSqlString(v);
+            }).join(', ');
+            const insertSql = `INSERT INTO ${quoteId(table)} (${cols}) VALUES (${vals});`;
+            await navigator.clipboard.writeText(insertSql);
+            toast('Đã sao chép câu lệnh INSERT', 'success');
+          } else if (action === 'set-cell-null') {
+            const keys = {};
+            for (const pk of app.primaryKey) keys[pk] = rowData[pk];
+            try {
+              await call(desktop.db.updateRow({
+                database: app.database,
+                table,
+                keys,
+                values: { [colName]: null }
+              }));
+              rowData[colName] = null;
+              gridTd.className = 'nullcell cell-flash-saved';
+              gridTd.innerHTML = '<span class="null-badge">NULL</span>';
+              setTimeout(() => gridTd.classList.remove('cell-flash-saved'), 1500);
+              toast(`Đã đặt "${colName}" thành NULL`, 'success');
+            } catch (err) {
+              toast(err.message, 'error');
+            }
+          } else if (action === 'edit-row') {
+            editRow(rowIdx);
+          } else if (action === 'delete-row') {
+            const keys = {};
+            for (const pk of app.primaryKey) keys[pk] = rowData[pk];
+            const database = app.database;
+            const targetTable = table;
+            const confirmed = await confirmAction('Xóa dòng này?', 'Bản ghi sẽ bị xóa khỏi database.', 'Xóa');
+            if (!confirmed) return;
+            try {
+              await call(desktop.db.deleteRows({ database, table: targetTable, keysList: [keys] }));
+              toast('Đã xóa dòng thành công', 'success');
+              await loadData({ keepScroll: true });
+            } catch (err) {
+              toast(err.message, 'error');
+            }
+          }
+        });
+      });
+      return;
+    }
+  });
+
+  const sidebar = $('.sidebar');
+  if (!sidebar) return;
+
+  sidebar.addEventListener('contextmenu', (event) => {
+    const tableItem = event.target.closest('.treeitem[data-table]');
+    const dbItem = event.target.closest('.database.dbitem[data-db]');
+    const dbsHeading = event.target.closest('.sideheading');
+
+    if (tableItem) {
+      event.preventDefault();
+      const tableName = tableItem.dataset.table;
+      menu.innerHTML = `
+        <div class="context-menu-item" data-action="open-table"><span class="c-icon">▦</span> Mở bảng (Dữ liệu)</div>
+        <div class="context-menu-item" data-action="structure-table"><span class="c-icon">⌑</span> Xem cấu trúc bảng</div>
+        <div class="context-menu-item" data-action="query-table"><span class="c-icon">⌘</span> Mở trong SQL Editor</div>
+        <div class="context-menu-item" data-action="copy-name"><span class="c-icon">📋</span> Sao chép tên bảng</div>
+        <div class="context-menu-sep"></div>
+        <div class="context-menu-item danger" data-action="truncate-table"><span class="c-icon">⌫</span> Xóa sạch dữ liệu (Truncate)</div>
+        <div class="context-menu-item danger" data-action="drop-table"><span class="c-icon">🗑</span> Xóa bảng (Drop Table)</div>
+        <div class="context-menu-divider"></div>
+        <div class="context-menu-item" data-action="optimize-table"><span class="c-icon">⚡</span> Tối ưu hóa bảng (OPTIMIZE)</div>
+        <div class="context-menu-item" data-action="check-table"><span class="c-icon">🔍</span> Kiểm tra toàn vẹn (CHECK)</div>
+        <div class="context-menu-item" data-action="analyze-table"><span class="c-icon">📊</span> Phân tích chỉ mục (ANALYZE)</div>
+        <div class="context-menu-item" data-action="repair-table"><span class="c-icon">🔧</span> Sửa chữa bảng (REPAIR)</div>
+      `;
+      positionMenu(event.clientX, event.clientY);
+      menu.querySelectorAll('.context-menu-item').forEach((item) => {
+        item.addEventListener('click', () => {
+          closeMenu();
+          const act = item.dataset.action;
+          if (act === 'open-table') selectTable(tableName, { mode: 'data' });
+          else if (act === 'structure-table') selectTable(tableName, { mode: 'structure' });
+          else if (act === 'query-table') newQuery(`SELECT * FROM ${quoteId(app.database)}.${quoteId(tableName)} LIMIT 100;`);
+          else if (act === 'copy-name') { navigator.clipboard.writeText(tableName); toast('Đã sao chép: ' + tableName); }
+          else if (act === 'truncate-table') truncateTableAction(tableName);
+          else if (act === 'drop-table') dropTableAction(tableName);
+          else if (act === 'optimize-table') runTableMaintenance(tableName, 'OPTIMIZE');
+          else if (act === 'check-table') runTableMaintenance(tableName, 'CHECK');
+          else if (act === 'analyze-table') runTableMaintenance(tableName, 'ANALYZE');
+          else if (act === 'repair-table') runTableMaintenance(tableName, 'REPAIR');
+        });
+      });
+      return;
+    }
+
+    if (dbItem) {
+      event.preventDefault();
+      const dbName = dbItem.dataset.db;
+      menu.innerHTML = `
+        <div class="context-menu-item" data-action="select-db"><span class="c-icon">▱</span> Chọn database này</div>
+        <div class="context-menu-item" data-action="create-table"><span class="c-icon">＋</span> Tạo bảng mới</div>
+        <div class="context-menu-item" data-action="backup-db"><span class="c-icon">⇩</span> Sao lưu database…</div>
+        <div class="context-menu-item" data-action="restore-db"><span class="c-icon">⇧</span> Phục hồi database…</div>
+        <div class="context-menu-sep"></div>
+        <div class="context-menu-item danger" data-action="drop-db"><span class="c-icon">🗑</span> Xóa database (Drop)</div>
+      `;
+      positionMenu(event.clientX, event.clientY);
+      menu.querySelectorAll('.context-menu-item').forEach((item) => {
+        item.addEventListener('click', () => {
+          closeMenu();
+          const act = item.dataset.action;
+          if (act === 'select-db') selectDatabase(dbName);
+          else if (act === 'create-table') { selectDatabase(dbName).then(() => createTableModal()); }
+          else if (act === 'backup-db') selectDatabase(dbName).then(() => { if (app.database === dbName) backupDatabase(); });
+          else if (act === 'restore-db') selectDatabase(dbName).then(() => { if (app.database === dbName) restoreDatabase(); });
+          else if (act === 'drop-db') dropDatabaseAction(dbName);
+        });
+      });
+      return;
+    }
+
+    if (dbsHeading && dbsHeading.textContent.includes('DATABASES')) {
+      event.preventDefault();
+      menu.innerHTML = `
+        <div class="context-menu-item" data-action="create-db"><span class="c-icon">＋</span> Tạo Database mới…</div>
+        <div class="context-menu-item" data-action="refresh-dbs"><span class="c-icon">↻</span> Làm mới danh sách</div>
+      `;
+      positionMenu(event.clientX, event.clientY);
+      menu.querySelectorAll('.context-menu-item').forEach((item) => {
+        item.addEventListener('click', () => {
+          closeMenu();
+          if (item.dataset.action === 'create-db') createDatabaseModal();
+          else refreshDatabases();
+        });
+      });
+    }
+  });
+
+  function positionMenu(x, y) {
+    menu.classList.remove('hidden');
+    const maxX = window.innerWidth - menu.offsetWidth - 10;
+    const maxY = window.innerHeight - menu.offsetHeight - 10;
+    menu.style.left = Math.min(x, maxX) + 'px';
+    menu.style.top = Math.min(y, maxY) + 'px';
+  }
+}
+
+
 function onConnectionClick(event) {
   const menuButton = event.target.closest('[data-menu]');
   if (menuButton) {
@@ -681,6 +1951,14 @@ function onConnectionClick(event) {
 }
 
 function onTreeClick(event) {
+  if (event.target.closest('#createDbBtn')) {
+    createDatabaseModal();
+    return;
+  }
+  if (event.target.closest('#createTableBtn')) {
+    createTableModal();
+    return;
+  }
   if (event.target.closest('[data-backup-db]')) {
     backupDatabase();
     return;
@@ -820,31 +2098,39 @@ async function selectTable(name, options = {}) {
   table = name;
   app.page = 1;
   app.search = '';
+  app.orderBy = null;
+  app.orderDir = 'ASC';
   renderSidebar();
   const nextMode = options.mode && options.mode !== 'history' ? options.mode : 'data';
-  if (nextMode === 'data') {
-    await loadData();
-  } else {
-    await view(nextMode);
-  }
+  await view(nextMode);
   persistState();
 }
 
-async function loadData() {
+async function loadData({ keepScroll = false } = {}) {
   if (!app.connection || !app.database || !table) {
     renderEmptyTable();
     return;
   }
-  workspaceLoading();
+  const requestId = ++dataRequestId;
+  const database = app.database;
+  const targetTable = table;
+  const connectionId = app.connection.id;
+  const box = keepScroll ? $('#grid .tablebox') : null;
+  const scroll = box ? { left: box.scrollLeft, top: box.scrollTop } : null;
+  if (box) box.classList.add('loading-soft');
+  else workspaceLoading();
   updateChrome();
   try {
     const data = await call(desktop.db.tableData({
-      database: app.database,
-      table,
+      database,
+      table: targetTable,
       page: app.page,
       pageSize: app.pageSize,
-      search: app.search
+      search: app.search,
+      orderBy: app.orderBy,
+      orderDir: app.orderDir
     }));
+    if (requestId !== dataRequestId || database !== app.database || targetTable !== table || connectionId !== app.connection?.id || mode !== 'data') return;
     app.columns = data.columns;
     app.primaryKey = data.primaryKey;
     app.rows = data.rows;
@@ -852,9 +2138,15 @@ async function loadData() {
     app.page = data.page;
     app.pageSize = data.pageSize;
     renderDataView();
+    if (scroll) {
+      const nextBox = $('#grid .tablebox');
+      if (nextBox) { nextBox.scrollLeft = scroll.left; nextBox.scrollTop = scroll.top; }
+    }
     setStatus(`Đã tải ${data.rows.length} dòng • ${app.database}.${table}`);
   } catch (error) {
-    renderError(error);
+    if (requestId === dataRequestId && mode === 'data' && database === app.database && targetTable === table && connectionId === app.connection?.id) renderError(error);
+  } finally {
+    box?.classList.remove('loading-soft');
   }
 }
 
@@ -1095,6 +2387,106 @@ function renderError(error) {
   setStatus(error.message || 'Lỗi');
 }
 
+
+async function inlineEditCell(td) {
+  if (!td || td.classList.contains('editing-cell')) return;
+  const colName = td.dataset.col;
+  const rowIdx = Number(td.dataset.row);
+  if (!colName || isNaN(rowIdx) || !app.rows[rowIdx]) return;
+
+  if (!app.primaryKey || !app.primaryKey.length) {
+    toast('Bảng không có khóa chính nên không thể sửa trực tiếp.', 'error');
+    return;
+  }
+
+  const colMeta = (app.columns || []).find((c) => c.name === colName);
+  if (colMeta && /(virtual|stored) generated/i.test(colMeta.extra)) {
+    toast(`Cột "${colName}" là cột tự động tính toán (generated), không thể sửa.`, 'error');
+    return;
+  }
+
+  const rowData = app.rows[rowIdx];
+  const database = app.database;
+  const targetTable = table;
+  const keys = Object.fromEntries(app.primaryKey.map((pk) => [pk, rowData[pk]]));
+  const originalVal = rowData[colName];
+  const originalDisplay = td.innerHTML;
+  td.classList.add('editing-cell');
+
+  const input = document.createElement('textarea');
+  input.className = 'inline-cell-editor';
+  input.value = originalVal === null || originalVal === undefined ? '' : String(originalVal);
+  td.innerHTML = '';
+  td.appendChild(input);
+  input.focus();
+  input.select();
+
+  let committed = false;
+  const cancel = () => {
+    if (committed) return;
+    committed = true;
+    td.classList.remove('editing-cell');
+    td.innerHTML = originalDisplay;
+  };
+
+  const commit = async () => {
+    if (committed) return;
+    committed = true;
+    const newVal = input.value;
+    const isOriginalNull = originalVal === null || originalVal === undefined;
+    const isUnchanged = (isOriginalNull && newVal === '') || (!isOriginalNull && String(originalVal) === newVal);
+
+    if (isUnchanged) {
+      td.classList.remove('editing-cell');
+      td.innerHTML = originalDisplay;
+      return;
+    }
+
+    let valToSave = newVal;
+    if (colMeta && colMeta.nullable === 'YES' && newVal.toUpperCase() === 'NULL') {
+      valToSave = null;
+    }
+
+    try {
+      await call(desktop.db.updateRow({
+        database,
+        table: targetTable,
+        keys,
+        values: { [colName]: valToSave }
+      }));
+
+      rowData[colName] = valToSave;
+      td.classList.remove('editing-cell');
+      const isNull = valToSave === null || valToSave === undefined;
+      const text = isNull ? 'NULL' : String(valToSave);
+      const shown = text.length > 180 ? `${text.slice(0, 180)}…` : text;
+      td.className = `${isNull ? 'nullcell ' : ''}cell-flash-saved`;
+      td.title = text.slice(0, 500);
+      td.innerHTML = isNull ? '<span class="null-badge">NULL</span>' : esc(shown);
+      setTimeout(() => td.classList.remove('cell-flash-saved'), 1500);
+      toast(`Đã lưu cột "${colName}"`, 'success');
+    } catch (err) {
+      td.classList.remove('editing-cell');
+      td.innerHTML = originalDisplay;
+      toast(err.message || 'Lỗi khi cập nhật dữ liệu', 'error');
+    }
+  };
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      commit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancel();
+    }
+  });
+
+  input.addEventListener('blur', () => {
+    commit();
+  });
+}
+
 function renderDataView() {
   const editable = app.primaryKey.length > 0;
   $('#workspace').innerHTML = `
@@ -1132,6 +2524,11 @@ function renderDataView() {
   $('#exportBtn').addEventListener('click', () => transfer('export'));
   const grid = $('#grid');
   grid.addEventListener('dblclick', (event) => {
+    const td = event.target.closest('td[data-col]');
+    if (td) {
+      inlineEditCell(td);
+      return;
+    }
     const row = event.target.closest('tr[data-row]');
     if (!row) return;
     if (!editable) {
@@ -1149,7 +2546,12 @@ function dataGridHtml() {
   const header = `
     <tr>
       <th>${editable ? '<input type="checkbox" id="selectAllRows" aria-label="Chọn tất cả">' : ''}</th>
-      ${app.columns.map((column) => `<th>${esc(column.name)} <small>${esc(column.type)}</small></th>`).join('')}
+      ${app.columns.map((column) => {
+        const isSorted = app.orderBy === column.name;
+        const sortClass = isSorted ? (app.orderDir === 'ASC' ? 'sortable sorted-asc' : 'sortable sorted-desc') : 'sortable';
+        const sortArrow = isSorted ? (app.orderDir === 'ASC' ? '<span class="sort-arrow">▲</span>' : '<span class="sort-arrow">▼</span>') : '';
+        return `<th class="${sortClass}" data-sort="${esc(column.name)}" title="Bấm để sắp xếp theo cột ${esc(column.name)}">${esc(column.name)} <small>${esc(column.type)}</small>${sortArrow}</th>`;
+      }).join('')}
     </tr>
   `;
   const body = app.rows.map((row, index) => `
@@ -1157,9 +2559,11 @@ function dataGridHtml() {
       <td>${editable ? `<input class="rowcheck" type="checkbox" value="${index}" aria-label="Chọn bản ghi ${index + 1}">` : ''}</td>
       ${app.columns.map((column) => {
         const value = row[column.name];
-        const text = value === null || value === undefined ? 'NULL' : String(value);
+        const isNull = value === null || value === undefined;
+        const text = isNull ? 'NULL' : String(value);
         const shown = text.length > 180 ? `${text.slice(0, 180)}…` : text;
-        return `<td class="${value === null || value === undefined ? 'nullcell' : ''}" title="${esc(text.slice(0, 500))}">${esc(shown)}</td>`;
+        const cellDisplay = isNull ? '<span class="null-badge">NULL</span>' : esc(shown);
+        return `<td class="${isNull ? 'nullcell' : ''}" data-row="${index}" data-col="${esc(column.name)}" title="${esc(text.slice(0, 500))}">${cellDisplay}</td>`;
       }).join('')}
     </tr>
   `).join('') || `<tr><td colspan="${app.columns.length + 1}" class="empty">Không có dữ liệu phù hợp.</td></tr>`;
@@ -1186,6 +2590,24 @@ function positionPagination() {
       document.querySelectorAll('.rowcheck').forEach((checkbox) => { checkbox.checked = selectAll.checked; });
     });
   }
+  document.querySelectorAll('th[data-sort]').forEach((th) => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.sort;
+      if (app.orderBy === col) {
+        if (app.orderDir === 'ASC') {
+          app.orderDir = 'DESC';
+        } else {
+          app.orderBy = null;
+          app.orderDir = 'ASC';
+        }
+      } else {
+        app.orderBy = col;
+        app.orderDir = 'ASC';
+      }
+      app.page = 1;
+      loadData({ keepScroll: true });
+    });
+  });
   const previous = $('#prevPage');
   const next = $('#nextPage');
   if (previous) previous.addEventListener('click', () => {
@@ -1201,35 +2623,479 @@ function positionPagination() {
   });
 }
 
+
+function addColumnModal(targetTable) {
+  const currentTable = targetTable || table;
+  const database = app.database;
+  if (!desktop || !app.connection || !app.database || !currentTable) return;
+
+  const cols = app.columns || [];
+  const colOptions = cols.map((c) => `<option value="${esc(c.name)}">Sau cột: ${esc(c.name)}</option>`).join('');
+
+  modal(`
+    <div class="modal-card" style="max-width:540px;">
+      <div class="modal-header">
+        <h3>➕ Thêm Cột Mới Vào Bảng "${esc(currentTable)}"</h3>
+        <button class="close-btn" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body" style="padding:16px;">
+        <div class="form-group" style="margin-bottom:12px;">
+          <label style="display:block; margin-bottom:4px; font-weight:500;">Tên cột:</label>
+          <input type="text" id="newColName" placeholder="vd: phone_number, status..." style="width:100%; padding:7px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;" required>
+        </div>
+        <div style="display:flex; gap:12px; margin-bottom:12px;">
+          <div style="flex:1;">
+            <label style="display:block; margin-bottom:4px; font-weight:500;">Kiểu dữ liệu:</label>
+            <select id="newColType" style="width:100%; padding:7px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;">
+              <option value="INT">INT</option>
+              <option value="BIGINT">BIGINT</option>
+              <option value="VARCHAR(255)" selected>VARCHAR(255)</option>
+              <option value="TEXT">TEXT</option>
+              <option value="LONGTEXT">LONGTEXT</option>
+              <option value="TINYINT(1)">TINYINT(1) (Boolean)</option>
+              <option value="DECIMAL(10,2)">DECIMAL(10,2)</option>
+              <option value="DATETIME">DATETIME</option>
+              <option value="TIMESTAMP">TIMESTAMP</option>
+              <option value="DATE">DATE</option>
+              <option value="JSON">JSON</option>
+            </select>
+          </div>
+          <div style="flex:1;">
+            <label style="display:block; margin-bottom:4px; font-weight:500;">Vị trí cột:</label>
+            <select id="newColPos" style="width:100%; padding:7px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;">
+              <option value="">Cuối bảng (Mặc định)</option>
+              <option value="FIRST">Đầu bảng (FIRST)</option>
+              ${colOptions}
+            </select>
+          </div>
+        </div>
+        <div style="display:flex; gap:12px; margin-bottom:12px;">
+          <div style="flex:1;">
+            <label style="display:block; margin-bottom:4px; font-weight:500;">Giá trị mặc định:</label>
+            <input type="text" id="newColDefault" placeholder="NULL hoặc giá trị mặc định" style="width:100%; padding:7px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;">
+          </div>
+          <div style="flex:1; display:flex; align-items:center; gap:8px; margin-top:20px;">
+            <input type="checkbox" id="newColNullable" checked>
+            <label for="newColNullable">Cho phép NULL</label>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer" style="text-align: right; margin-top: 16px;">
+        <button onclick="closeModal()">Hủy</button>
+        <button class="primary" id="confirmAddColBtn">➕ Thêm cột</button>
+      </div>
+    </div>
+  `);
+
+  $('#confirmAddColBtn')?.addEventListener('click', async () => {
+    const colName = $('#newColName')?.value.trim();
+    if (!colName) {
+      toast('Vui lòng nhập tên cột.', 'error');
+      return;
+    }
+    const colType = $('#newColType')?.value || 'VARCHAR(255)';
+    const pos = $('#newColPos')?.value;
+    const isNullable = $('#newColNullable')?.checked;
+    const defVal = $('#newColDefault')?.value.trim();
+
+    let sql = `ALTER TABLE ${quoteId(database)}.${quoteId(currentTable)} ADD COLUMN ${quoteId(colName)} ${colType}`;
+    if (!isNullable) sql += ' NOT NULL';
+    if (defVal) {
+      if (defVal.toUpperCase() === 'NULL' || defVal.toUpperCase() === 'CURRENT_TIMESTAMP') {
+        sql += ` DEFAULT ${defVal}`;
+      } else {
+        sql += ` DEFAULT ${quoteSqlString(defVal)}`;
+      }
+    }
+    if (pos === 'FIRST') {
+      sql += ' FIRST';
+    } else if (pos) {
+      sql += ` AFTER ${quoteId(pos)}`;
+    }
+
+    try {
+      await call(desktop.db.query({ sql, confirmed: true }));
+      toast(`Đã thêm cột "${colName}" vào bảng ${currentTable}`, 'success');
+      closeModal();
+      view('structure');
+    } catch (err) {
+      toast(err.message || 'Lỗi khi thêm cột', 'error');
+    }
+  });
+}
+
+function modifyColumnModal(targetTable, colName) {
+  const currentTable = targetTable || table;
+  const database = app.database;
+  const colMeta = (app.columns || []).find((c) => c.name === colName);
+  if (!colMeta) return;
+  if (/(virtual|stored) generated/i.test(colMeta.extra)) {
+    toast('Hãy sửa biểu thức cột generated bằng SQL Editor.', 'error');
+    return;
+  }
+
+  modal(`
+    <div class="modal-card" style="max-width:540px;">
+      <div class="modal-header">
+        <h3>✏️ Sửa Kiểu / Thuộc Tính Cột "${esc(colName)}"</h3>
+        <button class="close-btn" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body" style="padding:16px;">
+        <div style="display:flex; gap:12px; margin-bottom:12px;">
+          <div style="flex:1;">
+            <label style="display:block; margin-bottom:4px; font-weight:500;">Kiểu dữ liệu mới:</label>
+            <input type="text" id="modColType" value="${esc(colMeta.type)}" style="width:100%; padding:7px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;" required>
+          </div>
+          <div style="flex:1;">
+            <label style="display:block; margin-bottom:4px; font-weight:500;">Giá trị mặc định:</label>
+            <input type="text" id="modColDefault" value="${esc(colMeta.defaultValue === null ? '' : String(colMeta.defaultValue))}" style="width:100%; padding:7px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;">
+          </div>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
+          <input type="checkbox" id="modColNullable" ${colMeta.nullable === 'YES' ? 'checked' : ''}>
+          <label for="modColNullable">Cho phép NULL</label>
+        </div>
+      </div>
+      <div class="modal-footer" style="text-align: right; margin-top: 16px;">
+        <button onclick="closeModal()">Hủy</button>
+        <button class="primary" id="confirmModColBtn">Lưu thay đổi</button>
+      </div>
+    </div>
+  `);
+
+  $('#confirmModColBtn')?.addEventListener('click', async () => {
+    const colType = $('#modColType')?.value.trim();
+    if (!colType) {
+      toast('Vui lòng nhập kiểu dữ liệu.', 'error');
+      return;
+    }
+    const isNullable = $('#modColNullable')?.checked;
+    const defVal = $('#modColDefault')?.value.trim();
+
+    let sql = `ALTER TABLE ${quoteId(database)}.${quoteId(currentTable)} MODIFY COLUMN ${quoteId(colName)} ${colType}`;
+    if (!isNullable) sql += ' NOT NULL';
+    if (defVal) {
+      if (defVal.toUpperCase() === 'NULL' || defVal.toUpperCase() === 'CURRENT_TIMESTAMP') {
+        sql += ` DEFAULT ${defVal}`;
+      } else {
+        sql += ` DEFAULT ${quoteSqlString(defVal)}`;
+      }
+    } else if (colMeta.defaultValue === '') {
+      sql += " DEFAULT ''";
+    }
+    if (/auto_increment/i.test(colMeta.extra)) sql += ' AUTO_INCREMENT';
+    const onUpdate = /\bon update current_timestamp(?:\(\d*\))?/i.exec(colMeta.extra);
+    if (onUpdate) sql += ` ${onUpdate[0]}`;
+    if (/\binvisible\b/i.test(colMeta.extra)) sql += ' INVISIBLE';
+    if (colMeta.comment) sql += ` COMMENT ${quoteSqlString(colMeta.comment)}`;
+
+    try {
+      await call(desktop.db.query({ sql, confirmed: true }));
+      toast(`Đã sửa thuộc tính cột "${colName}"`, 'success');
+      closeModal();
+      view('structure');
+    } catch (err) {
+      toast(err.message || 'Lỗi khi sửa cột', 'error');
+    }
+  });
+}
+
+function renameColumnModal(targetTable, oldName) {
+  const currentTable = targetTable || table;
+  const database = app.database;
+  modal(`
+    <div class="modal-card" style="max-width:440px;">
+      <div class="modal-header">
+        <h3>🏷️ Đổi Tên Cột "${esc(oldName)}"</h3>
+        <button class="close-btn" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body" style="padding:16px;">
+        <div class="form-group">
+          <label style="display:block; margin-bottom:4px; font-weight:500;">Tên mới:</label>
+          <input type="text" id="renamedColName" value="${esc(oldName)}" style="width:100%; padding:7px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;" required>
+        </div>
+      </div>
+      <div class="modal-footer" style="text-align: right; margin-top: 16px;">
+        <button onclick="closeModal()">Hủy</button>
+        <button class="primary" id="confirmRenameColBtn">Đổi tên</button>
+      </div>
+    </div>
+  `);
+
+  $('#confirmRenameColBtn')?.addEventListener('click', async () => {
+    const newName = $('#renamedColName')?.value.trim();
+    if (!newName || newName === oldName) {
+      closeModal();
+      return;
+    }
+    try {
+      await call(desktop.db.query({ sql: `ALTER TABLE ${quoteId(database)}.${quoteId(currentTable)} RENAME COLUMN ${quoteId(oldName)} TO ${quoteId(newName)}`, confirmed: true }));
+      toast(`Đã đổi tên cột thành "${newName}"`, 'success');
+      closeModal();
+      view('structure');
+    } catch (err) {
+      toast(err.message || 'Lỗi khi đổi tên cột', 'error');
+    }
+  });
+}
+
+async function dropColumnAction(targetTable, colName) {
+  const currentTable = targetTable || table;
+  const database = app.database;
+  const confirmed = await confirmAction(`Xóa cột "${colName}" khỏi bảng "${currentTable}"?`, 'Dữ liệu trong cột này sẽ bị mất vĩnh viễn!', 'Xóa cột');
+  if (!confirmed) return;
+  try {
+    await call(desktop.db.query({ sql: `ALTER TABLE ${quoteId(database)}.${quoteId(currentTable)} DROP COLUMN ${quoteId(colName)}`, confirmed: true }));
+    toast(`Đã xóa cột "${colName}"`, 'success');
+    await view('structure');
+  } catch (err) {
+    toast(err.message || 'Lỗi khi xóa cột', 'error');
+  }
+}
+
+function createIndexModal(targetTable) {
+  const currentTable = targetTable || table;
+  const database = app.database;
+  if (!currentTable) return;
+  const cols = app.columns || [];
+
+  modal(`
+    <div class="modal-card" style="max-width:540px;">
+      <div class="modal-header">
+        <h3>➕ Thêm Chỉ Mục (Index) Mới</h3>
+        <button class="close-btn" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body" style="padding:16px;">
+        <div style="display:flex; gap:12px; margin-bottom:12px;">
+          <div style="flex:1;">
+            <label style="display:block; margin-bottom:4px; font-weight:500;">Tên Index:</label>
+            <input type="text" id="newIndexName" placeholder="vd: idx_user_email" style="width:100%; padding:7px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;" required>
+          </div>
+          <div style="flex:1;">
+            <label style="display:block; margin-bottom:4px; font-weight:500;">Loại Index:</label>
+            <select id="newIndexType" style="width:100%; padding:7px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;">
+              <option value="INDEX">INDEX (Bình thường)</option>
+              <option value="UNIQUE">UNIQUE (Không trùng lặp)</option>
+              <option value="FULLTEXT">FULLTEXT (Tìm kiếm văn bản)</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label style="display:block; margin-bottom:6px; font-weight:500;">Chọn các cột tham gia Index:</label>
+          <div style="max-height: 180px; overflow: auto; background:#111827; border:1px solid #374151; border-radius:4px; padding:8px;">
+            ${cols.map((c) => `
+              <label style="display:flex; align-items:center; gap:8px; padding:3px 0; cursor:pointer;">
+                <input type="checkbox" class="index-col-check" value="${esc(c.name)}">
+                <span>${esc(c.name)} <small style="color:#9ca3af;">(${esc(c.type)})</small></span>
+              </label>
+            `).join('')}
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer" style="text-align: right; margin-top: 16px;">
+        <button onclick="closeModal()">Hủy</button>
+        <button class="primary" id="confirmCreateIndexBtn">Tạo Index</button>
+      </div>
+    </div>
+  `);
+
+  $('#confirmCreateIndexBtn')?.addEventListener('click', async () => {
+    const idxName = $('#newIndexName')?.value.trim();
+    const idxType = $('#newIndexType')?.value || 'INDEX';
+    const selectedCols = [...document.querySelectorAll('.index-col-check:checked')].map((cb) => cb.value);
+
+    if (!idxName) {
+      toast('Vui lòng nhập tên Index.', 'error');
+      return;
+    }
+    if (!selectedCols.length) {
+      toast('Vui lòng chọn ít nhất một cột.', 'error');
+      return;
+    }
+
+    const typePrefix = idxType === 'UNIQUE' ? 'UNIQUE ' : (idxType === 'FULLTEXT' ? 'FULLTEXT ' : '');
+    const sql = `CREATE ${typePrefix}INDEX ${quoteId(idxName)} ON ${quoteId(database)}.${quoteId(currentTable)} (${selectedCols.map(quoteId).join(', ')})`;
+
+    try {
+      await call(desktop.db.query({ sql, confirmed: true }));
+      toast(`Đã tạo Index "${idxName}" thành công`, 'success');
+      closeModal();
+      view('indexes');
+    } catch (err) {
+      toast(err.message || 'Lỗi khi tạo Index', 'error');
+    }
+  });
+}
+
+async function dropIndexAction(indexName) {
+  if (!table) return;
+  const target = `${quoteId(app.database)}.${quoteId(table)}`;
+  const confirmed = await confirmAction(`Xóa Index "${indexName}"?`, 'Thao tác này có thể ảnh hưởng đến tốc độ truy vấn.', 'Xóa Index');
+  if (!confirmed) return;
+  try {
+    await call(desktop.db.query({ sql: `DROP INDEX ${quoteId(indexName)} ON ${target}`, confirmed: true }));
+    toast(`Đã xóa Index "${indexName}"`, 'success');
+    await view('indexes');
+  } catch (err) {
+    toast(err.message || 'Lỗi khi xóa Index', 'error');
+  }
+}
+
+async function createRelationModal(targetTable) {
+  const currentTable = targetTable || table;
+  const database = app.database;
+  if (!currentTable || !desktop || !app.database) return;
+
+  const cols = app.columns || [];
+  let tablesList = [];
+  try {
+    tablesList = await call(desktop.db.tables(database));
+  } catch (err) {
+    tablesList = [];
+  }
+
+  modal(`
+    <div class="modal-card" style="max-width:580px;">
+      <div class="modal-header">
+        <h3>➕ Thêm Khóa Ngoại (Foreign Key)</h3>
+        <button class="close-btn" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body" style="padding:16px;">
+        <div style="margin-bottom:12px;">
+          <label style="display:block; margin-bottom:4px; font-weight:500;">Tên Khóa ngoại (Constraint Name):</label>
+          <input type="text" id="newFkName" placeholder="vd: fk_${esc(currentTable)}_ref" style="width:100%; padding:7px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;" required>
+        </div>
+        <div style="display:flex; gap:12px; margin-bottom:12px;">
+          <div style="flex:1;">
+            <label style="display:block; margin-bottom:4px; font-weight:500;">Cột bảng hiện tại (${esc(currentTable)}):</label>
+            <select id="fkLocalCol" style="width:100%; padding:7px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;">
+              ${cols.map((c) => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('')}
+            </select>
+          </div>
+          <div style="flex:1;">
+            <label style="display:block; margin-bottom:4px; font-weight:500;">Bảng tham chiếu (Ref Table):</label>
+            <select id="fkRefTable" style="width:100%; padding:7px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;">
+              ${tablesList.map((t) => `<option value="${esc(t.name)}">${esc(t.name)}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div style="margin-bottom:12px;">
+          <label style="display:block; margin-bottom:4px; font-weight:500;">Cột tham chiếu (Ref Column):</label>
+          <input type="text" id="fkRefCol" placeholder="vd: id" value="id" style="width:100%; padding:7px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;" required>
+        </div>
+        <div style="display:flex; gap:12px; margin-bottom:12px;">
+          <div style="flex:1;">
+            <label style="display:block; margin-bottom:4px; font-weight:500;">ON DELETE:</label>
+            <select id="fkOnDelete" style="width:100%; padding:7px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;">
+              <option value="RESTRICT">RESTRICT (Chặn xóa)</option>
+              <option value="CASCADE">CASCADE (Xóa theo)</option>
+              <option value="SET NULL">SET NULL (Gán NULL)</option>
+              <option value="NO ACTION">NO ACTION</option>
+            </select>
+          </div>
+          <div style="flex:1;">
+            <label style="display:block; margin-bottom:4px; font-weight:500;">ON UPDATE:</label>
+            <select id="fkOnUpdate" style="width:100%; padding:7px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;">
+              <option value="CASCADE" selected>CASCADE (Cập nhật theo)</option>
+              <option value="RESTRICT">RESTRICT (Chặn sửa)</option>
+              <option value="SET NULL">SET NULL (Gán NULL)</option>
+              <option value="NO ACTION">NO ACTION</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer" style="text-align: right; margin-top: 16px;">
+        <button onclick="closeModal()">Hủy</button>
+        <button class="primary" id="confirmCreateFkBtn">Tạo Khóa Ngoại</button>
+      </div>
+    </div>
+  `);
+
+  $('#confirmCreateFkBtn')?.addEventListener('click', async () => {
+    const fkName = $('#newFkName')?.value.trim();
+    const localCol = $('#fkLocalCol')?.value;
+    const refTable = $('#fkRefTable')?.value;
+    const refCol = $('#fkRefCol')?.value.trim();
+    const onDel = $('#fkOnDelete')?.value || 'RESTRICT';
+    const onUpd = $('#fkOnUpdate')?.value || 'CASCADE';
+
+    if (!fkName || !localCol || !refTable || !refCol) {
+      toast('Vui lòng điền đầy đủ các thông tin.', 'error');
+      return;
+    }
+
+    const sql = `ALTER TABLE ${quoteId(database)}.${quoteId(currentTable)} ADD CONSTRAINT ${quoteId(fkName)} FOREIGN KEY (${quoteId(localCol)}) REFERENCES ${quoteId(database)}.${quoteId(refTable)}(${quoteId(refCol)}) ON DELETE ${onDel} ON UPDATE ${onUpd}`;
+
+    try {
+      await call(desktop.db.query({ sql, confirmed: true }));
+      toast(`Đã tạo Khóa ngoại "${fkName}" thành công`, 'success');
+      closeModal();
+      view('relations');
+    } catch (err) {
+      toast(err.message || 'Lỗi khi tạo Khóa ngoại', 'error');
+    }
+  });
+}
+
+async function dropRelationAction(constraintName) {
+  if (!table) return;
+  const target = `${quoteId(app.database)}.${quoteId(table)}`;
+  const confirmed = await confirmAction(`Xóa Khóa ngoại "${constraintName}"?`, 'Bảng sẽ không còn kiểm tra ràng buộc tham chiếu này.', 'Xóa khóa ngoại');
+  if (!confirmed) return;
+  try {
+    await call(desktop.db.query({ sql: `ALTER TABLE ${target} DROP FOREIGN KEY ${quoteId(constraintName)}`, confirmed: true }));
+    toast(`Đã xóa Khóa ngoại "${constraintName}"`, 'success');
+    await view('relations');
+  } catch (err) {
+    toast(err.message || 'Lỗi khi xóa Khóa ngoại', 'error');
+  }
+}
+
 function renderStructureView() {
   $('#workspace').innerHTML = `
     <div class="toolbar">
       <strong>${app.columns.length} cột</strong>
+      <button class="primary" id="addColBtn" style="margin-left:12px;">➕ Thêm cột</button>
       <span class="spacer"></span>
       <button id="refreshStructure">↻ Làm mới</button>
       <button id="showDdl">⌑ Xem DDL</button>
       <button id="openInEditor">⌘ Mở SQL Editor</button>
     </div>
     <div class="tablebox"><table>
-      <thead><tr><th></th><th>Tên cột</th><th>Kiểu dữ liệu</th><th>Null</th><th>Mặc định</th><th>Khóa</th><th>Extra</th></tr></thead>
+      <thead><tr><th></th><th>Tên cột</th><th>Kiểu dữ liệu</th><th>Null</th><th>Mặc định</th><th>Khóa</th><th>Extra</th><th style="width:130px; text-align:center;">Hành động</th></tr></thead>
       <tbody>
         ${app.columns.map((column) => `
           <tr>
             <td></td>
-            <td class="mono">${esc(column.name)}</td>
+            <td class="mono"><strong>${esc(column.name)}</strong></td>
             <td class="mono">${esc(column.type)}</td>
             <td>${column.nullable === 'YES' ? 'YES' : 'NO'}</td>
             <td class="muted">${column.defaultValue === null ? 'NULL' : esc(column.defaultValue)}</td>
             <td>${column.key === 'PRI' ? '🔑 PRIMARY' : column.key === 'UNI' ? 'UNIQUE' : column.key === 'MUL' ? 'INDEX' : '—'}</td>
             <td class="muted">${esc(column.extra || '')}</td>
+            <td style="text-align:center; white-space:nowrap;">
+              <button class="struct-action-btn" data-action="modify" data-col="${esc(column.name)}" title="Sửa kiểu / thuộc tính" style="padding:2px 6px; font-size:0.75em;">✏️</button>
+              <button class="struct-action-btn" data-action="rename" data-col="${esc(column.name)}" title="Đổi tên cột" style="padding:2px 6px; font-size:0.75em;">🏷️</button>
+              <button class="danger struct-action-btn" data-action="drop" data-col="${esc(column.name)}" title="Xóa cột" style="padding:2px 6px; font-size:0.75em;">🗑️</button>
+            </td>
           </tr>
-        `).join('') || '<tr><td colspan="7" class="empty">Không có cột.</td></tr>'}
+        `).join('') || '<tr><td colspan="8" class="empty">Không có cột.</td></tr>'}
       </tbody>
     </table></div>
   `;
   $('#refreshStructure').addEventListener('click', () => view('structure'));
   $('#showDdl').addEventListener('click', showDdl);
   $('#openInEditor').addEventListener('click', openTableInEditor);
+  $('#addColBtn')?.addEventListener('click', () => addColumnModal(table));
+  document.querySelectorAll('.struct-action-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const act = btn.dataset.action;
+      const col = btn.dataset.col;
+      if (act === 'modify') modifyColumnModal(table, col);
+      else if (act === 'rename') renameColumnModal(table, col);
+      else if (act === 'drop') dropColumnAction(table, col);
+    });
+  });
 }
 
 function showDdl() {
@@ -1254,26 +3120,34 @@ function renderIndexesView() {
   $('#workspace').innerHTML = `
     <div class="toolbar">
       <strong>${indexes.length} index</strong>
+      <button class="primary" id="addIndexBtn" style="margin-left:12px;">➕ Thêm Index</button>
       <span class="spacer"></span>
       <button id="refreshIndexes">↻ Làm mới</button>
     </div>
     <div class="tablebox"><table>
-      <thead><tr><th></th><th>Tên index</th><th>Cột</th><th>Loại</th><th>Unique</th><th>Cardinality</th></tr></thead>
+      <thead><tr><th></th><th>Tên index</th><th>Cột</th><th>Loại</th><th>Unique</th><th>Cardinality</th><th style="width:90px; text-align:center;">Hành động</th></tr></thead>
       <tbody>
         ${indexes.map((index) => `
           <tr>
             <td></td>
-            <td class="mono">${esc(index.name)}</td>
+            <td class="mono"><strong>${esc(index.name)}</strong></td>
             <td class="mono">${index.columns.map((column) => esc(column.name)).join(', ')}</td>
             <td>${esc(index.type)}</td>
             <td>${index.unique ? 'YES' : 'NO'}</td>
             <td class="muted">${index.cardinality === null ? 'NULL' : index.cardinality}</td>
+            <td style="text-align:center;">
+              ${index.name !== 'PRIMARY' ? `<button class="danger drop-index-btn" data-index="${esc(index.name)}" style="padding:2px 8px; font-size:0.75em;" title="Xóa Index">🗑️ Xóa</button>` : '<span style="color:#6b7280; font-size:0.8em;">Khóa chính</span>'}
+            </td>
           </tr>
-        `).join('') || '<tr><td colspan="6" class="empty">Không có index.</td></tr>'}
+        `).join('') || '<tr><td colspan="7" class="empty">Không có index.</td></tr>'}
       </tbody>
     </table></div>
   `;
   $('#refreshIndexes').addEventListener('click', () => view('indexes'));
+  $('#addIndexBtn')?.addEventListener('click', () => createIndexModal(table));
+  document.querySelectorAll('.drop-index-btn').forEach((btn) => {
+    btn.addEventListener('click', () => dropIndexAction(btn.dataset.index));
+  });
 }
 
 function renderRelationsView() {
@@ -1282,10 +3156,13 @@ function renderRelationsView() {
   const relationRow = (relation, direction) => `
     <tr>
       <td>${esc(direction)}</td>
-      <td class="mono">${esc(relation.table)}.${esc(relation.column)}</td>
+      <td class="mono"><strong>${esc(relation.table)}.${esc(relation.column)}</strong></td>
       <td>→</td>
       <td class="mono">${esc(relation.refDatabase)}.${esc(relation.refTable)}.${esc(relation.refColumn)}</td>
       <td class="muted">${esc(relation.name)}</td>
+      <td style="text-align:center;">
+        ${direction === 'Đi' ? `<button class="danger drop-fk-btn" data-fk="${esc(relation.name)}" style="padding:2px 8px; font-size:0.75em;" title="Xóa Khóa ngoại">🗑️</button>` : ''}
+      </td>
     </tr>
   `;
   const rows = [
@@ -1295,18 +3172,295 @@ function renderRelationsView() {
   $('#workspace').innerHTML = `
     <div class="toolbar">
       <strong>${outbound.length + inbound.length} quan hệ</strong>
+      <button class="primary" id="addRelationBtn" style="margin-left:12px;">➕ Thêm Khóa ngoại</button>
       <span class="spacer"></span>
       <button id="refreshRelations">↻ Làm mới</button>
     </div>
     <div class="tablebox"><table>
-      <thead><tr><th>Hướng</th><th>Bảng.cột</th><th></th><th>Tham chiếu</th><th>Constraint</th></tr></thead>
+      <thead><tr><th>Hướng</th><th>Bảng.cột</th><th></th><th>Tham chiếu</th><th>Constraint</th><th style="width:80px; text-align:center;">Hành động</th></tr></thead>
       <tbody>
-        ${rows || '<tr><td colspan="5" class="empty">Không có khóa ngoại.</td></tr>'}
+        ${rows || '<tr><td colspan="6" class="empty">Không có khóa ngoại.</td></tr>'}
       </tbody>
     </table></div>
   `;
   $('#refreshRelations').addEventListener('click', () => view('relations'));
+  $('#addRelationBtn')?.addEventListener('click', () => createRelationModal(table));
+  document.querySelectorAll('.drop-fk-btn').forEach((btn) => {
+    btn.addEventListener('click', () => dropRelationAction(btn.dataset.fk));
+  });
 }
+
+
+function tokenizeSql(sql) {
+  const tokens = [];
+  for (let i = 0; i < sql.length;) {
+    const start = i;
+    const char = sql[i];
+    let type;
+    if (/\s/.test(char)) {
+      while (i < sql.length && /\s/.test(sql[i])) i += 1;
+      type = 'space';
+    } else if (char === '#' || (char === '-' && sql[i + 1] === '-' && (i + 2 === sql.length || sql.charCodeAt(i + 2) <= 32))) {
+      while (i < sql.length && !/[\r\n]/.test(sql[i])) i += 1;
+      type = 'lineComment';
+    } else if (char === '/' && sql[i + 1] === '*') {
+      const end = sql.indexOf('*/', i + 2);
+      if (end === -1) throw new Error('SQL không hợp lệ: block comment chưa được đóng.');
+      i = end + 2;
+      type = 'comment';
+    } else if (char === "'" || char === '"' || char === '`') {
+      const quote = char;
+      i += 1;
+      let closed = false;
+      while (i < sql.length) {
+        if (sql[i] === '\\' && quote !== '`') i += Math.min(2, sql.length - i);
+        else if (sql[i] === quote) {
+          i += 1;
+          if (sql[i] === quote) i += 1;
+          else { closed = true; break; }
+        } else i += 1;
+      }
+      if (!closed) throw new Error('SQL không hợp lệ: chuỗi hoặc identifier chưa được đóng.');
+      type = 'literal';
+    } else if (/[\p{L}\p{N}_$]/u.test(char)) {
+      while (i < sql.length && /[\p{L}\p{N}_$]/u.test(sql[i])) i += 1;
+      type = 'word';
+    } else {
+      i += 1;
+      type = 'symbol';
+    }
+    tokens.push({ type, text: sql.slice(start, i) });
+  }
+  return tokens;
+}
+
+function formatSql(sql) {
+  if (!sql || typeof sql !== 'string') return sql;
+
+  const KEYWORDS = new Set([
+    'SELECT', 'FROM', 'WHERE', 'AND', 'OR', 'NOT', 'IN', 'IS', 'NULL', 'LIKE', 'BETWEEN',
+    'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'CROSS', 'ON', 'USING',
+    'GROUP', 'BY', 'ORDER', 'HAVING', 'LIMIT', 'OFFSET',
+    'INSERT', 'INTO', 'VALUES', 'UPDATE', 'SET', 'DELETE',
+    'CREATE', 'TABLE', 'ALTER', 'DROP', 'INDEX', 'VIEW', 'DATABASE',
+    'UNION', 'ALL', 'DISTINCT', 'AS', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END',
+    'ASC', 'DESC', 'SHOW', 'DESCRIBE', 'EXPLAIN', 'DEFAULT', 'PRIMARY', 'KEY',
+    'FOREIGN', 'REFERENCES', 'AUTO_INCREMENT', 'CONSTRAINT', 'CASCADE'
+  ]);
+
+  const clauses = [
+    'INSERT INTO', 'DELETE FROM', 'LEFT OUTER JOIN', 'RIGHT OUTER JOIN',
+    'LEFT JOIN', 'RIGHT JOIN', 'INNER JOIN', 'CROSS JOIN', 'GROUP BY', 'ORDER BY',
+    'UNION ALL', 'SELECT', 'JOIN', 'HAVING', 'LIMIT', 'OFFSET', 'UNION', 'VALUES', 'UPDATE', 'SET', 'FROM', 'WHERE'
+  ].map((clause) => clause.split(' '));
+  const tokens = tokenizeSql(sql);
+  const output = [];
+  let clauseEnd = -1;
+  const newline = (text = '\n') => {
+    while (output.length && /^\s+$/.test(output[output.length - 1])) output.pop();
+    if (output.length) output.push(text);
+  };
+  tokens.forEach((token, index) => {
+    if (token.type === 'space') {
+      if (output.length && !/\s$/.test(output[output.length - 1])) output.push(' ');
+      return;
+    }
+    if (token.type === 'word' && index > clauseEnd) {
+      for (const words of clauses) {
+        let cursor = index;
+        const matches = words.every((word, offset) => {
+          if (offset) {
+            if (tokens[cursor]?.type !== 'space') return false;
+            cursor += 1;
+          }
+          if (tokens[cursor]?.type !== 'word' || tokens[cursor].text.toUpperCase() !== word) return false;
+          cursor += 1;
+          return true;
+        });
+        if (matches) { newline(); clauseEnd = cursor - 1; break; }
+      }
+    }
+    output.push(token.type === 'word' && KEYWORDS.has(token.text.toUpperCase()) ? token.text.toUpperCase() : token.text);
+    if (token.type === 'lineComment') output.push('\n');
+    else if (token.type === 'symbol' && token.text === ';') output.push('\n\n');
+  });
+  return output.join('').trim();
+}
+
+function formatCurrentSql() {
+  const editor = $('#sql');
+  if (!editor) return;
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  const hasSelection = start !== end;
+
+  try {
+    const formatted = formatSql(hasSelection ? editor.value.slice(start, end) : editor.value);
+    if (hasSelection) editor.setRangeText(formatted, start, end, 'select');
+    else editor.value = formatted;
+    app.query.sql = editor.value;
+    sessionStorage.setItem('query', editor.value);
+    persistState();
+    toast(hasSelection ? 'Đã định dạng đoạn SQL được chọn ✨' : 'Đã định dạng toàn bộ câu lệnh SQL ✨', 'success');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function runExplainQuery() {
+  if (!desktop || !app.connection) {
+    toast('Chưa kết nối CSDL.', 'error');
+    return;
+  }
+  if (queryTabs.some((tab) => tab.running)) {
+    toast('Một truy vấn khác đang chạy. Hãy chờ hoặc hủy trước.', 'error');
+    return;
+  }
+  const tab = app.query;
+  try {
+    const editor = $('#sql');
+    const rawSql = editor ? editor.value : (tab.sql || '');
+    let sqlToRun;
+    if (editor && editor.selectionStart !== editor.selectionEnd) {
+      sqlToRun = rawSql.slice(editor.selectionStart, editor.selectionEnd).trim();
+    } else {
+      sqlToRun = window.SqlAutocomplete.getContext(rawSql, editor?.selectionStart ?? 0).statement.trim();
+    }
+    const tokens = tokenizeSql(sqlToRun);
+    const meaningful = tokens.filter((token) => !['space', 'comment', 'lineComment'].includes(token.type));
+    while (meaningful.at(-1)?.text === ';') meaningful.pop();
+    if (!meaningful.length) throw new Error('Vui lòng nhập câu lệnh SQL để EXPLAIN.');
+    if (meaningful.some((token) => token.type === 'symbol' && token.text === ';')) {
+      throw new Error('Chỉ chọn một câu lệnh SQL để EXPLAIN.');
+    }
+    const firstWord = meaningful[0].text.toUpperCase();
+    if (!['SELECT', 'WITH', 'INSERT', 'UPDATE', 'DELETE', 'REPLACE', 'EXPLAIN', 'DESCRIBE', 'DESC'].includes(firstWord)) {
+      throw new Error('Câu lệnh này không hỗ trợ EXPLAIN.');
+    }
+    const explainSql = ['EXPLAIN', 'DESCRIBE', 'DESC'].includes(firstWord) ? sqlToRun : 'EXPLAIN ' + sqlToRun;
+    tab.running = true;
+    tab.error = null;
+    closeSqlSuggestions();
+    updateQueryButtons();
+    renderQueryTabs();
+    setStatus('Đang phân tích kế hoạch thực thi (EXPLAIN)...');
+    const result = await call(desktop.db.query({ sql: explainSql, timeoutMs: 30000 }));
+    result.isExplain = true;
+    tab.result = result;
+    tab.resultTab = null;
+    tab.resultView = 'data';
+    tab.sortCol = null;
+    tab.sortDir = 'ASC';
+    let hasFullScan = false;
+    let fullScanTable = '';
+    if (result.kind === 'rows') {
+      const typeColIdx = result.columns.findIndex((c) => c.name.toLowerCase() === 'type');
+      const tableColIdx = result.columns.findIndex((c) => c.name.toLowerCase() === 'table');
+      if (typeColIdx !== -1) {
+        for (const row of result.rows) {
+          if (String(row[typeColIdx]).toUpperCase() === 'ALL') {
+            hasFullScan = true;
+            if (tableColIdx !== -1) fullScanTable = row[tableColIdx];
+            break;
+          }
+        }
+      }
+    }
+
+    if (hasFullScan) {
+      toast(`⚠️ Cảnh báo: Full Table Scan trên bảng "${fullScanTable}". Nên thêm Index!`, 'error');
+    } else {
+      toast('Đã phân tích kế hoạch thực thi (EXPLAIN) thành công!', 'success');
+    }
+    setStatus('Hoàn tất EXPLAIN');
+  } catch (error) {
+    toast(error.message || 'Lỗi khi chạy EXPLAIN', 'error');
+    setStatus('Lỗi EXPLAIN');
+  } finally {
+    tab.running = false;
+    updateQueryButtons();
+    renderQueryTabs();
+    const output = $('#queryResult');
+    if (app.query === tab && output) output.innerHTML = queryResultHtml();
+  }
+}
+
+function showShortcutsModal() {
+  modal(`
+    <div class="modal-card shortcuts-modal-card">
+      <div class="modal-header">
+        <h3>⌨️ Bảng Tra Cứu Phím Tắt SqlPro</h3>
+        <button class="close-btn" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <table class="shortcuts-table">
+          <thead>
+            <tr>
+              <th style="width: 220px;">Phím tắt</th>
+              <th>Chức năng</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><kbd>F5</kbd> / <kbd>Ctrl</kbd>+<kbd>Enter</kbd></td>
+              <td><strong>Thực thi SQL</strong> (toàn bộ hoặc đoạn đang bôi đen)</td>
+            </tr>
+            <tr>
+              <td><kbd>Ctrl</kbd> + <kbd>E</kbd></td>
+              <td><strong>Phân tích EXPLAIN</strong> kế hoạch thực thi câu lệnh</td>
+            </tr>
+            <tr>
+              <td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>F</kbd></td>
+              <td><strong>Định dạng SQL (Beautifier)</strong> tự động căn lề chuẩn đẹp</td>
+            </tr>
+            <tr>
+              <td><kbd>Ctrl</kbd> + <kbd>T</kbd></td>
+              <td><strong>Mở tab truy vấn mới</strong></td>
+            </tr>
+            <tr>
+              <td><kbd>Ctrl</kbd> + <kbd>W</kbd></td>
+              <td><strong>Đóng tab truy vấn hiện tại</strong></td>
+            </tr>
+            <tr>
+              <td><kbd>Ctrl</kbd> + <kbd>Space</kbd></td>
+              <td>Bật menu <strong>Autocomplete từ khóa & bảng/cột</strong></td>
+            </tr>
+            <tr>
+              <td><kbd>Nhấp đúp chuột vào ô</kbd></td>
+              <td><strong>Chỉnh sửa ô trực tiếp</strong> (Inline Cell Editing) trên lưới</td>
+            </tr>
+            <tr>
+              <td><kbd>Enter</kbd> (trong ô sửa)</td>
+              <td><strong>Lưu giá trị ô</strong> (thực thi UPDATE tự động theo Primary Key)</td>
+            </tr>
+            <tr>
+              <td><kbd>Esc</kbd></td>
+              <td>Hủy sửa ô / Đóng hộp thoại Modal / Đóng Context Menu</td>
+            </tr>
+            <tr>
+              <td><kbd>Chuột phải trên ô/dòng</kbd></td>
+              <td>Sao chép giá trị, sao chép JSON, xuất lệnh INSERT, đặt NULL...</td>
+            </tr>
+            <tr>
+              <td><kbd>F1</kbd></td>
+              <td>Mở bảng tra cứu phím tắt này</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="modal-footer" style="text-align: right; margin-top: 16px;">
+        <button class="primary" onclick="closeModal()">Đóng (Esc)</button>
+      </div>
+    </div>
+  `);
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'F1') {
+    e.preventDefault();
+    showShortcutsModal();
+  }
+});
 
 function renderQueryView() {
   sqlAutocomplete.requestId += 1;
@@ -1316,11 +3470,13 @@ function renderQueryView() {
   updateChrome();
   $('#workspace').innerHTML = `
     <div class="toolbar">
-      <button class="primary" id="runQueryBtn">▷ Chạy truy vấn</button>
-      <button id="saveQueryBtn">⌑ Lưu truy vấn</button>
+      <button class="primary" id="runQueryBtn">▷ Chạy (F5)</button>
+      <button id="explainQueryBtn" title="Phân tích kế hoạch thực thi (Ctrl+E)">⚡ EXPLAIN</button>
+      <button id="formatSqlBtn" title="Định dạng SQL chuẩn đẹp (Ctrl+Shift+F)">🪄 Định dạng</button>
+      <button id="saveQueryBtn">⌑ Lưu</button>
       <button class="danger" id="cancelQueryBtn" style="display:${app.query.running ? 'inline-block' : 'none'}">■ Hủy</button>
       <span class="spacer"></span>
-      <span class="subtle">${esc(app.database || 'chưa chọn database')}${table ? ` · ${esc(table)}` : ''} &nbsp; · &nbsp; Ctrl + Enter</span>
+      <span class="subtle">${esc(app.database || 'chưa chọn database')}${table ? ` · ${esc(table)}` : ''} &nbsp; · &nbsp; Ctrl+Enter / Ctrl+E</span>
     </div>
     <div class="sql-editor-wrap">
       <textarea class="editor" id="sql" spellcheck="false" autocomplete="off" aria-label="SQL editor" aria-autocomplete="list" aria-controls="sqlSuggestions"></textarea>
@@ -1337,6 +3493,16 @@ function renderQueryView() {
     void refreshSqlSuggestions(editor);
   });
   editor.addEventListener('keydown', (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && (event.key === 'F' || event.key === 'f')) {
+      event.preventDefault();
+      formatCurrentSql();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (event.key === 'e' || event.key === 'E')) {
+      event.preventDefault();
+      runExplainQuery();
+      return;
+    }
     if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
       event.preventDefault();
       closeSqlSuggestions();
@@ -1397,6 +3563,8 @@ function renderQueryView() {
     if (option) acceptSqlSuggestion(editor, Number(option.dataset.sqlSuggestion));
   });
   $('#runQueryBtn').addEventListener('click', runQuery);
+  $('#explainQueryBtn').addEventListener('click', runExplainQuery);
+  $('#formatSqlBtn').addEventListener('click', formatCurrentSql);
   $('#saveQueryBtn').addEventListener('click', saveQuery);
   $('#cancelQueryBtn').addEventListener('click', cancelQuery);
   $('#queryResult').addEventListener('click', (event) => {
@@ -1418,6 +3586,33 @@ function renderQueryView() {
     app.query.resultView = viewName;
     $('#queryResult').innerHTML = queryResultHtml();
     $(`#queryResult [data-result-view="${viewName}"]`)?.focus();
+  });
+  $('#queryResult').addEventListener('click', (event) => {
+    const sortTh = event.target.closest('th[data-query-sort]');
+    if (sortTh) {
+      const colName = Number(sortTh.dataset.querySort);
+      if (app.query.sortCol === colName) {
+        if (app.query.sortDir === 'ASC') {
+          app.query.sortDir = 'DESC';
+        } else {
+          app.query.sortCol = null;
+          app.query.sortDir = 'ASC';
+        }
+      } else {
+        app.query.sortCol = colName;
+        app.query.sortDir = 'ASC';
+      }
+      $('#queryResult').innerHTML = queryResultHtml();
+      return;
+    }
+    const td = event.target.closest('td');
+    if (td && !td.classList.contains('muted') && event.detail === 2) {
+      const rawText = td.getAttribute('title') || td.textContent.trim();
+      if (rawText && rawText !== 'NULL') {
+        navigator.clipboard.writeText(rawText);
+        toast('Đã sao chép: ' + rawText.slice(0, 40) + (rawText.length > 40 ? '…' : ''));
+      }
+    }
   });
   $('#queryResult').addEventListener('keydown', (event) => {
     const resultTab = event.target.closest('[data-result-tab]');
@@ -1442,19 +3637,58 @@ function singleQueryResultHtml(result, compact = false) {
   if (result.kind !== 'rows') {
     return '<div class="errorbox">Kết quả truy vấn không hợp lệ.</div>';
   }
-  const header = `<tr><th></th>${result.columns.map((column) => `<th>${esc(column.name)} <small>${esc(column.type)}</small></th>`).join('')}</tr>`;
-  const body = result.rows.map((row, index) => `
+  const sortCol = app.query.sortCol;
+  const sortDir = app.query.sortDir === 'DESC' ? -1 : 1;
+  const compareText = new Intl.Collator(undefined, { numeric: true }).compare;
+  const header = `<tr><th></th>${result.columns.map((column, index) => {
+    const sorted = sortCol === index;
+    return `<th class="sortable${sorted ? (sortDir === 1 ? ' sorted-asc' : ' sorted-desc') : ''}" data-query-sort="${index}">${esc(column.name)} <small>${esc(column.type)}</small>${sorted ? `<span class="sort-arrow">${sortDir === 1 ? '▲' : '▼'}</span>` : ''}</th>`;
+  }).join('')}</tr>`;
+  const rows = Number.isInteger(sortCol) && sortCol >= 0 && sortCol < result.columns.length ? [...result.rows].sort((a, b) => {
+    const left = a[sortCol];
+    const right = b[sortCol];
+    if (left == null) return right == null ? 0 : -sortDir;
+    if (right == null) return sortDir;
+    if (typeof left === 'number' && typeof right === 'number') return (left - right) * sortDir;
+    return compareText(String(left), String(right)) * sortDir;
+  }) : result.rows;
+  const body = rows.map((row, index) => `
     <tr>
       <td class="muted">${index + 1}</td>
-      ${row.map((value) => {
-        const text = value === null || value === undefined ? 'NULL' : String(value);
+      ${row.map((value, colIdx) => {
+        const isNull = value === null || value === undefined;
+        const text = isNull ? 'NULL' : String(value);
         const shown = text.length > 180 ? `${text.slice(0, 180)}…` : text;
-        return `<td class="${value === null || value === undefined ? 'nullcell' : ''}" title="${esc(text.slice(0, 500))}">${esc(shown)}</td>`;
+        let cellDisplay = isNull ? '<span class="null-badge">NULL</span>' : esc(shown);
+        const colMeta = result.columns[colIdx];
+        const colName = colMeta ? colMeta.name.toLowerCase() : '';
+        if (result.isExplain && colName === 'type' && !isNull) {
+          const uType = String(value).toUpperCase();
+          if (uType === 'ALL') cellDisplay = '<span class="explain-badge bad" title="Quét toàn bộ bảng - Cần đánh thêm Index!">ALL ⚠️</span>';
+          else if (uType === 'INDEX') cellDisplay = '<span class="explain-badge warn" title="Quét toàn bộ chỉ mục">index</span>';
+          else if (uType === 'RANGE') cellDisplay = '<span class="explain-badge info" title="Quét trong khoảng">range</span>';
+          else if (['CONST', 'EQ_REF', 'REF'].includes(uType)) cellDisplay = `<span class="explain-badge good">${esc(value)} ✓</span>`;
+        } else if (result.isExplain && colName === 'extra' && !isNull) {
+          cellDisplay = cellDisplay
+            .replace(/Using filesort/g, '<span class="explain-extra-warn">Using filesort</span>')
+            .replace(/Using temporary/g, '<span class="explain-extra-warn">Using temporary</span>');
+        }
+        return `<td class="${isNull ? 'nullcell' : ''}" title="${esc(text.slice(0, 500))}">${cellDisplay}</td>`;
       }).join('')}
     </tr>
   `).join('') || `<tr><td colspan="${result.columns.length + 1}" class="empty">Không có dòng nào.</td></tr>`;
+  const exportToolbar = `
+    <div class="query-grid-toolbar">
+      <div class="actions-left">
+        <span class="resulttitle">✓ ${result.rows.length} dòng · ${result.durationMs} ms${result.truncated ? ' · giới hạn 5000 dòng' : ''}</span>
+      </div>
+      <div class="actions-right">
+        <button type="button" onclick="exportCurrentResult('csv')" title="Xuất kết quả truy vấn ra CSV">↧ Xuất CSV</button>
+        <button type="button" onclick="exportCurrentResult('json')" title="Xuất kết quả truy vấn ra JSON">↧ Xuất JSON</button>
+      </div>
+    </div>`;
   return `
-    ${compact ? '' : `<div class="resulttitle">✓ ${result.rows.length} dòng · ${result.durationMs} ms${result.truncated ? ' · đã giới hạn 5000 dòng' : ''}</div>`}
+    ${compact ? '' : exportToolbar}
     <div class="tablebox"><table><thead>${header}</thead><tbody>${body}</tbody></table></div>
     ${compact ? `<div class="query-grid-status">${result.rows.length} dòng · ${result.durationMs} ms${result.truncated ? ' · đã giới hạn dữ liệu hiển thị' : ''}</div>` : ''}
     ${!compact && result.truncated ? '<div class="hint">Kết quả hiển thị đã đạt giới hạn dòng. Truy vấn vẫn chạy hết và kết nối vẫn được giữ.</div>' : ''}
@@ -1598,6 +3832,8 @@ function updateQueryButtons() {
   const cancel = $('#cancelQueryBtn');
   const running = queryTabs.some((tab) => tab.running);
   if (run) run.disabled = running;
+  const explain = $('#explainQueryBtn');
+  if (explain) explain.disabled = running;
   if (cancel) cancel.style.display = running ? 'inline-block' : 'none';
 }
 
@@ -1617,21 +3853,32 @@ async function runQuery() {
     return;
   }
   const editor = $('#sql');
-  const sql = (editor?.value || tab.sql || '').trim();
-  if (!sql) {
+  const rawSql = (editor?.value || tab.sql || '').trim();
+  if (!rawSql) {
     toast('Câu lệnh SQL đang trống.', 'error');
     return;
   }
-  tab.sql = sql;
+  let sqlToRun = rawSql;
+  let isSelection = false;
+  if (editor && editor.selectionStart !== editor.selectionEnd) {
+    const selected = editor.value.slice(editor.selectionStart, editor.selectionEnd).trim();
+    if (selected) {
+      sqlToRun = selected;
+      isSelection = true;
+    }
+  }
+  tab.sql = rawSql;
   tab.running = true;
   tab.error = null;
   updateQueryButtons();
   renderQueryTabs();
-  if (app.query === tab) $('#queryResult').innerHTML = '<div class="empty">Đang chạy truy vấn…</div>';
+  if (app.query === tab && $('#queryResult')) {
+    $('#queryResult').innerHTML = `<div class="empty">${isSelection ? 'Đang chạy đoạn mã được chọn…' : 'Đang chạy truy vấn…'}</div>`;
+  }
   try {
     let result;
     try {
-      result = await call(desktop.db.query({ sql, timeoutMs: 30000 }));
+      result = await call(desktop.db.query({ sql: sqlToRun, timeoutMs: 30000 }));
     } catch (error) {
       if (error.code !== 'CONFIRM_REQUIRED') throw error;
       const confirmed = await confirmAction(
@@ -1643,7 +3890,7 @@ async function runQuery() {
         setStatus('Đã hủy chạy truy vấn');
         return;
       }
-      result = await call(desktop.db.query({ sql, timeoutMs: 30000, confirmed: true }));
+      result = await call(desktop.db.query({ sql: sqlToRun, timeoutMs: 30000, confirmed: true }));
     }
     tab.result = result;
     tab.error = null;
@@ -1651,13 +3898,15 @@ async function runQuery() {
       ? (result.failedCount ? 'message' : queryBatchTabs(result).find((item) => item.entry)?.key || 'message')
       : null;
     tab.resultView = 'data';
+    tab.sortCol = null;
+    tab.sortDir = 'ASC';
     await refreshQueryMetadata(result);
     const batchFailed = result.kind === 'batch' && result.failedCount > 0;
     const historyMessage = result.kind === 'batch'
       ? `${result.succeededCount}/${result.statementCount} câu lệnh`
       : (result.kind === 'ok' ? `${result.affectedRows} dòng` : `${result.rows.length} dòng`);
     historyRows.unshift({
-      sql,
+      sql: sqlToRun,
       ok: !batchFailed,
       at: new Date().toISOString(),
       durationMs: result.durationMs,
@@ -1677,7 +3926,7 @@ async function runQuery() {
     tab.error = error.message;
     tab.result = null;
     historyRows.unshift({
-      sql,
+      sql: sqlToRun,
       ok: false,
       at: new Date().toISOString(),
       durationMs: null,
@@ -1694,7 +3943,7 @@ async function runQuery() {
     tab.running = false;
     updateQueryButtons();
     renderQueryTabs();
-    if (app.query === tab) $('#queryResult').innerHTML = queryResultHtml();
+    if (app.query === tab && $('#queryResult')) $('#queryResult').innerHTML = queryResultHtml();
     persistState();
   }
 }
@@ -2406,20 +4655,60 @@ function connection(profile) {
           <label>Passphrase</label><input id="sshPassphrase" type="password" placeholder="${savedPassphrase ? 'Để trống = giữ passphrase đã lưu' : 'Passphrase (nếu có)'}">
         </div>
       </div>
+      <div class="successbox hidden" id="connSuccess"></div>
       <div class="errorbox hidden" id="connError"></div>
       <div class="actions">
         ${existing ? '<button type="button" class="danger" id="connDelete">Xóa kết nối</button><span class="spacer"></span>' : '<span class="spacer"></span>'}
         <button type="button" id="connCancel">Hủy</button>
-        <button type="button" id="connTest">Kiểm tra</button>
-        <button type="submit" class="primary">${existing ? 'Lưu &amp; kết nối' : 'Lưu &amp; kết nối'}</button>
+        <button type="button" id="connTest">Kiểm tra kết nối</button>
+        <button type="submit" class="primary" id="connSubmit">${existing ? 'Lưu &amp; kết nối' : 'Lưu &amp; kết nối'}</button>
       </div>
     </form>
   `, true);
 
   const form = $('#connectionForm');
   const errorBox = $('#connError');
-  const showError = (message) => {
-    errorBox.textContent = message;
+  const successBox = $('#connSuccess');
+  const testButton = $('#connTest');
+  const submitButton = $('#connSubmit');
+
+  const showSuccess = (message) => {
+    errorBox.classList.add('hidden');
+    errorBox.innerHTML = '';
+    successBox.textContent = message;
+    successBox.classList.remove('hidden');
+  };
+
+  const showError = (message, allowForceSave = false, payloadToSave = null) => {
+    successBox.classList.add('hidden');
+    errorBox.innerHTML = '';
+    const textNode = document.createElement('div');
+    textNode.textContent = message;
+    errorBox.appendChild(textNode);
+
+    if (allowForceSave && payloadToSave) {
+      const forceWrap = document.createElement('div');
+      forceWrap.style.marginTop = '8px';
+      const forceButton = document.createElement('button');
+      forceButton.type = 'button';
+      forceButton.textContent = 'Vẫn lưu cấu hình này (không kết nối ngay)';
+      forceButton.addEventListener('click', async () => {
+        try {
+          forceButton.disabled = true;
+          forceButton.textContent = 'Đang lưu…';
+          const saved = await call(desktop.connections.save(payloadToSave));
+          closeModal();
+          if (saved.workspaceId) app.activeWorkspaceId = saved.workspaceId;
+          await refreshConnections();
+          toast('Đã lưu kết nối');
+        } catch (err) {
+          showError(err.message);
+        }
+      });
+      forceWrap.appendChild(forceButton);
+      errorBox.appendChild(forceWrap);
+    }
+
     errorBox.classList.remove('hidden');
   };
   const toggleOptions = () => {
@@ -2473,31 +4762,50 @@ function connection(profile) {
   };
 
   $('#connCancel').addEventListener('click', closeModal);
-  $('#connTest').addEventListener('click', async () => {
+  testButton.addEventListener('click', async () => {
     errorBox.classList.add('hidden');
-    $('#connTest').disabled = true;
-    $('#connTest').textContent = 'Đang kiểm tra…';
+    successBox.classList.add('hidden');
+    testButton.disabled = true;
+    testButton.textContent = 'Đang kiểm tra…';
     try {
-      const result = await call(desktop.connections.test(readForm()));
-      toast(`Kết nối thành công · MySQL ${result.version}`);
+      const payload = readForm();
+      const result = await call(desktop.connections.test(payload));
+      showSuccess(`✓ Kết nối thành công! Phiên bản: MySQL ${result.version || ''}`);
     } catch (error) {
       showError(error.message);
     } finally {
-      $('#connTest').disabled = false;
-      $('#connTest').textContent = 'Kiểm tra';
+      testButton.disabled = false;
+      testButton.textContent = 'Kiểm tra kết nối';
     }
   });
+
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     errorBox.classList.add('hidden');
+    successBox.classList.add('hidden');
+    submitButton.disabled = true;
+    testButton.disabled = true;
+    const originalText = submitButton.textContent;
+    submitButton.textContent = 'Đang kiểm tra kết nối…';
+
+    const payload = readForm();
     try {
-      const saved = await call(desktop.connections.save(readForm()));
+      // 1. Kiểm tra kết nối trước khi lưu
+      await call(desktop.connections.test(payload));
+
+      // 2. Kết nối thành công -> Lưu cấu hình và mở kết nối
+      submitButton.textContent = 'Đang lưu…';
+      const saved = await call(desktop.connections.save(payload));
       closeModal();
       if (saved.workspaceId) app.activeWorkspaceId = saved.workspaceId;
       await refreshConnections();
       await connectTo(saved.id);
     } catch (error) {
-      showError(error.message);
+      showError(`Không thể kết nối đến cơ sở dữ liệu:\n${error.message}`, true, payload);
+    } finally {
+      submitButton.disabled = false;
+      testButton.disabled = false;
+      submitButton.textContent = originalText;
     }
   });
   const deleteButton = $('#connDelete');
@@ -2804,15 +5112,26 @@ async function transfer(type) {
   }
 
   modal(`
-    <h2>Nhập dữ liệu</h2>
+    <h2>Nhập dữ liệu vào bảng</h2>
     <p>${esc(app.database)}.${esc(table)}</p>
-    <div class="hint">Chọn tệp JSON là mảng đối tượng. Mỗi đối tượng tương ứng một dòng; tối đa 5000 dòng mỗi lần.</div>
+    <label>Chọn định dạng tệp</label>
+    <select id="importFormatSelect">
+      <option value="csv">CSV / TSV (Tự động map cột & Xem trước dữ liệu)</option>
+      <option value="json">JSON (Mảng đối tượng, tối đa 5000 dòng)</option>
+    </select>
+    <div class="hint">Tệp CSV cho phép xem trước 5 dòng dữ liệu mẫu và ghép từng cột vào bảng MySQL tương ứng.</div>
     <div class="actions">
       <button onclick="closeModal()">Hủy</button>
-      <button class="primary" id="importGo">Chọn tệp JSON…</button>
+      <button class="primary" id="importGo">Tiếp tục chọn tệp…</button>
     </div>
   `);
   $('#importGo').addEventListener('click', async () => {
+    const fmt = $('#importFormatSelect')?.value || 'csv';
+    if (fmt === 'csv') {
+      closeModal();
+      importCsvModal();
+      return;
+    }
     try {
       const file = await desktop.openJsonFile();
       if (file.canceled) return;

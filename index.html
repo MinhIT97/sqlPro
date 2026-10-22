@@ -54,7 +54,12 @@
         <span class="env">LIVE</span>
       </div>
       <div>
+        <button onclick="showProcesslistModal()" title="Quản lý tiến trình MySQL (Processlist)">🖥️ Tiến trình</button>
+        <button onclick="showServerVarsModal()" title="Xem cấu hình & trạng thái server">⚙️ Biến hệ thống</button>
+        <button onclick="showShortcutsModal()" title="Bảng tra cứu phím tắt (F1)">⌨️ Phím tắt</button>
         <button onclick="view('query')">Ctrl K &nbsp; SQL Editor</button>
+        <button class="theme-btn" id="themeToggleBtn" onclick="toggleTheme()" title="Chuyển chế độ Giao diện Sáng / Tối">☀️ Sáng</button>
+        <button onclick="showErDiagramModal()" title="Sơ đồ quan hệ CSDL (ERD)">📊 ERD</button>
         <button class="avatar header-avatar" id="accountAvatar" title="Tài khoản và đồng bộ" onclick="accountModal()">SP</button>
       </div>
     </header>
@@ -77,6 +82,7 @@
         <button onclick="view('structure')">Cấu trúc</button>
         <button onclick="view('indexes')">Indexes</button>
         <button onclick="view('relations')">Quan hệ</button>
+        <button onclick="showErDiagramModal()" title="Sơ đồ thực thể trực quan (ERD)">📊 Sơ đồ ERD</button>
       </nav>
       <div id="workspace"></div>
     </section>
@@ -88,6 +94,7 @@
 
   <dialog id="modal"></dialog>
   <div id="toast"></div>
+  <div id="contextMenu" class="context-menu hidden"></div>
   <script src="sql-autocomplete.js"></script>
   <script src="app.js"></script>
   <script src="desktop.js"></script>

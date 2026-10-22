@@ -3,9 +3,11 @@
 const fs = require('node:fs');
 const mysql = require('mysql2');
 const { Client: SshClient } = require('ssh2');
-const { SqlScriptParser, stripLeadingComments, createTarget, skipReason } = require('./sql-script.cjs');
+const { SqlScriptParser, splitSqlStatements, stripLeadingComments, createTarget, skipReason } = require('./sql-script.cjs');
 
 const MAX_QUERY_ROWS = 5000;
+const MAX_QUERY_BATCH_ROWS = 10000;
+const MAX_QUERY_STATEMENTS = 100;
 const MAX_EXPORT_ROWS = 20000;
 const MAX_IMPORT_ROWS = 5000;
 const MAX_PAGE_SIZE = 500;
@@ -74,9 +76,91 @@ function coerceValue(value, column) {
   return value;
 }
 
+function statementCommand(sql) {
+  const source = stripLeadingComments(sql).replace(
+    /\/\*!\d{0,6}\s*([\s\S]*?)\*\//g,
+    ' $1 '
+  );
+  const words = [];
+  let state = 'normal';
+  let escaped = false;
+  let depth = 0;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (state === 'lineComment') {
+      if (character === '\n' || character === '\r') state = 'normal';
+      continue;
+    }
+    if (state === 'blockComment') {
+      if (character === '*' && next === '/') {
+        index += 1;
+        state = 'normal';
+      }
+      continue;
+    }
+    if (state === 'single' || state === 'double') {
+      if (escaped) {
+        escaped = false;
+      } else if (character === '\\') {
+        escaped = true;
+      } else if (character === (state === 'single' ? "'" : '"')) {
+        if (next === character) index += 1;
+        else state = 'normal';
+      }
+      continue;
+    }
+    if (state === 'backtick') {
+      if (character === '`') {
+        if (next === '`') index += 1;
+        else state = 'normal';
+      }
+      continue;
+    }
+    if (character === "'") state = 'single';
+    else if (character === '"') state = 'double';
+    else if (character === '`') state = 'backtick';
+    else if (character === '#') state = 'lineComment';
+    else if (character === '-' && next === '-'
+      && (source[index + 2] === undefined || source.charCodeAt(index + 2) <= 32)) {
+      index += 1;
+      state = 'lineComment';
+    } else if (character === '/' && next === '*') {
+      index += 1;
+      state = 'blockComment';
+    } else if (character === '(') {
+      depth += 1;
+    } else if (character === ')') {
+      depth = Math.max(0, depth - 1);
+    } else if (depth === 0 && /[A-Za-z_]/.test(character)) {
+      let end = index + 1;
+      while (end < source.length && /[A-Za-z0-9_$]/.test(source[end])) end += 1;
+      words.push(source.slice(index, end).toUpperCase());
+      index = end - 1;
+    }
+  }
+
+  if (!words.length) return '';
+  if (words[0] !== 'WITH') return words[0];
+  const commands = new Set(['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'REPLACE', 'TABLE']);
+  return words.slice(1).find((word) => commands.has(word)) || 'WITH';
+}
+
 function isReadStatement(sql) {
-  const stripped = stripLeadingComments(sql);
-  return /^(select|show|describe|desc|explain|with|table)\b/i.test(stripped);
+  return /^(?:SELECT|SHOW|DESCRIBE|DESC|EXPLAIN|TABLE)$/.test(statementCommand(sql));
+}
+
+function isConfirmationRequired(sql) {
+  return /^(?:DROP|TRUNCATE|DELETE|UPDATE|ALTER|RENAME|REPLACE|GRANT|REVOKE)$/.test(statementCommand(sql));
+}
+
+function queryError(error) {
+  return {
+    message: error?.message || 'Đã xảy ra lỗi khi chạy truy vấn.',
+    code: error?.code ? String(error.code) : '',
+    sqlState: error?.sqlState ? String(error.sqlState) : ''
+  };
 }
 
 class DatabaseSession {
@@ -443,7 +527,7 @@ class DatabaseSession {
     };
   }
 
-  async runQuery(sql, timeoutMs = 30000) {
+  async runQuery(sql, timeoutMs = 30000, rowLimit = MAX_QUERY_ROWS) {
     this.ensureOpen();
     const statement = String(sql || '').trim();
     if (!statement) throw fail('Câu lệnh SQL đang trống.', 'EMPTY_QUERY');
@@ -451,6 +535,7 @@ class DatabaseSession {
     const startedAt = Date.now();
     if (!isReadStatement(statement)) {
       return new Promise((resolve, reject) => {
+        const connection = this.connection;
         let settled = false;
         const finish = (fn, value) => {
           if (settled) return;
@@ -462,7 +547,7 @@ class DatabaseSession {
         const timer = setTimeout(() => {
           this.dead = true;
           try {
-            this.connection.destroy();
+            connection.destroy();
           } catch {
             // ignore
           }
@@ -471,13 +556,14 @@ class DatabaseSession {
         this.cancelQuery = () => {
           this.dead = true;
           try {
-            this.connection.destroy();
+            connection.destroy();
           } catch {
             // ignore
           }
           finish(reject, fail('Đã hủy truy vấn.', 'QUERY_CANCELED'));
         };
-        this.connection.query(statement, (error, result) => {
+        connection.query(statement, (error, result) => {
+          if (settled) return;
           if (error) {
             finish(reject, error);
             return;
@@ -495,6 +581,7 @@ class DatabaseSession {
       });
     }
     return new Promise((resolve, reject) => {
+      const connection = this.connection;
       let settled = false;
       let columns = [];
       const rows = [];
@@ -509,7 +596,7 @@ class DatabaseSession {
       const stopConnection = () => {
         this.dead = true;
         try {
-          this.connection.destroy();
+          connection.destroy();
         } catch {
           // ignore
         }
@@ -524,7 +611,7 @@ class DatabaseSession {
       };
       let query;
       try {
-        query = this.connection.query({ sql: statement, rowsAsArray: true });
+        query = connection.query({ sql: statement, rowsAsArray: true });
       } catch (error) {
         finish(reject, error);
         return;
@@ -537,20 +624,15 @@ class DatabaseSession {
           type: TYPE_NAMES[field.columnType] || String(field.columnType)
         }));
       });
+      const safeRowLimit = Math.max(0, Math.min(MAX_QUERY_ROWS, Number(rowLimit) || 0));
       query.on('result', (row) => {
-        if (rows.length >= MAX_QUERY_ROWS) {
+        if (settled) return;
+        if (rows.length >= safeRowLimit) {
           truncated = true;
-          stopConnection();
-          finish(resolve, {
-            kind: 'rows',
-            columns,
-            rows,
-            truncated,
-            durationMs: Date.now() - startedAt
-          });
           return;
         }
-        rows.push(row.map(serializeValue));
+        const values = Array.isArray(row) ? row : Object.values(row || {});
+        rows.push(values.map(serializeValue));
       });
       query.on('error', (error) => finish(reject, error));
       query.on('end', () => {
@@ -563,6 +645,68 @@ class DatabaseSession {
         });
       });
     });
+  }
+
+  async runQueryScript(sql, timeoutMs = 30000, confirmed = false) {
+    this.ensureOpen();
+    const source = String(sql || '').trim();
+    if (!source) throw fail('Câu lệnh SQL đang trống.', 'EMPTY_QUERY');
+    if (source.length > 1024 * 1024) throw fail('Nội dung SQL vượt quá 1 MB.', 'QUERY_TOO_LARGE');
+
+    let statements;
+    try {
+      statements = splitSqlStatements(source);
+    } catch (error) {
+      throw fail(error.message, 'INVALID_SQL_SCRIPT');
+    }
+    if (!statements.length) throw fail('Không tìm thấy câu lệnh SQL để chạy.', 'EMPTY_QUERY');
+    if (statements.length > MAX_QUERY_STATEMENTS) {
+      throw fail(`Mỗi lần chỉ được chạy tối đa ${MAX_QUERY_STATEMENTS} câu lệnh.`, 'TOO_MANY_STATEMENTS');
+    }
+    if (!confirmed) {
+      const dangerous = statements
+        .map((statement, index) => ({ statement, index }))
+        .filter(({ statement }) => isConfirmationRequired(statement));
+      if (dangerous.length) {
+        const numbers = dangerous.map(({ index }) => index + 1).join(', ');
+        throw fail(`Câu lệnh #${numbers} có thể thay đổi hoặc xóa dữ liệu.`, 'CONFIRM_REQUIRED');
+      }
+    }
+
+    if (statements.length === 1) return this.runQuery(statements[0], timeoutMs);
+
+    const startedAt = Date.now();
+    const deadline = startedAt + Math.max(1, Number(timeoutMs) || 30000);
+    const results = [];
+    let storedRows = 0;
+    for (let index = 0; index < statements.length; index += 1) {
+      const statement = statements[index];
+      try {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) throw fail('Truy vấn quá thời gian cho phép.', 'QUERY_TIMEOUT');
+        const result = await this.runQuery(
+          statement,
+          remainingMs,
+          Math.max(0, MAX_QUERY_BATCH_ROWS - storedRows)
+        );
+        if (result.kind === 'rows') storedRows += result.rows.length;
+        results.push({ index: index + 1, sql: statement, ok: true, result });
+      } catch (error) {
+        results.push({ index: index + 1, sql: statement, ok: false, error: queryError(error) });
+        break;
+      }
+    }
+    return {
+      kind: 'batch',
+      statementCount: statements.length,
+      executedCount: results.length,
+      succeededCount: results.filter((entry) => entry.ok).length,
+      failedCount: results.filter((entry) => !entry.ok).length,
+      stopped: results.length < statements.length || results.some((entry) => !entry.ok),
+      truncated: results.some((entry) => entry.ok && entry.result?.truncated),
+      results,
+      durationMs: Date.now() - startedAt
+    };
   }
 
   async insertRow({ database, table, values }) {
@@ -683,7 +827,27 @@ class DatabaseSession {
     };
   }
 
-  async backupDatabase(
+  async backupDatabase(options, write, onProgress) {
+    this.ensureOpen();
+    const database = options && options.database;
+    if (typeof database !== 'string' || !database) throw fail('Database không hợp lệ.', 'INVALID_DATABASE');
+    const previous = await this.raw('SELECT DATABASE() AS value');
+    const previousDatabase = previous.rows[0]?.value || null;
+    await this.useDatabase(database);
+    try {
+      return await this.writeBackup(options, write, onProgress);
+    } finally {
+      if (previousDatabase && previousDatabase !== database) {
+        try {
+          await this.useDatabase(previousDatabase);
+        } catch {
+          // keep the selected database if it cannot be restored
+        }
+      }
+    }
+  }
+
+  async writeBackup(
     { database, tables, includeStructure = true, includeData = true, dropTables = false },
     write,
     onProgress
@@ -712,6 +876,7 @@ class DatabaseSession {
     let bytes = 0;
     let rows = 0;
     let objects = 0;
+    let triggerCount = 0;
     let lastReport = 0;
 
     const report = (force = false) => {
@@ -798,6 +963,33 @@ class DatabaseSession {
         objects += 1;
         report();
       }
+
+      const selectedTables = new Set(dataTables.map((entry) => entry.name));
+      const triggerResult = await this.raw(
+        `SELECT TRIGGER_NAME AS name, ACTION_TIMING AS timing, EVENT_MANIPULATION AS event,
+                EVENT_OBJECT_TABLE AS tableName, ACTION_STATEMENT AS statement
+           FROM information_schema.TRIGGERS
+          WHERE TRIGGER_SCHEMA = ?
+          ORDER BY EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, TRIGGER_NAME`,
+        [database]
+      );
+      const triggers = triggerResult.rows.filter((row) => selectedTables.has(row.tableName));
+      if (triggers.length) {
+        const bodies = triggers.map((trigger) => String(trigger.statement || '').trim().replace(/;\s*$/, ''));
+        let delimiter = '$$';
+        while (bodies.some((body) => body.includes(delimiter))) delimiter += '$';
+        await emit(`DELIMITER ${delimiter}\n`);
+        for (const [index, trigger] of triggers.entries()) {
+          const statement = bodies[index];
+          await emit(`-- Trigger ${quoteId(trigger.name)} on ${quoteId(trigger.tableName)}\n`);
+          if (dropTables) await emit(`DROP TRIGGER IF EXISTS ${quoteId(trigger.name)}${delimiter}\n`);
+          await emit(`CREATE TRIGGER ${quoteId(trigger.name)} ${trigger.timing} ${trigger.event} ON ${quoteId(trigger.tableName)} FOR EACH ROW ${statement}${delimiter}\n\n`);
+          objects += 1;
+          report();
+        }
+        await emit('DELIMITER ;\n\n');
+      }
+      triggerCount = triggers.length;
     }
 
     await emit([
@@ -811,6 +1003,7 @@ class DatabaseSession {
       database,
       tables: dataTables.length,
       views: views.length,
+      triggers: triggerCount,
       rows,
       bytes,
       durationMs: Date.now() - startedAt
@@ -865,7 +1058,8 @@ class DatabaseSession {
       if (dropExisting) {
         const target = createTarget(sql);
         if (target && target.name) {
-          await this.raw(`DROP ${target.type === 'view' ? 'VIEW' : 'TABLE'} IF EXISTS ${quoteId(target.name)}`);
+          const kind = target.type === 'view' ? 'VIEW' : target.type === 'trigger' ? 'TRIGGER' : 'TABLE';
+          await this.raw(`DROP ${kind} IF EXISTS ${quoteId(target.name)}`);
         }
       }
       try {
@@ -876,7 +1070,7 @@ class DatabaseSession {
         let message = `Lỗi ở câu lệnh #${statements}: ${error.message}`;
         if (summary) message += `\n${summary}${sql.length > 120 ? '…' : ''}`;
         if (error.code === 'ER_TABLE_EXISTS_ERROR' && !dropExisting) {
-          message += '\nBật tùy chọn "Xóa bảng/view trùng tên" nếu muốn ghi đè.';
+          message += '\nBật tùy chọn "Xóa bảng/view/trigger trùng tên" nếu muốn ghi đè.';
         }
         error.message = message;
         throw error;

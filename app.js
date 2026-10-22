@@ -26,6 +26,21 @@ const app = {
   relations: null
 };
 
+let queryTabs = [{ id: 1, title: 'Query 1', sql: null, result: null, error: null, running: false }];
+let activeQuery = 0;
+let queryId = 1;
+app.query = queryTabs[0];
+
+const sqlAutocomplete = {
+  items: [],
+  selected: 0,
+  context: null,
+  requestId: 0,
+  columnCache: new Map(),
+  blurTimer: null,
+  composing: false
+};
+
 const $ = (selector) => document.querySelector(selector);
 
 function esc(value) {
@@ -123,6 +138,248 @@ function defaultSql() {
   return `SELECT *\nFROM ${quoteId(app.database)}.${quoteId(table)}\nLIMIT 100;`;
 }
 
+function closeSqlSuggestions() {
+  sqlAutocomplete.requestId += 1;
+  sqlAutocomplete.items = [];
+  sqlAutocomplete.context = null;
+  sqlAutocomplete.selected = 0;
+  const host = $('#sqlSuggestions');
+  const editor = $('#sql');
+  if (host) {
+    host.classList.add('hidden');
+    host.innerHTML = '';
+  }
+  if (editor) {
+    editor.setAttribute('aria-expanded', 'false');
+    editor.removeAttribute('aria-activedescendant');
+  }
+}
+
+function invalidateSqlAutocomplete() {
+  sqlAutocomplete.columnCache.clear();
+  closeSqlSuggestions();
+}
+
+function autocompleteCacheKey(database, tableName) {
+  return `${app.connection?.id || ''}\u0000${database || ''}\u0000${tableName || ''}`.toLocaleLowerCase();
+}
+
+function loadAutocompleteColumns(database, tableName) {
+  if (!desktop || !app.connection || !database || !tableName) return Promise.resolve([]);
+  const key = autocompleteCacheKey(database, tableName);
+  const cached = sqlAutocomplete.columnCache.get(key);
+  if (cached) return cached;
+  const pending = call(desktop.db.columns(database, tableName))
+    .catch(() => {
+      sqlAutocomplete.columnCache.delete(key);
+      return [];
+    });
+  sqlAutocomplete.columnCache.set(key, pending);
+  return pending;
+}
+
+function autocompleteTypeLabel(type) {
+  return ({ keyword: 'SQL', function: 'Hàm', snippet: 'Mẫu', table: 'Bảng', view: 'View', column: 'Cột' })[type] || type || 'SQL';
+}
+
+function setSqlSuggestionSelection(index) {
+  if (!sqlAutocomplete.items.length) return;
+  const count = sqlAutocomplete.items.length;
+  sqlAutocomplete.selected = ((index % count) + count) % count;
+  const host = $('#sqlSuggestions');
+  if (!host) return;
+  host.querySelectorAll('[data-sql-suggestion]').forEach((element, itemIndex) => {
+    const selected = itemIndex === sqlAutocomplete.selected;
+    element.classList.toggle('selected', selected);
+    element.setAttribute('aria-selected', selected ? 'true' : 'false');
+    if (selected) {
+      $('#sql')?.setAttribute('aria-activedescendant', element.id);
+      element.scrollIntoView({ block: 'nearest' });
+    }
+  });
+}
+
+function positionSqlSuggestions(editor, host) {
+  const wrapper = editor.closest('.sql-editor-wrap');
+  if (!wrapper) return;
+  const computed = getComputedStyle(editor);
+  const mirror = document.createElement('div');
+  Object.assign(mirror.style, {
+    position: 'absolute',
+    visibility: 'hidden',
+    pointerEvents: 'none',
+    whiteSpace: 'pre-wrap',
+    overflowWrap: 'break-word',
+    wordBreak: computed.wordBreak,
+    boxSizing: computed.boxSizing,
+    width: `${editor.offsetWidth}px`,
+    padding: computed.padding,
+    border: computed.border,
+    font: computed.font,
+    lineHeight: computed.lineHeight,
+    letterSpacing: computed.letterSpacing
+  });
+  mirror.textContent = editor.value.slice(0, editor.selectionStart);
+  const marker = document.createElement('span');
+  marker.textContent = '\u200b';
+  mirror.appendChild(marker);
+  wrapper.appendChild(mirror);
+  const lineHeight = Number.parseFloat(computed.lineHeight) || 23;
+  const rawLeft = marker.offsetLeft - editor.scrollLeft;
+  const rawTop = marker.offsetTop - editor.scrollTop + lineHeight + 4;
+  mirror.remove();
+  const maxLeft = Math.max(8, wrapper.clientWidth - Math.min(host.offsetWidth || 360, 560) - 8);
+  host.style.left = `${Math.max(8, Math.min(rawLeft, maxLeft))}px`;
+  host.style.top = `${Math.max(8, rawTop)}px`;
+}
+
+function renderSqlSuggestions(editor, context, items) {
+  const host = $('#sqlSuggestions');
+  if (!host) return;
+  if (!items.length) {
+    sqlAutocomplete.items = [];
+    sqlAutocomplete.context = context;
+    sqlAutocomplete.selected = 0;
+    host.classList.add('hidden');
+    host.innerHTML = '';
+    editor.setAttribute('aria-expanded', 'false');
+    editor.removeAttribute('aria-activedescendant');
+    return;
+  }
+  sqlAutocomplete.items = items;
+  sqlAutocomplete.context = context;
+  sqlAutocomplete.selected = Math.min(sqlAutocomplete.selected, items.length - 1);
+  host.innerHTML = items.map((item, index) => `
+    <div class="sql-suggestion${index === sqlAutocomplete.selected ? ' selected' : ''}"
+         id="sqlSuggestion${index}" data-sql-suggestion="${index}" role="option"
+         aria-selected="${index === sqlAutocomplete.selected ? 'true' : 'false'}">
+      <span class="sql-suggestion-main">
+        <span class="sql-suggestion-kind">${esc(autocompleteTypeLabel(item.type))}</span>
+        <span class="sql-suggestion-label">${esc(item.label)}</span>
+      </span>
+      <span class="sql-suggestion-detail">${esc(item.detail || '')}</span>
+    </div>
+  `).join('');
+  host.classList.remove('hidden');
+  editor.setAttribute('aria-expanded', 'true');
+  editor.setAttribute('aria-activedescendant', `sqlSuggestion${sqlAutocomplete.selected}`);
+  positionSqlSuggestions(editor, host);
+}
+
+function resolveAutocompleteReference(context, qualifier) {
+  const lower = String(qualifier || '').toLocaleLowerCase();
+  const reference = context.references.find((entry) =>
+    String(entry.alias || '').toLocaleLowerCase() === lower
+      || String(entry.table || '').toLocaleLowerCase() === lower
+  );
+  if (reference) return reference;
+  const object = app.tables.find((entry) => entry.name.toLocaleLowerCase() === lower);
+  return object ? { table: object.name } : null;
+}
+
+function tableAutocompleteItems() {
+  return app.tables.map((entry) => ({
+    label: entry.name,
+    insertText: quoteId(entry.name),
+    type: entry.type === 'view' ? 'view' : 'table',
+    detail: `${entry.type === 'view' ? 'View' : 'Bảng'} · ${app.database || ''}`
+  }));
+}
+
+async function refreshSqlSuggestions(editor, force = false) {
+  const api = window.SqlAutocomplete;
+  if (!api || !editor || sqlAutocomplete.composing || editor !== $('#sql')) return;
+  const context = api.getContext(editor.value, editor.selectionStart);
+  const localCaret = editor.selectionStart - context.statementStart;
+  const beforeCaret = context.statement.slice(0, Math.max(0, localCaret));
+  const expectsTable = /\b(?:FROM|JOIN|UPDATE|INTO|TABLE|DESCRIBE|DESC)\s+(?:`[^`]*|[A-Za-z0-9_$]*)$/i.test(beforeCaret);
+  if (context.disabled || (!force && !context.qualifier && !context.prefix && !expectsTable)) {
+    closeSqlSuggestions();
+    return;
+  }
+
+  const requestId = ++sqlAutocomplete.requestId;
+  const captured = {
+    tabId: app.query?.id,
+    connectionId: app.connection?.id,
+    database: app.database,
+    value: editor.value,
+    caret: editor.selectionStart
+  };
+  const tables = tableAutocompleteItems();
+  let baseItems;
+  if (context.qualifier) {
+    baseItems = [];
+  } else if (expectsTable) {
+    baseItems = tables;
+  } else {
+    baseItems = [...api.SQL_SUGGESTIONS, ...tables];
+  }
+  const rankedBase = api.rankSuggestions(baseItems, context.prefix, 60);
+  renderSqlSuggestions(editor, context, rankedBase);
+
+  let targets = [];
+  if (context.qualifier) {
+    const reference = resolveAutocompleteReference(context, context.qualifier);
+    if (reference) targets = [reference];
+  } else if (!expectsTable) {
+    const seen = new Set();
+    targets = context.references.filter((reference) => {
+      const key = `${reference.database || app.database || ''}\u0000${reference.table}`.toLocaleLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 5);
+  }
+  if (!targets.length) return;
+
+  const columnGroups = await Promise.all(targets.map(async (reference) => ({
+    reference,
+    columns: await loadAutocompleteColumns(reference.database || app.database, reference.table)
+  })));
+  if (requestId !== sqlAutocomplete.requestId
+      || editor !== $('#sql')
+      || !editor.isConnected
+      || mode !== 'query'
+      || app.query?.id !== captured.tabId
+      || app.connection?.id !== captured.connectionId
+      || app.database !== captured.database
+      || editor.value !== captured.value
+      || editor.selectionStart !== captured.caret) return;
+
+  const multipleReferences = context.references.length > 1;
+  const columnItems = columnGroups.flatMap(({ reference, columns }) => columns.map((column) => {
+    const owner = reference.alias || reference.table;
+    const qualified = !context.qualifier && multipleReferences;
+    return {
+      label: context.qualifier || qualified ? `${owner}.${column.name}` : column.name,
+      insertText: context.qualifier
+        ? quoteId(column.name)
+        : (qualified ? `${quoteId(owner)}.${quoteId(column.name)}` : quoteId(column.name)),
+      type: 'column',
+      detail: `${reference.table} · ${column.type || 'column'}`
+    };
+  }));
+  renderSqlSuggestions(editor, context, api.rankSuggestions([...columnItems, ...baseItems], context.prefix, 60));
+}
+
+function acceptSqlSuggestion(editor, index = sqlAutocomplete.selected) {
+  const item = sqlAutocomplete.items[index];
+  const context = sqlAutocomplete.context;
+  if (!editor || !item || !context) return;
+  const insertText = String(item.insertText ?? item.label);
+  editor.setRangeText(insertText, context.start, context.end, 'end');
+  if (/\(\)$/.test(insertText)) {
+    const caret = editor.selectionStart - 1;
+    editor.setSelectionRange(caret, caret);
+  }
+  app.query.sql = editor.value;
+  sessionStorage.setItem('query', editor.value);
+  persistState();
+  closeSqlSuggestions();
+  editor.focus();
+}
+
 function normalizeHistory(item) {
   if (typeof item === 'string') return { sql: item, ok: true, at: '', durationMs: null };
   if (!item || typeof item !== 'object' || typeof item.sql !== 'string') return null;
@@ -138,6 +395,8 @@ function normalizeHistory(item) {
 let persistTimer;
 function persistState() {
   if (!desktop) return;
+  const editor = $('#sql');
+  if (mode === 'query' && editor && app.query) app.query.sql = editor.value;
   clearTimeout(persistTimer);
   persistTimer = setTimeout(() => {
     desktop.saveState({
@@ -145,7 +404,9 @@ function persistState() {
       database: app.database,
       table,
       mode,
-      savedQuery: sessionStorage.getItem('query') || '',
+      savedQuery: app.query?.sql ?? (sessionStorage.getItem('query') || ''),
+      queryTabs: queryTabs.map((tab) => ({ title: tab.title, sql: tab.sql ?? '' })),
+      activeQuery,
       history: historyRows.slice(0, 100)
     }).catch(() => undefined);
   }, 150);
@@ -155,6 +416,7 @@ async function init() {
   $('#treeSearch').addEventListener('input', debounce(renderSidebar, 180));
   $('#connectionList').addEventListener('click', onConnectionClick);
   $('#databaseTree').addEventListener('click', onTreeClick);
+  $('#tabs').addEventListener('click', onTabClick);
 
   if (!desktop) {
     renderSidebar();
@@ -177,8 +439,28 @@ async function init() {
   } catch {
     saved = {};
   }
+  if (saved && Array.isArray(saved.queryTabs) && saved.queryTabs.length) {
+    queryTabs = saved.queryTabs.slice(0, 50).map((tab, index) => ({
+      id: index + 1,
+      title: tab && typeof tab.title === 'string' && tab.title.trim()
+        ? tab.title.trim().slice(0, 40)
+        : `Query ${index + 1}`,
+      sql: tab && typeof tab.sql === 'string' ? tab.sql : '',
+      result: null,
+      error: null,
+      running: false
+    }));
+    queryId = queryTabs.reduce((max, tab) => {
+      const match = /(\d+)\s*$/.exec(tab.title);
+      return Math.max(max, match ? Number(match[1]) : 0);
+    }, queryTabs.length);
+    activeQuery = Number.isInteger(saved.activeQuery)
+      ? Math.min(Math.max(saved.activeQuery, 0), queryTabs.length - 1)
+      : 0;
+    app.query = queryTabs[activeQuery];
+  }
   if (saved && typeof saved.savedQuery === 'string' && saved.savedQuery) {
-    app.query.sql = saved.savedQuery;
+    if (!Array.isArray(saved.queryTabs) || !saved.queryTabs.length) queryTabs[0].sql = saved.savedQuery;
     sessionStorage.setItem('query', saved.savedQuery);
   }
   if (saved && Array.isArray(saved.history)) {
@@ -310,6 +592,7 @@ function onTreeClick(event) {
     return;
   }
   if (event.target.closest('[data-db-list]')) {
+    invalidateSqlAutocomplete();
     app.database = null;
     app.tables = [];
     table = null;
@@ -344,6 +627,7 @@ async function connectTo(id, options = {}) {
     renderSidebar();
     return;
   }
+  invalidateSqlAutocomplete();
   app.connection = profile;
   app.serverType = profile.type;
   app.server = '';
@@ -394,6 +678,7 @@ async function connectTo(id, options = {}) {
 }
 
 async function selectDatabase(database, options = {}) {
+  invalidateSqlAutocomplete();
   try {
     await call(desktop.db.useDatabase(database));
   } catch (error) {
@@ -467,6 +752,104 @@ async function loadData() {
   }
 }
 
+function syncActiveQuery() {
+  if (mode !== 'query') return;
+  const editor = $('#sql');
+  if (!editor || !app.query) return;
+  app.query.sql = editor.value;
+  sessionStorage.setItem('query', editor.value);
+}
+
+function renderQueryTabs() {
+  const host = $('#queryTabs');
+  if (!host) return;
+  host.innerHTML = queryTabs.map((tab, index) => `
+    <button class="querytab${mode === 'query' && index === activeQuery ? ' selected' : ''}" data-query-tab="${index}" title="${esc(tab.title)}">
+      ⌑ &nbsp; ${esc(tab.title)}${tab.running ? ' <span class="tabrunning">…</span>' : ''} &nbsp; <span class="tabclose" data-close-query="${index}" title="Đóng tab">×</span>
+    </button>
+  `).join('');
+}
+
+function onTabClick(event) {
+  const close = event.target.closest('[data-close-query]');
+  if (close) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeQueryTab(Number(close.dataset.closeQuery));
+    return;
+  }
+  const tab = event.target.closest('[data-query-tab]');
+  if (tab) selectQueryTab(Number(tab.dataset.queryTab));
+}
+
+function newQuery(sql = '') {
+  if (!desktop || !app.connection) {
+    toast('Chọn kết nối trước khi mở truy vấn.', 'error');
+    view('query');
+    return;
+  }
+  if (queryTabs.length >= 50) {
+    toast('Đã mở tối đa 50 tab truy vấn.', 'error');
+    return;
+  }
+  syncActiveQuery();
+  queryId += 1;
+  const tab = { id: queryId, title: `Query ${queryId}`, sql: String(sql ?? ''), result: null, error: null, running: false };
+  queryTabs.push(tab);
+  activeQuery = queryTabs.length - 1;
+  app.query = tab;
+  mode = 'query';
+  updateChrome();
+  renderQueryView();
+  persistState();
+  $('#sql')?.focus();
+}
+
+function selectQueryTab(index) {
+  if (index < 0 || index >= queryTabs.length) return;
+  if (index === activeQuery && mode === 'query') {
+    $('#sql')?.focus();
+    return;
+  }
+  syncActiveQuery();
+  activeQuery = index;
+  app.query = queryTabs[index];
+  mode = 'query';
+  updateChrome();
+  if (!app.connection) renderWelcome();
+  else renderQueryView();
+  persistState();
+  $('#sql')?.focus();
+}
+
+function closeQueryTab(index) {
+  if (index < 0 || index >= queryTabs.length) return;
+  const tab = queryTabs[index];
+  if (tab.running) {
+    toast('Không thể đóng tab khi truy vấn đang chạy.', 'error');
+    return;
+  }
+  const wasActive = index === activeQuery;
+  if (mode === 'query' && wasActive) syncActiveQuery();
+  queryTabs.splice(index, 1);
+  if (!queryTabs.length) {
+    queryId += 1;
+    queryTabs.push({ id: queryId, title: `Query ${queryId}`, sql: '', result: null, error: null, running: false });
+    activeQuery = 0;
+  } else if (index < activeQuery) {
+    activeQuery -= 1;
+  } else if (wasActive) {
+    activeQuery = Math.min(activeQuery, queryTabs.length - 1);
+  }
+  app.query = queryTabs[activeQuery];
+  updateChrome();
+  if (mode === 'query' && wasActive) {
+    if (!app.connection) renderWelcome();
+    else renderQueryView();
+  }
+  persistState();
+}
+
 function updateChrome() {
   const label = mode === 'query' ? 'QUERY' : mode === 'history' ? 'WORKSPACE' : mode === 'data' ? 'TABLE' : mode.toUpperCase();
   const title = mode === 'query' ? 'SQL Editor' : mode === 'history' ? 'Lịch sử truy vấn' : (table || app.database || 'Workspace');
@@ -485,7 +868,7 @@ function updateChrome() {
   $('#crumbServer').textContent = app.connection ? `${app.serverType === 'mariadb' ? 'MARIADB' : 'MYSQL'}${app.server ? ` ${app.server}` : ''}` : 'NO CONNECTION';
   $('#tabName').textContent = table || '—';
   $('#dataTab').classList.toggle('selected', mode !== 'query');
-  $('#queryTab').classList.toggle('selected', mode === 'query');
+  renderQueryTabs();
   $('#subnav').style.display = ['query', 'history'].includes(mode) ? 'none' : 'flex';
   [...$('#subnav').children].forEach((button, index) => {
     button.classList.toggle('current', ['data', 'structure', 'indexes', 'relations'][index] === mode);
@@ -494,10 +877,17 @@ function updateChrome() {
 }
 
 async function view(nextMode) {
+  if (mode === 'query' && nextMode !== 'query') syncActiveQuery();
   mode = nextMode;
   updateChrome();
   if (!app.connection) {
     renderWelcome();
+    return;
+  }
+  if (nextMode === 'query') {
+    app.query = queryTabs[activeQuery];
+    renderQueryView();
+    persistState();
     return;
   }
   if (!app.database) {
@@ -507,8 +897,6 @@ async function view(nextMode) {
   if (nextMode === 'data') {
     if (table) await loadData();
     else renderEmptyTable();
-  } else if (nextMode === 'query') {
-    renderQueryView();
   } else if (nextMode === 'history') {
     renderHistoryView();
   } else if (nextMode === 'structure') {
@@ -751,9 +1139,7 @@ function showDdl() {
 }
 
 function openTableInEditor() {
-  app.query.sql = defaultSql();
-  sessionStorage.setItem('query', app.query.sql);
-  view('query');
+  newQuery(defaultSql());
 }
 
 function renderIndexesView() {
@@ -816,17 +1202,23 @@ function renderRelationsView() {
 }
 
 function renderQueryView() {
-  const value = $('#sql')?.value ?? (app.query.sql || sessionStorage.getItem('query') || defaultSql());
+  sqlAutocomplete.requestId += 1;
+  const value = app.query.sql === null || app.query.sql === undefined ? defaultSql() : app.query.sql;
   app.query.sql = value;
+  sessionStorage.setItem('query', value);
+  updateChrome();
   $('#workspace').innerHTML = `
     <div class="toolbar">
       <button class="primary" id="runQueryBtn">▷ Chạy truy vấn</button>
       <button id="saveQueryBtn">⌑ Lưu truy vấn</button>
       <button class="danger" id="cancelQueryBtn" style="display:${app.query.running ? 'inline-block' : 'none'}">■ Hủy</button>
       <span class="spacer"></span>
-      <span class="subtle">${esc(app.database)}${table ? ` · ${esc(table)}` : ''} &nbsp; · &nbsp; Ctrl + Enter</span>
+      <span class="subtle">${esc(app.database || 'chưa chọn database')}${table ? ` · ${esc(table)}` : ''} &nbsp; · &nbsp; Ctrl + Enter</span>
     </div>
-    <textarea class="editor" id="sql" spellcheck="false"></textarea>
+    <div class="sql-editor-wrap">
+      <textarea class="editor" id="sql" spellcheck="false" autocomplete="off" aria-label="SQL editor" aria-autocomplete="list" aria-controls="sqlSuggestions"></textarea>
+      <div class="sql-suggestions hidden" id="sqlSuggestions" role="listbox" aria-label="Gợi ý SQL"></div>
+    </div>
     <div id="queryResult">${queryResultHtml()}</div>
   `;
   const editor = $('#sql');
@@ -835,12 +1227,67 @@ function renderQueryView() {
     app.query.sql = editor.value;
     sessionStorage.setItem('query', editor.value);
     persistState();
+    void refreshSqlSuggestions(editor);
   });
   editor.addEventListener('keydown', (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
       event.preventDefault();
+      closeSqlSuggestions();
       runQuery();
+      return;
     }
+    if ((event.ctrlKey || event.metaKey) && event.code === 'Space') {
+      event.preventDefault();
+      void refreshSqlSuggestions(editor, true);
+      return;
+    }
+    const suggestionsOpen = !$('#sqlSuggestions').classList.contains('hidden');
+    if (!suggestionsOpen) return;
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setSqlSuggestionSelection(sqlAutocomplete.selected + 1);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setSqlSuggestionSelection(sqlAutocomplete.selected - 1);
+    } else if (event.key === 'Enter' || event.key === 'Tab') {
+      event.preventDefault();
+      acceptSqlSuggestion(editor);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      closeSqlSuggestions();
+    }
+  });
+  editor.addEventListener('keyup', (event) => {
+    if (['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) {
+      void refreshSqlSuggestions(editor);
+    }
+  });
+  editor.addEventListener('click', () => void refreshSqlSuggestions(editor));
+  editor.addEventListener('scroll', closeSqlSuggestions);
+  editor.addEventListener('compositionstart', () => {
+    sqlAutocomplete.composing = true;
+    closeSqlSuggestions();
+  });
+  editor.addEventListener('compositionend', () => {
+    sqlAutocomplete.composing = false;
+    void refreshSqlSuggestions(editor);
+  });
+  editor.addEventListener('blur', () => {
+    clearTimeout(sqlAutocomplete.blurTimer);
+    sqlAutocomplete.blurTimer = setTimeout(closeSqlSuggestions, 120);
+  });
+  const suggestions = $('#sqlSuggestions');
+  suggestions.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    clearTimeout(sqlAutocomplete.blurTimer);
+  });
+  suggestions.addEventListener('mousemove', (event) => {
+    const option = event.target.closest('[data-sql-suggestion]');
+    if (option) setSqlSuggestionSelection(Number(option.dataset.sqlSuggestion));
+  });
+  suggestions.addEventListener('click', (event) => {
+    const option = event.target.closest('[data-sql-suggestion]');
+    if (option) acceptSqlSuggestion(editor, Number(option.dataset.sqlSuggestion));
   });
   $('#runQueryBtn').addEventListener('click', runQuery);
   $('#saveQueryBtn').addEventListener('click', saveQuery);
@@ -848,16 +1295,12 @@ function renderQueryView() {
   updateQueryButtons();
 }
 
-function queryResultHtml() {
-  if (app.query.error) {
-    return `<div class="errorbox">${esc(app.query.error)}</div>`;
-  }
-  const result = app.query.result;
-  if (!result) {
-    return `<div class="empty">▷<br><br>Chạy truy vấn để xem kết quả.<br><br>Kết nối đang dùng: ${esc(app.connection?.name || '—')}</div>`;
-  }
+function singleQueryResultHtml(result) {
   if (result.kind === 'ok') {
     return `<div class="resulttitle">✓ Thành công · ${result.affectedRows} dòng bị ảnh hưởng${result.insertId !== null ? ` · insert id ${esc(result.insertId)}` : ''} · ${result.durationMs} ms</div>`;
+  }
+  if (result.kind !== 'rows') {
+    return '<div class="errorbox">Kết quả truy vấn không hợp lệ.</div>';
   }
   const header = `<tr><th></th>${result.columns.map((column) => `<th>${esc(column.name)} <small>${esc(column.type)}</small></th>`).join('')}</tr>`;
   const body = result.rows.map((row, index) => `
@@ -877,11 +1320,53 @@ function queryResultHtml() {
   `;
 }
 
+function queryResultHtml() {
+  if (app.query.error) {
+    return `<div class="errorbox">${esc(app.query.error)}</div>`;
+  }
+  const result = app.query.result;
+  if (!result) {
+    return `<div class="empty">▷<br><br>Chạy truy vấn để xem kết quả.<br><br>Kết nối đang dùng: ${esc(app.connection?.name || '—')}</div>`;
+  }
+  if (result.kind !== 'batch') return singleQueryResultHtml(result);
+
+  const completed = `${result.succeededCount}/${result.statementCount} câu lệnh thành công`;
+  const summaryClass = result.failedCount ? 'query-batch-summary failed' : 'query-batch-summary';
+  const panels = result.results.map((entry) => {
+    const statement = `<pre class="query-statement">${esc(entry.sql)}</pre>`;
+    const content = entry.ok
+      ? singleQueryResultHtml(entry.result)
+      : `<div class="errorbox">${esc(entry.error?.message || 'Không thể chạy câu lệnh.')}${entry.error?.code ? `<br><small>${esc(entry.error.code)}</small>` : ''}</div>`;
+    return `
+      <section class="query-result-set ${entry.ok ? '' : 'failed'}">
+        <div class="query-result-heading">
+          <strong>Câu lệnh #${entry.index}</strong>
+          <span class="badge ${entry.ok ? '' : 'pending'}">${entry.ok ? 'Thành công' : 'Lỗi'}</span>
+        </div>
+        ${statement}
+        ${content}
+      </section>
+    `;
+  }).join('');
+  const stopped = result.executedCount < result.statementCount
+    ? `<div class="hint"><strong>Đã dừng.</strong> ${result.statementCount - result.executedCount} câu lệnh phía sau chưa được chạy.</div>`
+    : '';
+  return `
+    <div class="${summaryClass}">
+      <strong>${result.failedCount ? 'Có lỗi' : 'Hoàn tất'}</strong>
+      <span>${completed} · ${result.durationMs} ms</span>
+    </div>
+    <div class="query-result-list">${panels}</div>
+    ${stopped}
+  `;
+}
+
 function updateQueryButtons() {
   const run = $('#runQueryBtn');
   const cancel = $('#cancelQueryBtn');
-  if (run) run.disabled = app.query.running;
-  if (cancel) cancel.style.display = app.query.running ? 'inline-block' : 'none';
+  const running = queryTabs.some((tab) => tab.running);
+  if (run) run.disabled = running;
+  if (cancel) cancel.style.display = running ? 'inline-block' : 'none';
 }
 
 function saveQuery() {
@@ -893,38 +1378,67 @@ function saveQuery() {
 }
 
 async function runQuery() {
-  if (app.query.running) return;
+  const tab = app.query;
+  if (!tab || tab.running) return;
+  if (queryTabs.some((item) => item.running)) {
+    toast('Một truy vấn khác đang chạy. Hãy chờ hoặc hủy trước.', 'error');
+    return;
+  }
   const editor = $('#sql');
-  const sql = (editor?.value || app.query.sql || '').trim();
+  const sql = (editor?.value || tab.sql || '').trim();
   if (!sql) {
     toast('Câu lệnh SQL đang trống.', 'error');
     return;
   }
-  if (/^\s*(drop|truncate|delete|update|alter|rename|grant|revoke)\b/i.test(sql)) {
-    const confirmed = await confirmAction('Chạy lệnh có thể thay đổi dữ liệu?', 'Câu lệnh này có thể sửa hoặc xóa dữ liệu thật trong database.', 'Chạy');
-    if (!confirmed) return;
-  }
-  app.query.sql = sql;
-  app.query.running = true;
-  app.query.error = null;
+  tab.sql = sql;
+  tab.running = true;
+  tab.error = null;
   updateQueryButtons();
-  $('#queryResult').innerHTML = '<div class="empty">Đang chạy truy vấn…</div>';
+  renderQueryTabs();
+  if (app.query === tab) $('#queryResult').innerHTML = '<div class="empty">Đang chạy truy vấn…</div>';
   try {
-    const result = await call(desktop.db.query({ sql, timeoutMs: 30000 }));
-    app.query.result = result;
-    app.query.error = null;
+    let result;
+    try {
+      result = await call(desktop.db.query({ sql, timeoutMs: 30000 }));
+    } catch (error) {
+      if (error.code !== 'CONFIRM_REQUIRED') throw error;
+      const confirmed = await confirmAction(
+        'Chạy lệnh có thể thay đổi dữ liệu?',
+        `${error.message}\n\nSqlPro sẽ chạy tuần tự và dừng ngay tại câu lệnh đầu tiên bị lỗi.`,
+        'Chạy'
+      );
+      if (!confirmed) {
+        setStatus('Đã hủy chạy truy vấn');
+        return;
+      }
+      result = await call(desktop.db.query({ sql, timeoutMs: 30000, confirmed: true }));
+    }
+    tab.result = result;
+    tab.error = null;
+    const batchFailed = result.kind === 'batch' && result.failedCount > 0;
+    const historyMessage = result.kind === 'batch'
+      ? `${result.succeededCount}/${result.statementCount} câu lệnh`
+      : (result.kind === 'ok' ? `${result.affectedRows} dòng` : `${result.rows.length} dòng`);
     historyRows.unshift({
       sql,
-      ok: true,
+      ok: !batchFailed,
       at: new Date().toISOString(),
       durationMs: result.durationMs,
-      message: result.kind === 'ok' ? `${result.affectedRows} rows` : `${result.rows.length} rows`
+      message: historyMessage
     });
     historyRows = historyRows.slice(0, 100);
-    setStatus(`Truy vấn hoàn tất • ${result.durationMs} ms`);
+    if (batchFailed) {
+      const failed = result.results.find((entry) => !entry.ok);
+      setStatus(`Lỗi ở câu lệnh #${failed?.index || result.executedCount} • ${result.durationMs} ms`);
+      toast(failed?.error?.message || 'Một câu lệnh SQL bị lỗi.', 'error');
+    } else if (result.kind === 'batch') {
+      setStatus(`${result.succeededCount} câu lệnh hoàn tất • ${result.durationMs} ms`);
+    } else {
+      setStatus(`Truy vấn hoàn tất • ${result.durationMs} ms`);
+    }
   } catch (error) {
-    app.query.error = error.message;
-    app.query.result = null;
+    tab.error = error.message;
+    tab.result = null;
     historyRows.unshift({
       sql,
       ok: false,
@@ -940,9 +1454,10 @@ async function runQuery() {
       toast(error.message, 'error');
     }
   } finally {
-    app.query.running = false;
+    tab.running = false;
     updateQueryButtons();
-    $('#queryResult').innerHTML = queryResultHtml();
+    renderQueryTabs();
+    if (app.query === tab) $('#queryResult').innerHTML = queryResultHtml();
     persistState();
   }
 }
@@ -971,9 +1486,7 @@ function renderHistoryView() {
     row.addEventListener('click', () => {
       const entry = historyRows[Number(row.dataset.history)];
       if (!entry) return;
-      app.query.sql = entry.sql;
-      sessionStorage.setItem('query', entry.sql);
-      view('query');
+      newQuery(entry.sql);
     });
   });
   $('#clearHistory').addEventListener('click', () => {
@@ -1368,6 +1881,7 @@ async function importNavicat() {
 
 async function disconnect() {
   if (!desktop) return;
+  invalidateSqlAutocomplete();
   try {
     await call(desktop.db.disconnect());
   } catch {
@@ -1402,7 +1916,7 @@ function backupDatabase() {
     <p><strong>${esc(app.database)}</strong> · ${objects.length} đối tượng</p>
     <label class="checkline"><input type="checkbox" id="backupStructure" checked> Cấu trúc bảng và view (CREATE)</label>
     <label class="checkline"><input type="checkbox" id="backupData" checked> Dữ liệu (INSERT)</label>
-    <label class="checkline"><input type="checkbox" id="backupDrop"> Thêm DROP TABLE/VIEW IF EXISTS</label>
+    <label class="checkline"><input type="checkbox" id="backupDrop"> Thêm DROP TABLE/VIEW/TRIGGER IF EXISTS</label>
     <label>Đối tượng cần sao lưu</label>
     <div class="optionbox">
       <label class="checkline"><input type="checkbox" id="backupAll" checked> Chọn tất cả</label>
@@ -1464,7 +1978,9 @@ function backupDatabase() {
         setStatus('Đã hủy sao lưu');
         return;
       }
-      toast(`Đã sao lưu ${result.tables} bảng, ${result.views} view (${result.rows} dòng) · ${formatBytes(result.bytes)}`);
+      const parts = [`${result.tables} bảng`, `${result.views} view`];
+      if (result.triggers) parts.push(`${result.triggers} trigger`);
+      toast(`Đã sao lưu ${parts.join(', ')} (${result.rows} dòng) · ${formatBytes(result.bytes)}`);
       setStatus(`Sao lưu hoàn tất • ${formatBytes(result.bytes)}`);
     } catch (error) {
       toast(error.message, 'error');
@@ -1482,7 +1998,7 @@ function restoreDatabase() {
   modal(`
     <h2>Phục hồi database</h2>
     <p>Đích: <strong>${esc(app.database)}</strong></p>
-    <label class="checkline"><input type="checkbox" id="restoreDrop"> Xóa bảng/view trùng tên trước khi tạo lại</label>
+    <label class="checkline"><input type="checkbox" id="restoreDrop"> Xóa bảng/view/trigger trùng tên trước khi tạo lại</label>
     <div class="hint">Tệp .sql được chạy tuần tự vào database đích. Các lệnh USE và CREATE/DROP DATABASE trong tệp sẽ bị bỏ qua; khóa ngoại tạm thời tắt trong lúc phục hồi.</div>
     <div class="hint"><strong>Chỉ phục hồi tệp bạn tin cậy</strong> — nội dung tệp có thể thay đổi dữ liệu.</div>
     <div class="actions">
@@ -1495,7 +2011,7 @@ function restoreDatabase() {
     const dropExisting = $('#restoreDrop').checked;
     const confirmed = await confirmAction(
       'Phục hồi database?',
-      `Tệp SQL sẽ được chạy vào "${app.database}"${dropExisting ? ', xóa các bảng/view trùng tên trước khi tạo lại' : ''}. Thao tác này có thể thay đổi dữ liệu hiện có.`,
+      `Tệp SQL sẽ được chạy vào "${app.database}"${dropExisting ? ', xóa các bảng/view/trigger trùng tên trước khi tạo lại' : ''}. Thao tác này có thể thay đổi dữ liệu hiện có.`,
       'Tiếp tục'
     );
     if (!confirmed) return;

@@ -65,3 +65,44 @@ dialog select{width:100%}
 .nulltoggle input{width:auto}
 @media(max-width:800px){.fieldgrid{grid-template-columns:1fr}.formrow{flex-direction:column;gap:0}}
 
+/* --- backup / restore --- */
+.dbactions{display:flex;gap:6px;padding:0 0 8px}
+.dbactions button{flex:1;font-size:10px;padding:5px 6px;background:white}
+.backup-tables{max-height:220px;overflow:auto;padding-right:4px}
+.backup-tables .checkline{margin:4px 0}
+.backup-tables .checkline span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+
+/* Query tabs */
+#queryTabs{display:flex;min-width:0;overflow-x:auto;scrollbar-width:none}
+#queryTabs::-webkit-scrollbar{display:none}
+#queryTabs .querytab{white-space:nowrap;flex:0 0 auto}
+.tabs .tabclose{display:inline-block;margin-left:4px;padding:0 2px;border-radius:3px;color:#a5afb9}
+.tabs .tabclose:hover{background:#f4e9e9;color:#c24b4b}
+.tabs .tabrunning{color:#b58a2d}
+
+/* SQL editor, autocomplete and multi-statement results */
+.sql-editor-wrap{position:relative}
+.sql-editor-wrap .editor{display:block}
+.sql-suggestions{position:absolute;z-index:30;min-width:320px;max-width:min(560px,calc(100% - 24px));max-height:280px;overflow:auto;background:#fff;border:1px solid #ced9df;border-radius:8px;box-shadow:0 14px 38px #183c4930;padding:5px;left:14px;top:54px}
+.sql-suggestion{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;padding:8px 10px;border-radius:5px;color:#40505f;cursor:pointer;font:11px/1.35 "Cascadia Code","SFMono-Regular",Consolas,monospace}
+.sql-suggestion:hover,.sql-suggestion.selected{background:#e6f3f0;color:#087f72}
+.sql-suggestion-main{display:flex;align-items:center;gap:8px;min-width:0}
+.sql-suggestion-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sql-suggestion-kind{flex-shrink:0;border-radius:3px;background:#edf1f5;color:#788694;padding:2px 5px;font:8px/1.2 Inter,"Segoe UI",sans-serif;text-transform:uppercase;letter-spacing:.4px}
+.sql-suggestion.selected .sql-suggestion-kind{background:#cce7e1;color:#087f72}
+.sql-suggestion-detail{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#9aa5b1;font:9px/1.2 Inter,"Segoe UI",sans-serif}
+.query-batch-summary{display:flex;align-items:center;gap:12px;margin:18px 0 12px;padding:12px 14px;border:1px solid #cfe7df;border-radius:7px;background:#f1faf7;color:#297866;font-size:11px}
+.query-batch-summary.failed{border-color:#efd1d1;background:#fff5f5;color:#ad4545}
+.query-batch-summary span{color:#788795}
+.query-result-list{display:flex;flex-direction:column;gap:14px}
+.query-result-set{border:1px solid #dde5ea;border-radius:8px;background:#fff;overflow:hidden}
+.query-result-set.failed{border-color:#edcccc}
+.query-result-heading{display:flex;align-items:center;gap:10px;padding:10px 13px;border-bottom:1px solid #e8edf0;background:#f8fafb;color:#536173;font-size:11px}
+.query-result-heading .badge{margin-left:auto}
+.query-statement{margin:0;padding:10px 13px;border-bottom:1px solid #edf0f3;background:#fbfcfd;color:#5f7480;font-size:10px;line-height:1.55;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow:auto}
+.query-result-set>.resulttitle{padding:12px 13px}
+.query-result-set>.tablebox{border:0;border-radius:0;border-top:1px solid #edf0f3}
+.query-result-set>.errorbox{margin:12px}
+.query-result-set>.hint{margin:12px}
+@media(max-width:700px){.sql-suggestions{min-width:260px}.query-batch-summary{align-items:flex-start;flex-direction:column;gap:4px}}

@@ -7,8 +7,10 @@ SqlPro là ứng dụng desktop Electron quản trị MySQL/MariaDB trên Window
 - Kết nối MySQL/MariaDB qua TCP, SSL/TLS và SSH tunnel.
 - Duyệt database, bảng, view; xem dữ liệu, cấu trúc, index và khóa ngoại.
 - Chạy SQL, hủy truy vấn, timeout, lịch sử truy vấn.
+- Nhiều tab SQL Editor; mỗi tab giữ nội dung riêng khi chuyển qua lại.
 - Thêm, sửa, xóa bản ghi có khóa chính; tìm kiếm và phân trang.
 - Nhập/xuất JSON, xuất CSV.
+- Sao lưu database ra tệp `.sql` (cấu trúc bảng/view, trigger và dữ liệu) và phục hồi từ tệp `.sql`.
 - Lưu mật khẩu bằng Electron `safeStorage` (OS keychain); nếu không khả dụng thì mã hóa AES-256-GCM với khóa cục bộ quyền `0600`.
 - Renderer không bao giờ nhận mật khẩu đã lưu; mọi truy cập database nằm trong main process.
 
@@ -29,6 +31,17 @@ Chọn **CONNECTIONS → ⇩** hoặc menu **Tệp → Nhập kết nối Navica
 - Không hỗ trợ mật khẩu Navicat v11 (Blowfish) và Navicat Cloud/HTTP tunnel.
 - Đường dẫn SSH private key, CA cert và client cert phải tồn tại trên máy đang chạy SqlPro.
 - Mặc định không xác thực chứng chỉ SSL (giống thiết lập "weak certificate validation" của Navicat); có thể bật xác thực trong biểu mẫu kết nối.
+
+## Sao lưu và phục hồi
+
+Chọn database trong thanh bên rồi dùng **⇩ Sao lưu** / **⇧ Phục hồi**, hoặc menu **Tệp → Sao lưu database… / Phục hồi database…**.
+
+- Sao lưu ra tệp `.sql` gồm `CREATE TABLE`, `CREATE VIEW`, trigger (gắn với các bảng được chọn) và `INSERT`; có thể chọn từng bảng/view, chỉ lấy cấu trúc hoặc kèm `DROP … IF EXISTS`.
+- Phục hồi chạy tệp `.sql` tuần tự vào database đang chọn. Hỗ trợ tệp do SqlPro, `mysqldump` hoặc Navicat tạo, kể cả trigger dùng `DELIMITER`.
+- Trong lúc phục hồi, khóa ngoại được tắt tạm thời; các lệnh `USE` và `CREATE/DROP DATABASE` trong tệp bị bỏ qua để không ghi ra ngoài database đích.
+- Tùy chọn **Xóa bảng/view/trigger trùng tên** sẽ bỏ đối tượng cũ trước khi tạo lại. Mặc định tắt để tránh mất dữ liệu ngoài ý muốn.
+- Procedure, function và event chưa được sao lưu; có thể thêm thủ công vào tệp `.sql` nếu cần.
+- Tệp sao lưu/phục hồi giới hạn 1 GB. Chỉ phục hồi tệp bạn tin cậy vì nội dung tệp có thể thay đổi dữ liệu.
 
 ## Chạy khi phát triển
 
@@ -82,4 +95,5 @@ npm run pack:windows:zip
 - Kết quả SQL tối đa 5000 dòng mỗi lần chạy.
 - Xuất bảng tối đa 20000 dòng.
 - Nhập JSON tối đa 5000 bản ghi mỗi lần.
+- Sao lưu/phục hồi SQL tối đa 1 GB mỗi tệp.
 - Sửa/xóa trực tiếp yêu cầu bảng có khóa chính.

@@ -4,8 +4,10 @@ function stripLeadingComments(sql) {
   let remaining = String(sql || '');
   for (;;) {
     const trimmed = remaining.trimStart();
-    if (trimmed.startsWith('--') || trimmed.startsWith('#')) {
-      const newline = trimmed.indexOf('\n');
+    const dashComment = trimmed.startsWith('--')
+      && (trimmed.length === 2 || trimmed.charCodeAt(2) <= 32);
+    if (dashComment || trimmed.startsWith('#')) {
+      const newline = trimmed.search(/[\r\n]/);
       if (newline === -1) return '';
       remaining = trimmed.slice(newline + 1);
     } else if (trimmed.startsWith('/*') && !trimmed.startsWith('/*!')) {
@@ -16,6 +18,103 @@ function stripLeadingComments(sql) {
       return trimmed;
     }
   }
+}
+
+function splitSqlStatements(sql) {
+  const source = String(sql || '');
+  const statements = [];
+  let buffer = '';
+  let state = 'normal';
+  let escaped = false;
+
+  const pushStatement = () => {
+    const statement = buffer.trim();
+    buffer = '';
+    if (statement && stripLeadingComments(statement)) statements.push(statement);
+  };
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+    buffer += character;
+
+    if (state === 'lineComment') {
+      if (character === '\n' || character === '\r') state = 'normal';
+      continue;
+    }
+    if (state === 'blockComment') {
+      if (character === '*' && next === '/') {
+        buffer += next;
+        index += 1;
+        state = 'normal';
+      }
+      continue;
+    }
+    if (state === 'single' || state === 'double') {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (character === '\\') {
+        escaped = true;
+        continue;
+      }
+      const quote = state === 'single' ? "'" : '"';
+      if (character === quote) {
+        if (next === quote) {
+          buffer += next;
+          index += 1;
+        } else {
+          state = 'normal';
+        }
+      }
+      continue;
+    }
+    if (state === 'backtick') {
+      if (character === '`') {
+        if (next === '`') {
+          buffer += next;
+          index += 1;
+        } else {
+          state = 'normal';
+        }
+      }
+      continue;
+    }
+
+    if (character === "'") {
+      state = 'single';
+    } else if (character === '"') {
+      state = 'double';
+    } else if (character === '`') {
+      state = 'backtick';
+    } else if (character === '#') {
+      state = 'lineComment';
+    } else if (character === '-' && next === '-') {
+      const after = source[index + 2];
+      if (after === undefined || after.charCodeAt(0) <= 32) {
+        buffer += next;
+        index += 1;
+        state = 'lineComment';
+      }
+    } else if (character === '/' && next === '*') {
+      buffer += next;
+      index += 1;
+      state = 'blockComment';
+    } else if (character === ';') {
+      buffer = buffer.slice(0, -1);
+      pushStatement();
+    }
+  }
+
+  if (state === 'single' || state === 'double' || state === 'backtick') {
+    throw new Error('SQL không hợp lệ: chuỗi hoặc identifier chưa được đóng.');
+  }
+  if (state === 'blockComment') {
+    throw new Error('SQL không hợp lệ: block comment chưa được đóng.');
+  }
+  pushStatement();
+  return statements;
 }
 
 function couldBeDelimiter(text) {
@@ -87,6 +186,19 @@ class SqlScriptParser {
   }
 
   feedCharacter(character, statements) {
+    if (['normal', 'slash', 'dash'].includes(this.state)
+        && this.delimiter
+        && character === this.delimiter[this.delimiter.length - 1]) {
+      const candidate = this.buffer + character;
+      if (candidate.endsWith(this.delimiter)) {
+        this.buffer = candidate.slice(0, -this.delimiter.length);
+        this.state = 'normal';
+        const statement = this.buffer.trim();
+        this.buffer = '';
+        if (statement) statements.push(statement);
+        return;
+      }
+    }
     switch (this.state) {
       case 'lineComment':
         if (character === '\n') {
@@ -248,10 +360,16 @@ function namedIdentifier(raw) {
 
 function createTarget(statement) {
   const text = String(statement || '').trimStart();
-  const table = /^CREATE\s+(?:TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(`(?:[^`]|``)+`|[^\s(]+)/i.exec(text);
+  const identifier = '(?:`(?:[^`]|``)+`|[^\\s.(]+)(?:\\s*\\.\\s*(?:`(?:[^`]|``)+`|[^\\s.(]+))?';
+  const table = new RegExp(`^CREATE\\s+(?:TEMPORARY\\s+)?TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${identifier})`, 'i').exec(text);
   if (table) return { type: 'table', name: namedIdentifier(table[1]) };
-  const view = /^CREATE\s+(?:(?:OR\s+REPLACE|ALGORITHM\s*=\s*\w+|DEFINER\s*=\s*\S+|SQL\s+SECURITY\s+(?:DEFINER|INVOKER))\s+)*VIEW\s+(`(?:[^`]|``)+`|[^\s(]+)/i.exec(text);
+  const view = new RegExp(
+    `^CREATE\\s+(?:(?:OR\\s+REPLACE|ALGORITHM\\s*=\\s*\\w+|DEFINER\\s*=\\s*\\S+|SQL\\s+SECURITY\\s+(?:DEFINER|INVOKER))\\s+)*VIEW\\s+(${identifier})`,
+    'i'
+  ).exec(text);
   if (view) return { type: 'view', name: namedIdentifier(view[1]) };
+  const trigger = new RegExp(`^CREATE\\s+(?:DEFINER\\s*=\\s*\\S+\\s+)?TRIGGER\\s+(${identifier})`, 'i').exec(text);
+  if (trigger) return { type: 'trigger', name: namedIdentifier(trigger[1]) };
   return null;
 }
 
@@ -264,6 +382,7 @@ function skipReason(statement) {
 
 module.exports = {
   SqlScriptParser,
+  splitSqlStatements,
   stripLeadingComments,
   createTarget,
   skipReason,

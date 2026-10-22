@@ -12,6 +12,8 @@
       table,
       mode,
       savedQuery: document.querySelector('#sql')?.value || sessionStorage.getItem('query') || '',
+      queryTabs: queryTabs.map((tab) => ({ title: tab.title, sql: tab.sql ?? '' })),
+      activeQuery,
       history: historyRows.slice(0, 100)
     };
   }
@@ -25,7 +27,7 @@
       'new-connection': () => connection(),
       'import-navicat': () => importNavicat(),
       disconnect: () => disconnect(),
-      'new-query': () => view('query'),
+      'new-query': () => newQuery(),
       'save-query': () => saveQuery(),
       import: () => transfer('import'),
       export: () => transfer('export'),

@@ -470,7 +470,11 @@ handle('db:table-data', (payload) => {
 
 handle('db:query', (payload) => {
   if (!payload || typeof payload.sql !== 'string') throw new Error('Câu lệnh SQL không hợp lệ.');
-  return withSession((session) => session.runQuery(payload.sql, Math.min(300000, Math.max(1000, Number(payload.timeoutMs) || 30000))));
+  return withSession((session) => session.runQueryScript(
+    payload.sql,
+    Math.min(300000, Math.max(1000, Number(payload.timeoutMs) || 30000)),
+    payload.confirmed === true
+  ));
 });
 
 handle('db:cancel-query', () => {

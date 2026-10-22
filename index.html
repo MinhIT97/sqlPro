@@ -50,10 +50,10 @@
         <span class="avatar">SP</span>
       </div>
     </header>
-    <div class="tabs">
+    <div class="tabs" id="tabs">
       <button id="dataTab" class="selected" onclick="view('data')">▦ &nbsp; <span id="tabName">—</span> &nbsp; ×</button>
-      <button id="queryTab" onclick="view('query')">⌑ &nbsp; Query 1 &nbsp; ×</button>
-      <button onclick="view('query')">＋</button>
+      <span id="queryTabs"></span>
+      <button id="newQueryTab" onclick="newQuery()" title="Truy vấn mới (Ctrl+T)">＋</button>
     </div>
     <section class="content">
       <div class="titleline">
@@ -62,7 +62,7 @@
           <h1 id="title">Workspace <span>TABLE</span></h1>
           <p id="subtitle">Chọn một bảng để xem dữ liệu thật.</p>
         </div>
-        <button class="primary" onclick="view('query')">＋ &nbsp; Truy vấn mới</button>
+        <button class="primary" onclick="newQuery()">＋ &nbsp; Truy vấn mới</button>
       </div>
       <nav id="subnav">
         <button class="current" onclick="view('data')">Dữ liệu</button>

@@ -14,11 +14,19 @@
     <button title="Kết nối mới" onclick="connection()">⌘</button>
     <button title="SQL Editor" onclick="view('query')">⌑</button>
     <button title="Lịch sử" onclick="view('history')">◷</button>
-    <div class="railbottom">SP</div>
+    <button class="railaccount" id="accountButton" title="Tài khoản và đồng bộ" onclick="accountModal()">
+      <span id="accountInitials">SP</span>
+      <i class="syncdot" id="syncDot"></i>
+    </button>
   </aside>
 
   <aside class="sidebar">
     <div class="brand">SqlPro <span id="runtimeBadge">WORKSPACE</span></div>
+    <div class="workspacebar">
+      <select id="workspaceSelect" title="Chọn workspace"></select>
+      <button title="Workspace mới" onclick="workspaceForm()">＋</button>
+      <button title="Quản lý workspace" onclick="workspaceManager()">⚙</button>
+    </div>
     <div class="sideheading">CONNECTIONS
       <span class="headingactions">
         <button title="Nhập kết nối Navicat" onclick="importNavicat()">⇩</button>
@@ -47,7 +55,7 @@
       </div>
       <div>
         <button onclick="view('query')">Ctrl K &nbsp; SQL Editor</button>
-        <span class="avatar">SP</span>
+        <button class="avatar header-avatar" id="accountAvatar" title="Tài khoản và đồng bộ" onclick="accountModal()">SP</button>
       </div>
     </header>
     <div class="tabs" id="tabs">
@@ -80,6 +88,7 @@
 
   <dialog id="modal"></dialog>
   <div id="toast"></div>
+  <script src="sql-autocomplete.js"></script>
   <script src="app.js"></script>
   <script src="desktop.js"></script>
 </body>

@@ -4,8 +4,13 @@ const { app, safeStorage } = require('electron');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-
-const STORE_VERSION = 1;
+const {
+  DEFAULT_WORKSPACE_ID,
+  STORE_VERSION,
+  defaultWorkspace,
+  normalizeStore,
+  normalizeVault
+} = require('./store-schema.cjs');
 
 function storePath() {
   return path.join(app.getPath('userData'), 'connections.json');
@@ -18,18 +23,43 @@ function keyPath() {
 function readStore() {
   try {
     const parsed = JSON.parse(fs.readFileSync(storePath(), 'utf8'));
-    if (parsed && Array.isArray(parsed.connections)) return parsed;
+    const needsMigration = parsed.version !== STORE_VERSION
+      || !Array.isArray(parsed.workspaces)
+      || !Array.isArray(parsed.tombstones)
+      || (Array.isArray(parsed.connections) && parsed.connections.some((entry) => !entry.workspaceId));
+    const normalized = normalizeStore(parsed);
+    if (needsMigration) writeStore(normalized);
+    return normalized;
   } catch {
-    // missing or malformed store
+    return normalizeStore({});
   }
-  return { version: STORE_VERSION, connections: [] };
 }
 
 function writeStore(store) {
   fs.mkdirSync(path.dirname(storePath()), { recursive: true });
   const temporary = `${storePath()}.tmp`;
-  fs.writeFileSync(temporary, JSON.stringify(store, null, 2), { encoding: 'utf8', mode: 0o600 });
+  fs.writeFileSync(temporary, JSON.stringify(normalizeStore(store), null, 2), {
+    encoding: 'utf8',
+    mode: 0o600
+  });
   fs.renameSync(temporary, storePath());
+}
+
+function resetLocalData() {
+  let backupName = null;
+  if (fs.existsSync(storePath())) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    backupName = `connections-backup-${stamp}.json`;
+    const backupPath = path.join(app.getPath('userData'), backupName);
+    fs.copyFileSync(storePath(), backupPath);
+    try {
+      fs.chmodSync(backupPath, 0o600);
+    } catch {
+      // permissions are best effort on filesystems without chmod support
+    }
+  }
+  writeStore(normalizeStore({}));
+  return { backupName };
 }
 
 function safeStorageAvailable() {
@@ -126,7 +156,11 @@ function normalizeSsh(input) {
   };
 }
 
-function normalizeProfile(input, existing) {
+function workspaceIds(store) {
+  return new Set(store.workspaces.map((workspace) => workspace.id));
+}
+
+function normalizeProfile(input, existing, store) {
   if (!input || typeof input !== 'object') throw new Error('Thông tin kết nối không hợp lệ.');
   const host = text(input.host, 255);
   if (!host) throw new Error('Host không được để trống.');
@@ -146,9 +180,15 @@ function normalizeProfile(input, existing) {
   const sshPassphrase = input.sshPassphrase === undefined
     ? (existing ? existing.sshPassphrase : null)
     : seal(input.sshPassphrase);
+  const requestedWorkspace = text(input.workspaceId, 80)
+    || (existing && existing.workspaceId)
+    || DEFAULT_WORKSPACE_ID;
+  const knownWorkspaces = workspaceIds(store);
+  const workspaceId = knownWorkspaces.has(requestedWorkspace) ? requestedWorkspace : DEFAULT_WORKSPACE_ID;
   const now = new Date().toISOString();
   return {
     id: existing ? existing.id : crypto.randomUUID(),
+    workspaceId,
     name: text(input.name, 120) || `${text(input.user, 128) || 'root'}@${host}`,
     type,
     host,
@@ -172,6 +212,7 @@ function normalizeProfile(input, existing) {
 function sanitize(profile) {
   return {
     id: profile.id,
+    workspaceId: profile.workspaceId || DEFAULT_WORKSPACE_ID,
     name: profile.name,
     type: profile.type,
     host: profile.host,
@@ -196,37 +237,7 @@ function sanitize(profile) {
   };
 }
 
-function list() {
-  return readStore().connections.map(sanitize);
-}
-
-function save(input) {
-  const store = readStore();
-  const existing = input && input.id
-    ? store.connections.find((profile) => profile.id === input.id)
-    : null;
-  if (input && input.id && !existing) throw new Error('Không tìm thấy kết nối cần cập nhật.');
-  const profile = normalizeProfile(input, existing);
-  if (existing) {
-    const index = store.connections.indexOf(existing);
-    store.connections[index] = profile;
-  } else {
-    store.connections.push(profile);
-  }
-  writeStore(store);
-  return sanitize(profile);
-}
-
-function remove(id) {
-  const store = readStore();
-  const next = store.connections.filter((profile) => profile.id !== id);
-  if (next.length === store.connections.length) throw new Error('Không tìm thấy kết nối cần xóa.');
-  writeStore({ version: STORE_VERSION, connections: next });
-}
-
-function getWithSecrets(id) {
-  const profile = readStore().connections.find((entry) => entry.id === id);
-  if (!profile) throw new Error('Không tìm thấy kết nối.');
+function decryptProfile(profile) {
   return {
     ...profile,
     password: unseal(profile.password),
@@ -239,8 +250,71 @@ function getWithSecrets(id) {
   };
 }
 
-function importMany(imported) {
+function sealProfile(profile) {
+  const {
+    hasPassword,
+    hasSslPassphrase,
+    hasSshPassword,
+    hasSshPassphrase,
+    ...rest
+  } = profile;
+  const ssl = rest.ssl && typeof rest.ssl === 'object' ? { ...rest.ssl } : {};
+  const ssh = rest.ssh && typeof rest.ssh === 'object' ? { ...rest.ssh } : {};
+  delete ssh.password;
+  ssl.passphrase = seal(ssl.passphrase);
+  rest.ssl = ssl;
+  rest.ssh = ssh;
+  rest.password = seal(rest.password);
+  rest.sshPassword = seal(rest.sshPassword);
+  rest.sshPassphrase = seal(rest.sshPassphrase);
+  return rest;
+}
+
+function list() {
+  return readStore().connections.map(sanitize);
+}
+
+function save(input) {
   const store = readStore();
+  const existing = input && input.id
+    ? store.connections.find((profile) => profile.id === input.id)
+    : null;
+  if (input && input.id && !existing) throw new Error('Không tìm thấy kết nối cần cập nhật.');
+  const profile = normalizeProfile(input, existing, store);
+  if (existing) {
+    const index = store.connections.indexOf(existing);
+    store.connections[index] = profile;
+  } else {
+    store.connections.push(profile);
+  }
+  writeStore(store);
+  return sanitize(profile);
+}
+
+function remove(id) {
+  const store = readStore();
+  const existing = store.connections.find((profile) => profile.id === id);
+  if (!existing) throw new Error('Không tìm thấy kết nối cần xóa.');
+  const now = new Date().toISOString();
+  store.connections = store.connections.filter((profile) => profile.id !== id);
+  store.tombstones = [
+    ...store.tombstones.filter((entry) => !(entry.type === 'connection' && entry.id === id)),
+    { type: 'connection', id, updatedAt: now }
+  ];
+  writeStore(store);
+}
+
+function getWithSecrets(id) {
+  const profile = readStore().connections.find((entry) => entry.id === id);
+  if (!profile) throw new Error('Không tìm thấy kết nối.');
+  return decryptProfile(profile);
+}
+
+function importMany(imported, targetWorkspaceId) {
+  const store = readStore();
+  const workspaceId = workspaceIds(store).has(targetWorkspaceId)
+    ? targetWorkspaceId
+    : DEFAULT_WORKSPACE_ID;
   let added = 0;
   let updated = 0;
   for (const input of imported) {
@@ -252,6 +326,7 @@ function importMany(imported) {
     const sshPassphrase = input.sshPassphrase !== undefined ? input.sshPassphrase : input.ssh?.passphrase;
     const payload = {
       ...input,
+      workspaceId,
       password: input.password || undefined,
       sshPassword: sshPassword || undefined,
       sshPassphrase: sshPassphrase || undefined,
@@ -259,7 +334,7 @@ function importMany(imported) {
         ? { ...input.ssl, passphrase: input.ssl.passphrase || undefined }
         : input.ssl
     };
-    const profile = normalizeProfile(payload, existing);
+    const profile = normalizeProfile(payload, existing, store);
     profile.source = 'navicat';
     profile.importKey = importKey || null;
     if (existing) {
@@ -274,4 +349,148 @@ function importMany(imported) {
   return { added, updated, connections: store.connections.map(sanitize) };
 }
 
-module.exports = { list, save, remove, getWithSecrets, importMany };
+function listWorkspaces() {
+  const store = readStore();
+  return store.workspaces.map((workspace) => ({
+    ...workspace,
+    isDefault: workspace.id === DEFAULT_WORKSPACE_ID,
+    connectionCount: store.connections.filter((profile) => profile.workspaceId === workspace.id).length
+  }));
+}
+
+function saveWorkspace(input) {
+  if (!input || typeof input !== 'object') throw new Error('Workspace không hợp lệ.');
+  const store = readStore();
+  const existing = input.id
+    ? store.workspaces.find((workspace) => workspace.id === input.id)
+    : null;
+  if (input.id && !existing) throw new Error('Không tìm thấy workspace cần cập nhật.');
+  if (existing && existing.id === DEFAULT_WORKSPACE_ID) {
+    throw new Error('Không thể đổi tên workspace mặc định.');
+  }
+  const name = text(input.name, 80);
+  if (!name) throw new Error('Tên workspace không được để trống.');
+  const duplicate = store.workspaces.find((workspace) => (
+    workspace.id !== (existing ? existing.id : '')
+    && workspace.name.toLowerCase() === name.toLowerCase()
+  ));
+  if (duplicate) throw new Error('Tên workspace đã tồn tại.');
+  const now = new Date().toISOString();
+  const workspace = existing
+    ? {
+        ...existing,
+        name,
+        description: text(input.description, 500),
+        updatedAt: now
+      }
+    : {
+        id: crypto.randomUUID(),
+        name,
+        description: text(input.description, 500),
+        createdAt: now,
+        updatedAt: now
+      };
+  if (existing) {
+    store.workspaces[store.workspaces.indexOf(existing)] = workspace;
+  } else {
+    store.workspaces.push(workspace);
+  }
+  writeStore(store);
+  return {
+    ...workspace,
+    isDefault: workspace.id === DEFAULT_WORKSPACE_ID,
+    connectionCount: store.connections.filter((profile) => profile.workspaceId === workspace.id).length
+  };
+}
+
+function removeWorkspace(id) {
+  const store = readStore();
+  if (id === DEFAULT_WORKSPACE_ID) throw new Error('Không thể xóa workspace mặc định.');
+  const existing = store.workspaces.find((workspace) => workspace.id === id);
+  if (!existing) throw new Error('Không tìm thấy workspace cần xóa.');
+  const now = new Date().toISOString();
+  let moved = 0;
+  for (const profile of store.connections) {
+    if (profile.workspaceId === id) {
+      profile.workspaceId = DEFAULT_WORKSPACE_ID;
+      profile.updatedAt = now;
+      moved += 1;
+    }
+  }
+  store.workspaces = store.workspaces.filter((workspace) => workspace.id !== id);
+  store.tombstones = [
+    ...store.tombstones.filter((entry) => !(entry.type === 'workspace' && entry.id === id)),
+    { type: 'workspace', id, updatedAt: now }
+  ];
+  writeStore(store);
+  return { removed: true, moved, name: existing.name };
+}
+
+function snapshotForSync() {
+  const store = readStore();
+  return normalizeVault({
+    version: 1,
+    defaultWorkspaceId: DEFAULT_WORKSPACE_ID,
+    workspaces: store.workspaces,
+    connections: store.connections.map((profile) => ({
+      ...decryptProfile(profile),
+      workspaceId: profile.workspaceId
+    })),
+    tombstones: store.tombstones
+  });
+}
+
+function replaceFromSync(vault) {
+  const current = readStore();
+  const normalized = normalizeVault(vault);
+  const next = {
+    version: STORE_VERSION,
+    workspaces: normalized.workspaces,
+    connections: normalized.connections.map(sealProfile),
+    tombstones: normalized.tombstones,
+    meta: { ...current.meta }
+  };
+  writeStore(next);
+  return {
+    workspaces: next.workspaces.length,
+    connections: next.connections.length,
+    tombstones: next.tombstones.length
+  };
+}
+
+function getMeta() {
+  return { ...readStore().meta };
+}
+
+function setMeta(patch) {
+  if (!patch || typeof patch !== 'object') throw new Error('Metadata không hợp lệ.');
+  const store = readStore();
+  store.meta = { ...store.meta, ...patch };
+  writeStore(store);
+  return { ...store.meta };
+}
+
+function defaultWorkspaceInfo() {
+  return defaultWorkspace();
+}
+
+module.exports = {
+  DEFAULT_WORKSPACE_ID,
+  STORE_VERSION,
+  list,
+  save,
+  remove,
+  getWithSecrets,
+  importMany,
+  listWorkspaces,
+  saveWorkspace,
+  removeWorkspace,
+  snapshotForSync,
+  replaceFromSync,
+  resetLocalData,
+  getMeta,
+  setMeta,
+  defaultWorkspaceInfo,
+  seal,
+  unseal
+};

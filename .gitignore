@@ -2,3 +2,8 @@ node_modules/
 release/
 *.log
 .DS_Store
+server/data/
+.env
+*.db
+*.db-wal
+*.db-shm

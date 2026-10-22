@@ -8,6 +8,7 @@
   function currentState() {
     return {
       connectionId: app.connection ? app.connection.id : null,
+      workspaceId: app.activeWorkspaceId,
       database: app.database,
       table,
       mode,

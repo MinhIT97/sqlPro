@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SqlPro — Quản trị MySQL/MariaDB, đồng bộ mã hóa đầu cuối</title>
+  <meta name="description" content="SqlPro là ứng dụng desktop quản trị MySQL/MariaDB cho Ubuntu và Windows. Workspace theo dự án, SQL editor, backup/restore và đồng bộ connection được mã hóa đầu cuối.">
+  <meta name="theme-color" content="#102c2f">
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <svg class="icon-sprite" aria-hidden="true" focusable="false">
+    <symbol id="icon-database" viewBox="0 0 24 24">
+      <ellipse cx="12" cy="5.5" rx="8" ry="3.2"></ellipse>
+      <path d="M4 5.5v6c0 1.8 3.6 3.2 8 3.2s8-1.4 8-3.2v-6"></path>
+      <path d="M4 11.5v6c0 1.8 3.6 3.2 8 3.2s8-1.4 8-3.2v-6"></path>
+    </symbol>
+    <symbol id="icon-code" viewBox="0 0 24 24">
+      <path d="M8.5 7 3.5 12l5 5"></path>
+      <path d="m15.5 7 5 5-5 5"></path>
+      <path d="m13.5 4-3 16"></path>
+    </symbol>
+    <symbol id="icon-layers" viewBox="0 0 24 24">
+      <path d="m12 3 9 5-9 5-9-5 9-5Z"></path>
+      <path d="m3 12 9 5 9-5"></path>
+      <path d="m3 16 9 5 9-5"></path>
+    </symbol>
+    <symbol id="icon-shield" viewBox="0 0 24 24">
+      <path d="M12 3 5 6v5.5c0 4.4 2.9 8.3 7 9.5 4.1-1.2 7-5.1 7-9.5V6l-7-3Z"></path>
+      <rect x="9" y="10" width="6" height="5" rx="1"></rect>
+      <path d="M10.5 10V8.5a1.5 1.5 0 0 1 3 0V10"></path>
+    </symbol>
+    <symbol id="icon-archive" viewBox="0 0 24 24">
+      <path d="M4 8.5h16v11H4z"></path>
+      <path d="M3 4.5h18v4H3z"></path>
+      <path d="M10 12.5h4"></path>
+    </symbol>
+    <symbol id="icon-import" viewBox="0 0 24 24">
+      <path d="M12 3v11"></path>
+      <path d="m8 10 4 4 4-4"></path>
+      <path d="M4 16v4h16v-4"></path>
+    </symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24">
+      <path d="m5 12 4.5 4.5L19 7"></path>
+    </symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24">
+      <rect x="9" y="9" width="11" height="11" rx="2"></rect>
+      <path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"></path>
+    </symbol>
+  </svg>
+
+  <header class="site-header" id="siteHeader">
+    <div class="container header-inner">
+      <a class="brand" href="#top" aria-label="SqlPro — về đầu trang">
+        <img src="assets/icon.svg" width="34" height="34" alt="">
+        <span>SqlPro</span>
+      </a>
+      <button class="nav-toggle" id="navToggle" type="button" aria-expanded="false" aria-controls="siteNav">
+        <span class="nav-toggle-line"></span>
+        <span class="nav-toggle-line"></span>
+        <span class="nav-toggle-line"></span>
+        <span class="sr-only">Mở menu</span>
+      </button>
+      <nav class="site-nav" id="siteNav" aria-label="Điều hướng chính">
+        <a href="#features">Tính năng</a>
+        <a href="#sync">Đồng bộ</a>
+        <a href="#security">Bảo mật</a>
+        <a href="#selfhost">Tự host</a>
+        <a href="#faq">FAQ</a>
+        <a class="btn btn-primary nav-download" href="#download">Tải ứng dụng</a>
+      </nav>
+      <a class="btn btn-primary header-cta" href="#download">Tải ứng dụng</a>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="container hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="live-dot"></span> Offline-first · MySQL &amp; MariaDB</p>
+          <h1>Quản trị database.<br><span class="accent">Đồng bộ an toàn.</span><br>Trên mọi máy.</h1>
+          <p class="lede">SqlPro là workspace desktop gọn nhẹ cho công việc database hằng ngày. Kết nối thật, SQL editor thông minh, backup và đồng bộ connection giữa các máy — với dữ liệu được mã hóa ngay trên thiết bị của bạn.</p>
+          <div class="hero-actions">
+            <a class="btn btn-primary btn-large" href="https://github.com/MinhIT97/sqlPro/releases/latest" rel="noopener">Tải bản mới nhất <span class="btn-arrow">→</span></a>
+            <a class="btn btn-ghost btn-large" href="#features">Xem tính năng</a>
+          </div>
+          <ul class="hero-points">
+            <li><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg> Không bắt buộc tài khoản</li>
+            <li><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg> Ubuntu &amp; Windows</li>
+            <li><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg> Miễn phí để bắt đầu</li>
+          </ul>
+        </div>
+
+        <div class="hero-visual" aria-hidden="true">
+          <div class="glow glow-one"></div>
+          <div class="glow glow-two"></div>
+          <div class="app-frame">
+            <div class="frame-bar">
+              <span class="frame-dot"></span>
+              <span class="frame-dot"></span>
+              <span class="frame-dot"></span>
+              <span class="frame-title">SqlPro · Database workspace</span>
+            </div>
+            <div class="app-shell">
+              <div class="app-rail">
+                <div class="app-logo">S<span>↗</span></div>
+                <div class="rail-icon active">▦</div>
+                <div class="rail-icon">⌘</div>
+                <div class="rail-icon">⌑</div>
+                <div class="rail-icon">◷</div>
+                <div class="rail-avatar">SP<i></i></div>
+              </div>
+              <div class="app-sidebar">
+                <div class="app-brand">SqlPro <span>WORKSPACE</span></div>
+                <div class="app-workspace">Dự án website <b>⌄</b></div>
+                <div class="app-side-label">CONNECTIONS <span>＋</span></div>
+                <div class="app-connection active">
+                  <i></i> Production
+                  <em>MYSQL</em>
+                </div>
+                <div class="app-meta">shop@db.internal:3306 · SSH</div>
+                <div class="app-connection">
+                  <i></i> Staging
+                  <em>MARIA</em>
+                </div>
+                <div class="app-meta">dev@10.0.0.8:3306</div>
+                <div class="app-side-label second">TABLES</div>
+                <div class="app-tree selected">▦ orders <span>1.2k</span></div>
+                <div class="app-tree">▦ customers <span>840</span></div>
+                <div class="app-tree">▦ products <span>312</span></div>
+                <div class="app-side-foot"><i></i> Đã kết nối <b>⏻</b></div>
+              </div>
+              <div class="app-main">
+                <div class="app-header">
+                  <span>Workspace <b>/</b> Production <b>/</b> shop_prod</span>
+                  <span class="app-env">LIVE</span>
+                </div>
+                <div class="app-tabs">
+                  <span class="selected">▦ orders ×</span>
+                  <span>Query 1</span>
+                  <span>＋</span>
+                </div>
+                <div class="app-content">
+                  <div class="app-eyebrow">SHOP_PROD / ORDERS</div>
+                  <div class="app-title-row">
+                    <strong>orders <em>TABLE</em></strong>
+                    <span class="app-button">＋ Truy vấn mới</span>
+                  </div>
+                  <div class="app-subnav"><b>Dữ liệu</b><span>Cấu trúc</span><span>Indexes</span><span>Quan hệ</span></div>
+                  <div class="app-toolbar">
+                    <span class="app-search">⌕ Tìm trong bảng…</span>
+                    <span class="app-small-button">＋ Thêm</span>
+                    <span class="app-small-button">Xuất</span>
+                  </div>
+                  <div class="mini-table">
+                    <div class="mini-row mini-head">
+                      <span>#</span><span>id</span><span>customer</span><span>total</span><span>status</span>
+                    </div>
+                    <div class="mini-row"><span>1</span><span>10428</span><span>Ngọc Anh</span><span class="money">2.450.000</span><span class="pill paid">paid</span></div>
+                    <div class="mini-row"><span>2</span><span>10429</span><span>Minh Tuấn</span><span class="money">890.000</span><span class="pill pending">pending</span></div>
+                    <div class="mini-row"><span>3</span><span>10430</span><span>Thu Hà</span><span class="money">1.120.000</span><span class="pill paid">paid</span></div>
+                    <div class="mini-row"><span>4</span><span>10431</span><span>Quốc Bảo</span><span class="money">3.780.000</span><span class="pill paid">paid</span></div>
+                  </div>
+                  <div class="app-status"><span><i></i> MySQL 8.4 · shop_prod</span><span>Sẵn sàng <b>•</b> UTF-8</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="sync-toast">
+            <span class="sync-toast-icon"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg></span>
+            <div><strong>Đã đồng bộ</strong><span>3 connection · mã hóa đầu cuối</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="trust-strip">
+      <div class="container trust-grid">
+        <div>
+          <strong>Không bắt buộc tài khoản</strong>
+          <span>Dùng offline như một ứng dụng desktop bình thường.</span>
+        </div>
+        <div>
+          <strong>Server không thấy mật khẩu</strong>
+          <span>Connection được mã hóa trước khi rời máy.</span>
+        </div>
+        <div>
+          <strong>Một app, hai nền tảng</strong>
+          <span>Gói cài native cho Ubuntu và Windows.</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="features">
+      <div class="container">
+        <div class="section-heading">
+          <p class="eyebrow">Tính năng</p>
+          <h2>Một workspace cho toàn bộ công việc database.</h2>
+          <p>Từ kết nối đầu tiên đến backup cuối ngày, mọi thứ nằm trong một giao diện nhất quán — không cần mở thêm trình duyệt.</p>
+        </div>
+        <div class="feature-grid">
+          <article class="feature-card">
+            <span class="feature-icon"><svg class="icon" aria-hidden="true"><use href="#icon-database"></use></svg></span>
+            <h3>Kết nối MySQL &amp; MariaDB</h3>
+            <p>TCP, SSL/TLS và SSH tunnel với đầy đủ thông số tương thích Navicat. Kiểm tra kết nối trước khi lưu.</p>
+            <ul class="feature-list">
+              <li>Duyệt database, bảng, view, index</li>
+              <li>Xem khóa ngoại và quan hệ</li>
+              <li>Mật khẩu lưu bằng OS keychain</li>
+            </ul>
+          </article>
+          <article class="feature-card">
+            <span class="feature-icon"><svg class="icon" aria-hidden="true"><use href="#icon-code"></use></svg></span>
+            <h3>SQL editor thực thụ</h3>
+            <p>Chạy nhiều câu SQL theo thứ tự, xem từng result set riêng và hủy truy vấn dài ngay lập tức.</p>
+            <ul class="feature-list">
+              <li>Gợi ý từ khóa, hàm, bảng và cột</li>
+              <li>Nhiều tab giữ nội dung độc lập</li>
+              <li>Lịch sử truy vấn và timeout</li>
+            </ul>
+          </article>
+          <article class="feature-card">
+            <span class="feature-icon"><svg class="icon" aria-hidden="true"><use href="#icon-layers"></use></svg></span>
+            <h3>Workspace theo dự án</h3>
+            <p>Tách môi trường production, staging và dự án cá nhân thành các nhóm riêng. Chuyển ngữ cảnh chỉ bằng một cú chọn.</p>
+            <ul class="feature-list">
+              <li>Không giới hạn số workspace</li>
+              <li>Đếm connection theo từng nhóm</li>
+              <li>Đồng bộ workspace cùng tài khoản</li>
+            </ul>
+          </article>
+          <article class="feature-card">
+            <span class="feature-icon"><svg class="icon" aria-hidden="true"><use href="#icon-shield"></use></svg></span>
+            <h3>Đồng bộ mã hóa đầu cuối</h3>
+            <p>Đăng nhập một lần, connection tự động đi theo bạn. Khóa mã hóa được dẫn xuất từ mật khẩu ngay trên máy.</p>
+            <ul class="feature-list">
+              <li>AES-256-GCM cho vault</li>
+              <li>Server chỉ nhận ciphertext</li>
+              <li>Tự retry khi mất mạng</li>
+            </ul>
+          </article>
+          <article class="feature-card">
+            <span class="feature-icon"><svg class="icon" aria-hidden="true"><use href="#icon-archive"></use></svg></span>
+            <h3>Backup &amp; restore</h3>
+            <p>Sao lưu cấu trúc, trigger và dữ liệu ra tệp SQL. Phục hồi được cả tệp do mysqldump hoặc Navicat tạo.</p>
+            <ul class="feature-list">
+              <li>Chọn từng bảng hoặc view</li>
+              <li>Hỗ trợ trigger và DELIMITER</li>
+              <li>Tiến trình sao lưu trực quan</li>
+            </ul>
+          </article>
+          <article class="feature-card">
+            <span class="feature-icon"><svg class="icon" aria-hidden="true"><use href="#icon-import"></use></svg></span>
+            <h3>Nhập từ Navicat</h3>
+            <p>Mang danh sách connection đang dùng sang SqlPro mà không phải nhập lại từng mật khẩu.</p>
+            <ul class="feature-list">
+              <li>Đọc connections.json và .ncx</li>
+              <li>Ánh xạ SSL và SSH tunnel</li>
+              <li>Giải mã mật khẩu Navicat v12+</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-alt" id="sync">
+      <div class="container">
+        <div class="section-heading">
+          <p class="eyebrow">Làm việc đa máy</p>
+          <h2>Làm việc ở đây. Tiếp tục ở máy khác.</h2>
+          <p>Connection không còn bị khóa trong một chiếc laptop. Đăng nhập cùng tài khoản, dữ liệu được hợp nhất và tự động đẩy lên server — kể cả khi bạn vừa sửa offline.</p>
+        </div>
+        <div class="sync-grid">
+          <article class="sync-card sync-card-dark">
+            <span class="sync-number">01</span>
+            <h3>Chọn workspace</h3>
+            <p>Gom connection theo dự án hoặc môi trường. Workspace mặc định luôn tồn tại để dữ liệu cũ được chuyển về an toàn.</p>
+          </article>
+          <article class="sync-card">
+            <span class="sync-number">02</span>
+            <h3>Tự động đồng bộ</h3>
+            <p>Mỗi thay đổi được đẩy lên sau hai giây. Khi mất mạng, SqlPro giữ thay đổi và thử lại theo lịch tăng dần.</p>
+          </article>
+          <article class="sync-card">
+            <span class="sync-number">03</span>
+            <h3>Hợp nhất theo revision</h3>
+            <p>Hai máy cùng sửa một connection? Bản mới hơn thắng, tombstone lan truyền xóa và xung đột revision được xử lý tự động.</p>
+          </article>
+          <article class="sync-card sync-card-accent">
+            <span class="sync-number">04</span>
+            <h3>Dữ liệu local vẫn của bạn</h3>
+            <p>Đăng xuất không xóa gì trên máy. Tài khoản là tùy chọn: không đăng nhập, SqlPro vẫn hoạt động đầy đủ như ứng dụng offline.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section security-section" id="security">
+      <div class="container split-grid">
+        <div class="split-copy">
+          <p class="eyebrow light">Mã hóa đầu cuối</p>
+          <h2>Server không đọc được mật khẩu database của bạn.</h2>
+          <p>SqlPro không gửi mật khẩu đăng nhập lên server. Ứng dụng tự dẫn xuất khóa bằng scrypt, tạo một bằng chứng xác thực riêng và dùng khóa thứ hai để mã hóa toàn bộ vault connection.</p>
+          <ul class="checklist">
+            <li><span><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg></span> Mật khẩu database, SSH và SSL chỉ tồn tại trong vault đã mã hóa.</li>
+            <li><span><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg></span> AES-256-GCM với AAD gắn vault với đúng tài khoản.</li>
+            <li><span><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg></span> Session token được băm trước khi lưu; token thật không đi xuống renderer.</li>
+            <li><span><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg></span> Bắt buộc HTTPS khi server không phải localhost.</li>
+          </ul>
+          <a class="text-link light" href="#selfhost">Xem cách tự host <span>→</span></a>
+        </div>
+        <div class="security-panel">
+          <div class="flow-step">
+            <span class="flow-index">01</span>
+            <div>
+              <strong>Mật khẩu của bạn</strong>
+              <p>Được dùng cục bộ để dẫn xuất master key bằng scrypt. Không bao giờ rời khỏi thiết bị.</p>
+            </div>
+          </div>
+          <div class="flow-line"></div>
+          <div class="flow-step">
+            <span class="flow-index">02</span>
+            <div>
+              <strong>Hai khóa tách biệt</strong>
+              <p>Một khóa tạo auth proof cho server, một khóa chỉ dùng để mã hóa vault. Server không có vault key.</p>
+            </div>
+          </div>
+          <div class="flow-line"></div>
+          <div class="flow-step">
+            <span class="flow-index">03</span>
+            <div>
+              <strong>Ciphertext lên server</strong>
+              <p>Server chỉ thấy email, revision và envelope <span class="mono">v1.iv.tag.ciphertext</span>.</p>
+            </div>
+          </div>
+          <div class="security-callout">
+            <svg class="icon" aria-hidden="true"><use href="#icon-shield"></use></svg>
+            <p><strong>Đánh đổi có chủ đích:</strong> quên mật khẩu đồng nghĩa không thể giải mã dữ liệu đã đồng bộ. SqlPro không có khóa khôi phục ở bản đầu.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="selfhost">
+      <div class="container split-grid selfhost-grid">
+        <div class="split-copy">
+          <p class="eyebrow">Tự host</p>
+          <h2>Server đồng bộ của riêng bạn, trong vài phút.</h2>
+          <p>Một container Node.js và một volume SQLite là đủ. Dữ liệu vault nằm trên hạ tầng bạn kiểm soát; website này cũng được phục vụ từ cùng server.</p>
+          <ul class="compact-list">
+            <li>Docker image đa tầng, chạy bằng user không phải root.</li>
+            <li>Volume <span class="mono">/data</span> giữ SQLite bền vững.</li>
+            <li>Healthcheck tại <span class="mono">/healthz</span>.</li>
+            <li>Có thể tắt đăng ký công khai bằng biến môi trường.</li>
+          </ul>
+          <a class="text-link" href="https://github.com/MinhIT97/sqlPro" rel="noopener">Xem mã nguồn trên GitHub <span>→</span></a>
+        </div>
+        <div class="code-card">
+          <div class="code-head">
+            <span class="code-dots"><i></i><i></i><i></i></span>
+            <span>Terminal</span>
+            <button class="copy-button" type="button" data-copy-target="composeCommand">
+              <svg class="icon" aria-hidden="true"><use href="#icon-copy"></use></svg>
+              <span>Sao chép</span>
+            </button>
+          </div>
+          <pre id="composeCommand"><code>git clone https://github.com/MinhIT97/sqlPro.git
+cd sqlPro
+docker compose up -d</code></pre>
+          <div class="code-divider"></div>
+          <div class="code-caption">CẤU HÌNH TỐI THIỂU</div>
+          <pre><code>PORT=8080
+SQLPRO_DB=/data/sqlpro.db
+ALLOW_REGISTRATION=true
+TRUST_PROXY=0</code></pre>
+          <p class="code-note">Mặc định server ở <span class="mono">http://localhost:8080</span>. Khi đưa ra Internet, hãy đặt sau Caddy hoặc Nginx với HTTPS hợp lệ.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section download-section" id="download">
+      <div class="container download-card">
+        <div class="download-copy">
+          <p class="eyebrow light">Tải SqlPro</p>
+          <h2>Bắt đầu trong vài phút.</h2>
+          <p>Cài đặt native, không cần runtime đi kèm. Kết nối Navicat hiện có có thể nhập ngay từ lần chạy đầu tiên.</p>
+        </div>
+        <div class="download-actions">
+          <a class="download-button" href="https://github.com/MinhIT97/sqlPro/releases/latest" rel="noopener">
+            <span class="download-os">Ubuntu / Linux</span>
+            <strong>Tải gói cài đặt</strong>
+            <span class="download-meta">.deb · AppImage</span>
+          </a>
+          <a class="download-button" href="https://github.com/MinhIT97/sqlPro/releases/latest" rel="noopener">
+            <span class="download-os">Windows</span>
+            <strong>Tải gói cài đặt</strong>
+            <span class="download-meta">NSIS · Portable</span>
+          </a>
+          <p class="download-note">Bản phát hành mới nhất trên GitHub Releases. Yêu cầu Node.js 22 chỉ khi chạy từ mã nguồn.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="faq">
+      <div class="container faq-grid">
+        <div class="faq-intro">
+          <p class="eyebrow">Câu hỏi thường gặp</p>
+          <h2>Những điều cần biết trước khi bắt đầu.</h2>
+          <p>Không thấy câu trả lời? Mở issue trên GitHub để trao đổi thêm.</p>
+          <a class="text-link" href="https://github.com/MinhIT97/sqlPro/issues" rel="noopener">Mở GitHub Issues <span>→</span></a>
+        </div>
+        <div class="faq-list">
+          <details open>
+            <summary>Có bắt buộc phải tạo tài khoản không?</summary>
+            <p>Không. Bạn có thể dùng toàn bộ tính năng database, SQL editor, backup và restore mà không đăng nhập. Tài khoản chỉ cần khi muốn đồng bộ connection giữa nhiều máy.</p>
+          </details>
+          <details>
+            <summary>Đồng bộ bảo mật như thế nào?</summary>
+            <p>Mật khẩu đăng nhập được dùng để dẫn xuất khóa ngay trên máy. Server chỉ nhận auth proof và vault đã mã hóa AES-256-GCM. Server không có khóa để đọc host, user hay mật khẩu database bên trong.</p>
+          </details>
+          <details>
+            <summary>Nếu quên mật khẩu thì sao?</summary>
+            <p>Dữ liệu đã đồng bộ trên server sẽ không thể giải mã. Bản đầu chưa có khóa khôi phục hoặc reset mật khẩu. Dữ liệu local trên máy vẫn dùng được, và bạn có thể tạo tài khoản mới sau khi sao lưu.</p>
+          </details>
+          <details>
+            <summary>Server nhìn thấy những gì?</summary>
+            <p>Server thấy email, thời điểm đồng bộ, revision và ciphertext của vault. Server không thấy tên connection, host, user, mật khẩu, tên workspace hay nội dung database.</p>
+          </details>
+          <details>
+            <summary>Private key SSH và chứng chỉ SSL có được đồng bộ?</summary>
+            <p>Không. SqlPro chỉ đồng bộ đường dẫn tới private key, CA cert và client cert. Các tệp này phải tồn tại trên từng máy với cùng đường dẫn, hoặc bạn cần cấu hình lại.</p>
+          </details>
+          <details>
+            <summary>Yêu cầu hệ thống là gì?</summary>
+            <p>Ubuntu 22.04 trở lên hoặc Windows 10/11 64-bit. Chạy từ mã nguồn cần Node.js 22.12 trở lên. Server self-host dùng Node.js 22 hoặc Docker.</p>
+          </details>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <a class="brand" href="#top" aria-label="SqlPro — về đầu trang">
+          <img src="assets/icon.svg" width="30" height="30" alt="">
+          <span>SqlPro</span>
+        </a>
+        <p>Workspace database desktop cho MySQL và MariaDB.</p>
+      </div>
+      <div class="footer-links">
+        <a href="#features">Tính năng</a>
+        <a href="#security">Bảo mật</a>
+        <a href="#selfhost">Tự host</a>
+        <a href="https://github.com/MinhIT97/sqlPro" rel="noopener">GitHub</a>
+        <a href="https://github.com/MinhIT97/sqlPro/releases/latest" rel="noopener">Tải xuống</a>
+      </div>
+      <p class="footer-copy">© <span id="year">2026</span> SqlPro. Được xây dựng cho công việc database hằng ngày.</p>
+    </div>
+  </footer>
+</body>
+</html>

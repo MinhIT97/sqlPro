@@ -1,0 +1,18 @@
+{
+  "name": "sqlpro-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SqlPro account and encrypted vault sync server",
+  "main": "src/index.cjs",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "start": "node src/index.cjs",
+    "test": "node --test test/*.test.cjs",
+    "check": "node --check src/index.cjs && node --check src/app.cjs && node --check src/db.cjs && node --check src/auth.cjs && node --check src/vault.cjs && node --check src/ratelimit.cjs && node --check src/errors.cjs"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}

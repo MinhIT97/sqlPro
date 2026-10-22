@@ -82,6 +82,17 @@ dialog select{width:100%}
 .tabs .tabrunning{color:#b58a2d}
 
 /* SQL editor, autocomplete and multi-statement results */
+.query-mode main>header{height:52px;flex:0 0 52px}
+.query-mode main>.tabs{height:40px;flex:0 0 40px}
+.query-mode .content{padding-top:16px}
+.query-mode .titleline{min-height:34px;gap:12px}
+.query-mode .titleline h1{font-size:19px;line-height:1.25;margin:0}
+.query-mode .titleline .eyebrow,.query-mode .titleline #subtitle{display:none}
+.query-mode .titleline .primary{padding:7px 11px}
+.query-mode #workspace>.toolbar{padding:10px 0 9px}
+.query-mode .editor{height:220px;min-height:120px;padding:14px 16px}
+.query-mode .resulttitle{padding:10px 0}
+.query-mode .query-output{margin-top:10px}
 .sql-editor-wrap{position:relative}
 .sql-editor-wrap .editor{display:block}
 .sql-suggestions{position:absolute;z-index:30;min-width:320px;max-width:min(560px,calc(100% - 24px));max-height:280px;overflow:auto;background:#fff;border:1px solid #ced9df;border-radius:8px;box-shadow:0 14px 38px #183c4930;padding:5px;left:14px;top:54px}
@@ -92,17 +103,86 @@ dialog select{width:100%}
 .sql-suggestion-kind{flex-shrink:0;border-radius:3px;background:#edf1f5;color:#788694;padding:2px 5px;font:8px/1.2 Inter,"Segoe UI",sans-serif;text-transform:uppercase;letter-spacing:.4px}
 .sql-suggestion.selected .sql-suggestion-kind{background:#cce7e1;color:#087f72}
 .sql-suggestion-detail{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#9aa5b1;font:9px/1.2 Inter,"Segoe UI",sans-serif}
-.query-batch-summary{display:flex;align-items:center;gap:12px;margin:18px 0 12px;padding:12px 14px;border:1px solid #cfe7df;border-radius:7px;background:#f1faf7;color:#297866;font-size:11px}
-.query-batch-summary.failed{border-color:#efd1d1;background:#fff5f5;color:#ad4545}
-.query-batch-summary span{color:#788795}
-.query-result-list{display:flex;flex-direction:column;gap:14px}
-.query-result-set{border:1px solid #dde5ea;border-radius:8px;background:#fff;overflow:hidden}
-.query-result-set.failed{border-color:#edcccc}
-.query-result-heading{display:flex;align-items:center;gap:10px;padding:10px 13px;border-bottom:1px solid #e8edf0;background:#f8fafb;color:#536173;font-size:11px}
-.query-result-heading .badge{margin-left:auto}
-.query-statement{margin:0;padding:10px 13px;border-bottom:1px solid #edf0f3;background:#fbfcfd;color:#5f7480;font-size:10px;line-height:1.55;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow:auto}
-.query-result-set>.resulttitle{padding:12px 13px}
-.query-result-set>.tablebox{border:0;border-radius:0;border-top:1px solid #edf0f3}
-.query-result-set>.errorbox{margin:12px}
-.query-result-set>.hint{margin:12px}
-@media(max-width:700px){.sql-suggestions{min-width:260px}.query-batch-summary{align-items:flex-start;flex-direction:column;gap:4px}}
+.query-output{margin-top:16px;border:1px solid #d4d9de;background:#fff;min-width:0}
+.query-output-tabs{display:flex;align-items:flex-end;gap:0;overflow-x:auto;background:#eeeeef;border-bottom:1px solid #bec6cc;padding:5px 8px 0;scrollbar-width:thin}
+.query-output-tab{flex:0 0 auto;position:relative;top:1px;border:1px solid #bfc6cc;border-radius:4px 4px 0 0;background:#e8e9ea;color:#3e4b57;font-size:11px;padding:6px 13px;margin-right:2px;white-space:nowrap}
+.query-output-tab:hover{background:#f7f9fa;color:#176f67}
+.query-output-tab.selected{background:#fff;color:#1e303b;border-bottom-color:#fff;font-weight:600}
+.query-output-tab:focus-visible{outline:2px solid #80bdaf;outline-offset:-3px}
+.query-output-panel{min-height:230px;overflow:hidden}
+.query-output-panel .tablebox{border:0;border-radius:0}
+#queryResult .tablebox{max-height:clamp(260px,calc(100vh - 430px),680px);overflow:auto;overscroll-behavior:contain}
+#queryResult .tablebox thead th{position:sticky;top:0;z-index:1}
+.query-output-panel table th{padding:9px 11px;background:#f3f6f8}
+.query-output-panel table td{padding:8px 11px}
+.query-result-view-tabs{display:flex;gap:3px;padding:7px 10px 5px;background:#fff;border-bottom:1px solid #e3e9ed}
+.query-result-view-tabs button{border:0;border-radius:3px;background:transparent;padding:5px 9px;color:#526272;font-size:11px}
+.query-result-view-tabs button.selected{background:#dceaf7;color:#176a91}
+.query-grid-status{padding:7px 11px;border-top:1px solid #e5e9ed;color:#81909c;font-size:10px}
+.query-message-overview,.query-summary-line{padding:12px 14px;background:#f7faf9;border-bottom:1px solid #e4ebe8;color:#3d766a;font-size:11px;font-weight:600}
+.query-message-overview.failed{background:#fff7f7;color:#ae4a4a}
+.query-message-row{display:flex;align-items:flex-start;gap:10px;padding:10px 14px;border-bottom:1px solid #edf0f2;color:#526170;font-size:11px}
+.query-message-row.failed{color:#ae4a4a;background:#fffafa}
+.query-message-mark{color:#269474;font-weight:700}
+.query-message-row.failed .query-message-mark{color:#c45050}
+.query-message-row>span:nth-child(2){flex:1;min-width:0}
+.query-message-row small{display:block;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#97a3ad;font:10px/1.4 "Cascadia Code",Consolas,monospace}
+.query-message-time{white-space:nowrap;color:#95a1ab}
+.query-message-remaining{padding:12px 14px;color:#a66d3c;font-size:11px}
+.query-summary-status{color:#269474}
+.query-summary-status.failed{color:#c45050}
+.query-result-information .tablebox{max-height:48vh}
+@media(max-width:700px){.sql-suggestions{min-width:260px}.query-output-tab{padding:6px 9px}}
+
+/* --- workspaces, account and sync --- */
+.workspacebar{display:flex;align-items:center;gap:5px;padding:0 4px 18px}
+.workspacebar select{flex:1;min-width:0;font-size:11px;padding:7px 8px;background:#fff;color:#4b5b6a;border-color:#e0e6eb}
+.workspacebar button{border:0;background:none;padding:6px 7px;font-size:15px;line-height:1;color:#8b98a5;border-radius:5px}
+.workspacebar button:hover{background:#e6f3f0;color:#087f72}
+.railaccount{margin-top:auto;position:relative;width:38px;height:38px;padding:0!important;border-radius:50%!important;background:#365053!important;color:#fff!important;font-size:11px!important;display:flex;align-items:center;justify-content:center;letter-spacing:.4px;flex-shrink:0}
+.railaccount:hover{background:#3f5c5f!important;color:#fff!important}
+.syncdot{position:absolute;right:0;bottom:1px;width:9px;height:9px;border-radius:50%;background:#7b9295;border:2px solid #132c30;box-sizing:content-box}
+.syncdot.synced{background:#3fd0a3}
+.syncdot.pending,.syncdot.syncing{background:#e0b34c}
+.syncdot.syncing{animation:syncpulse 1.2s ease-in-out infinite}
+.syncdot.error,.syncdot.reauth{background:#e06b6b}
+.syncdot.offline{background:#b9a77c}
+.syncdot.signed-out{background:#6e898b}
+.syncdot.idle{background:#8fa6a8}
+@keyframes syncpulse{0%,100%{opacity:1}50%{opacity:.35}}
+.header-avatar{border:0!important;background:#ebe5da;color:#877751;font-size:10px;padding:9px;border-radius:50%;min-width:34px;height:34px;display:inline-flex;align-items:center;justify-content:center;font-weight:600;letter-spacing:.3px}
+.header-avatar:hover{background:#e2dacb;color:#6f6040}
+.accounttabs{display:flex;gap:4px;border-bottom:1px solid #e5eaf0;margin:4px 0 6px}
+.accounttabs button{border:0;border-radius:0;background:transparent;padding:9px 11px;font-size:12px;color:#8592a1}
+.accounttabs button.selected{color:#087f72;border-bottom:2px solid #118777;font-weight:600}
+.accounthint{font-size:10px;color:#95a1ad;margin-top:6px;line-height:1.55}
+.accounthint .mono{font-size:9px;color:#74818d}
+.accountwarn{border:1px solid #f0dfb8;background:#fffaf0;color:#987638;border-radius:6px;padding:10px 12px;font-size:10.5px;line-height:1.55;margin-top:14px}
+.accountwarn strong{font-weight:700}
+.accountnote{border:1px solid #dcebe6;background:#f4faf8;color:#557c72;border-radius:6px;padding:10px 12px;font-size:10.5px;line-height:1.55;margin-top:16px}
+.accountidentity{display:flex;align-items:center;gap:12px;margin:16px 0}
+.accountbigavatar{width:42px;height:42px;border-radius:50%;background:#e5f1ed;color:#087f72;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0}
+.accountidentity>div:nth-child(2){min-width:0;flex:1}
+.accountidentity strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+.accountidentity .muted{font-size:10px;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.syncpill{flex-shrink:0;border-radius:20px;padding:5px 9px;font-size:9px;font-weight:600;background:#eef2f4;color:#788694;letter-spacing:.2px}
+.syncpill.synced{background:#e6f6f0;color:#27866b}
+.syncpill.pending,.syncpill.syncing{background:#fff6e5;color:#a07a2f}
+.syncpill.error,.syncpill.reauth{background:#fdeeee;color:#ac4747}
+.syncpill.offline{background:#f5f0e6;color:#8f7b51}
+.accountgrid{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#e9eef2;border:1px solid #e9eef2;border-radius:7px;overflow:hidden}
+.accountgrid>div{background:#fff;padding:10px 12px;min-width:0}
+.accountgrid span{display:block;color:#98a3af;font-size:9px;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px}
+.accountgrid strong{font-size:11px;color:#4d5d6d;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.workspacelist{display:flex;flex-direction:column;gap:7px;margin:16px 0;max-height:46vh;overflow:auto}
+.workspacerow{display:flex;align-items:center;gap:8px;border:1px solid #e5eaf0;border-radius:7px;padding:10px 11px}
+.workspacerow.active{border-color:#b9ded6;background:#f5fbf9}
+.workspaceinfo{flex:1;min-width:0}
+.workspaceinfo strong{display:block;font-size:12px;color:#3e4e5e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.workspaceinfo .muted{font-size:10px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.workspaceinfo .badge{margin-left:5px;vertical-align:1px;font-size:8px;padding:3px 5px}
+.workspacecount{font-size:9px;color:#97a3ad;white-space:nowrap}
+.workspaceactions{display:flex;gap:4px;flex-shrink:0}
+.workspaceactions button{font-size:10px;padding:5px 7px;border-color:#e1e8ee}
+.workspaceactions .danger{color:#c24b4b}
+.workspaceactions button:disabled{opacity:.45;cursor:default}

@@ -673,7 +673,18 @@ class DatabaseSession {
       }
     }
 
-    if (statements.length === 1) return this.runQuery(statements[0], timeoutMs);
+    if (statements.length === 1) {
+      const result = await this.runQuery(statements[0], timeoutMs);
+      if (statementCommand(statements[0]) === 'USE') {
+        try {
+          const current = await this.raw('SELECT DATABASE() AS value');
+          result.activeDatabase = current.rows[0]?.value || null;
+        } catch {
+          // Preserve the successful USE result if metadata cannot be read.
+        }
+      }
+      return result;
+    }
 
     const startedAt = Date.now();
     const deadline = startedAt + Math.max(1, Number(timeoutMs) || 30000);
@@ -696,6 +707,15 @@ class DatabaseSession {
         break;
       }
     }
+    let activeDatabase;
+    if (results.some((entry) => entry.ok && statementCommand(entry.sql) === 'USE')) {
+      try {
+        const current = await this.raw('SELECT DATABASE() AS value');
+        activeDatabase = current.rows[0]?.value || null;
+      } catch {
+        // The original statement results remain useful if the session closed.
+      }
+    }
     return {
       kind: 'batch',
       statementCount: statements.length,
@@ -704,6 +724,7 @@ class DatabaseSession {
       failedCount: results.filter((entry) => !entry.ok).length,
       stopped: results.length < statements.length || results.some((entry) => !entry.ok),
       truncated: results.some((entry) => entry.ok && entry.result?.truncated),
+      ...(activeDatabase !== undefined ? { activeDatabase } : {}),
       results,
       durationMs: Date.now() - startedAt
     };

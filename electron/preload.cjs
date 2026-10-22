@@ -23,7 +23,13 @@ const connections = Object.freeze({
   save: (profile) => ipcRenderer.invoke('connections:save', profile),
   remove: (id) => ipcRenderer.invoke('connections:remove', id),
   test: (profile) => ipcRenderer.invoke('connections:test', profile),
-  importNavicat: () => ipcRenderer.invoke('connections:import-navicat')
+  importNavicat: (workspaceId) => ipcRenderer.invoke('connections:import-navicat', workspaceId)
+});
+
+const workspaces = Object.freeze({
+  list: () => ipcRenderer.invoke('workspaces:list'),
+  save: (workspace) => ipcRenderer.invoke('workspaces:save', workspace),
+  remove: (id) => ipcRenderer.invoke('workspaces:remove', id)
 });
 
 const db = Object.freeze({
@@ -47,6 +53,25 @@ const db = Object.freeze({
   restore: (payload) => ipcRenderer.invoke('db:restore', payload)
 });
 
+const account = Object.freeze({
+  status: () => ipcRenderer.invoke('account:status'),
+  register: (payload) => ipcRenderer.invoke('account:register', payload),
+  login: (payload) => ipcRenderer.invoke('account:login', payload),
+  logout: () => ipcRenderer.invoke('account:logout'),
+  resetLocal: () => ipcRenderer.invoke('account:reset-local'),
+  syncNow: () => ipcRenderer.invoke('account:sync-now'),
+  onStatus: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('sync:status', listener);
+    return () => ipcRenderer.removeListener('sync:status', listener);
+  },
+  onApplied: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('sync:applied', listener);
+    return () => ipcRenderer.removeListener('sync:applied', listener);
+  }
+});
+
 contextBridge.exposeInMainWorld('sqlProDesktop', Object.freeze({
   getMetadata: () => ipcRenderer.invoke('app:metadata'),
   loadState: () => ipcRenderer.invoke('state:load'),
@@ -66,5 +91,7 @@ contextBridge.exposeInMainWorld('sqlProDesktop', Object.freeze({
     return () => ipcRenderer.removeListener('db:progress', listener);
   },
   connections,
+  workspaces,
+  account,
   db
 }));

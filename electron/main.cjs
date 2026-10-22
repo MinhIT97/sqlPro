@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const store = require('./store.cjs');
+const sync = require('./sync.cjs');
 const { parseNavicatFile } = require('./navicat.cjs');
 const { DatabaseSession, testConnection, MAX_RESTORE_BYTES } = require('./database.cjs');
 
@@ -89,6 +90,28 @@ function sendDbProgress(payload) {
   }
 }
 
+function syncNotifier() {
+  return {
+    status: (payload) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('sync:status', payload);
+      }
+    },
+    applied: (payload) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('sync:applied', payload);
+      }
+    }
+  };
+}
+
+function applyZoom(delta) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const contents = mainWindow.webContents;
+  const level = delta === null ? 0 : Math.max(-6, Math.min(6, contents.getZoomLevel() + delta));
+  contents.setZoomLevel(level);
+}
+
 function buildMenu() {
   const template = [
     {
@@ -126,9 +149,9 @@ function buildMenu() {
       submenu: [
         { label: 'Ẩn/hiện thanh bên', accelerator: 'Ctrl+B', click: () => sendCommand('toggle-sidebar') },
         { type: 'separator' },
-        { role: 'resetZoom', label: 'Cỡ mặc định' },
-        { role: 'zoomIn', label: 'Phóng to' },
-        { role: 'zoomOut', label: 'Thu nhỏ' },
+        { label: 'Cỡ mặc định', accelerator: 'Ctrl+0', registerAccelerator: false, click: () => applyZoom(null) },
+        { label: 'Phóng to', accelerator: 'Ctrl+Plus', registerAccelerator: false, click: () => applyZoom(0.5) },
+        { label: 'Thu nhỏ', accelerator: 'Ctrl+-', registerAccelerator: false, click: () => applyZoom(-0.5) },
         { type: 'separator' },
         { role: 'togglefullscreen', label: 'Toàn màn hình', accelerator: 'F11' }
       ]
@@ -192,6 +215,21 @@ function createWindow() {
   mainWindow.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith('file://')) event.preventDefault();
   });
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || input.alt || (!input.control && !input.meta)) return;
+    const key = input.key || '';
+    const code = input.code || '';
+    if (key === '+' || key === '=' || code === 'NumpadAdd') {
+      event.preventDefault();
+      applyZoom(0.5);
+    } else if (key === '-' || key === '_' || code === 'NumpadSubtract') {
+      event.preventDefault();
+      applyZoom(-0.5);
+    } else if (key === '0' || code === 'Numpad0') {
+      event.preventDefault();
+      applyZoom(null);
+    }
+  });
   mainWindow.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   mainWindow.on('close', () => saveWindowState());
   mainWindow.on('closed', () => { mainWindow = undefined; });
@@ -239,7 +277,20 @@ function friendlyError(error) {
     SESSION_CLOSED: 'Phiên kết nối đã đóng. Hãy kết nối lại.',
     QUERY_TIMEOUT: 'Truy vấn quá thời gian cho phép.',
     QUERY_CANCELED: 'Đã hủy truy vấn.',
-    NO_PRIMARY_KEY: 'Bảng không có khóa chính nên không thể sửa/xóa trực tiếp.'
+    NO_PRIMARY_KEY: 'Bảng không có khóa chính nên không thể sửa/xóa trực tiếp.',
+    NETWORK_ERROR: 'Không kết nối được tới server đồng bộ. Kiểm tra URL và kết nối mạng.',
+    INVALID_SERVER_URL: 'Địa chỉ server đồng bộ không hợp lệ.',
+    INSECURE_SERVER: 'Server không dùng HTTPS. Hãy dùng HTTPS hoặc xác nhận cho phép HTTP không an toàn.',
+    INVALID_CREDENTIALS: 'Email hoặc mật khẩu không đúng.',
+    EMAIL_TAKEN: 'Email này đã được đăng ký trên server.',
+    RATE_LIMITED: 'Bạn thao tác quá nhanh. Hãy thử lại sau.',
+    SYNC_ACCOUNT_MISMATCH: 'Dữ liệu local thuộc tài khoản khác. Hãy sao lưu và xóa dữ liệu local trước khi đổi tài khoản.',
+    WEAK_PASSWORD: 'Mật khẩu quá ngắn. Hãy dùng ít nhất 10 ký tự.',
+    REGISTRATION_DISABLED: 'Server này không mở đăng ký tài khoản.',
+    VAULT_DECRYPT_FAILED: 'Không thể giải mã dữ liệu đồng bộ. Kiểm tra mật khẩu hoặc dữ liệu trên server.',
+    NOT_LOGGED_IN: 'Chưa đăng nhập tài khoản đồng bộ.',
+    SESSION_EXPIRED: 'Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.',
+    VAULT_TOO_LARGE: 'Dữ liệu đồng bộ vượt quá giới hạn 5 MB.'
   };
   return messages[code] || error.message || 'Đã xảy ra lỗi.';
 }
@@ -373,11 +424,16 @@ ipcMain.handle('file:open-json', async () => {
 
 handle('connections:list', () => store.list());
 
-handle('connections:save', (payload) => store.save(payload));
+handle('connections:save', (payload) => {
+  const saved = store.save(payload);
+  sync.schedule();
+  return saved;
+});
 
 handle('connections:remove', async (id) => {
   if (activeSession && activeSession.profileId === id) await closeActiveSession();
   store.remove(id);
+  sync.schedule();
   return { removed: true };
 });
 
@@ -388,7 +444,7 @@ handle('connections:test', async (payload) => {
   return { version: result.version };
 });
 
-handle('connections:import-navicat', async () => {
+handle('connections:import-navicat', async (workspaceId) => {
   const candidates = [
     path.join(os.homedir(), '.config', 'navicat', 'Common', 'connections.json'),
     path.join(app.getPath('appData'), 'navicat', 'Common', 'connections.json')
@@ -405,7 +461,8 @@ handle('connections:import-navicat', async () => {
   });
   if (result.canceled || !result.filePaths.length) return { canceled: true };
   const parsed = parseNavicatFile(result.filePaths[0]);
-  const imported = store.importMany(parsed.connections);
+  const imported = store.importMany(parsed.connections, workspaceId);
+  sync.schedule();
   return {
     canceled: false,
     filePath: result.filePaths[0],
@@ -414,6 +471,45 @@ handle('connections:import-navicat', async () => {
     skipped: parsed.skipped
   };
 });
+
+handle('workspaces:list', () => store.listWorkspaces());
+
+handle('workspaces:save', (payload) => {
+  const workspace = store.saveWorkspace(payload);
+  sync.schedule();
+  return workspace;
+});
+
+handle('workspaces:remove', (id) => {
+  if (typeof id !== 'string' || !id) throw new Error('Workspace không hợp lệ.');
+  const result = store.removeWorkspace(id);
+  sync.schedule();
+  return result;
+});
+
+handle('account:status', () => sync.status());
+
+handle('account:register', (payload) => {
+  if (!payload || typeof payload !== 'object') throw new Error('Thông tin đăng ký không hợp lệ.');
+  return sync.register(payload);
+});
+
+handle('account:login', (payload) => {
+  if (!payload || typeof payload !== 'object') throw new Error('Thông tin đăng nhập không hợp lệ.');
+  return sync.login(payload);
+});
+
+handle('account:logout', () => sync.logout());
+
+handle('account:reset-local', async () => {
+  await closeActiveSession();
+  const { backupName } = store.resetLocalData();
+  await sync.logout();
+  writeJson('renderer-state.json', {});
+  return { backupName };
+});
+
+handle('account:sync-now', () => sync.syncNow());
 
 handle('db:connect', async (profileId) => {
   if (typeof profileId !== 'string' || !profileId) throw new Error('Kết nối không hợp lệ.');
@@ -583,11 +679,14 @@ handle('db:restore', async (payload) => {
 
 app.whenReady().then(() => {
   buildMenu();
+  sync.init({ notify: syncNotifier() });
   createWindow();
+  sync.startup().catch(() => undefined);
 });
 
 app.on('before-quit', () => {
   isQuitting = true;
+  sync.shutdown();
   if (activeSession) {
     try {
       activeSession.session.close();

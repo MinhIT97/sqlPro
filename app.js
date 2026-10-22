@@ -6,8 +6,13 @@ let historyRows = [];
 
 const desktop = window.sqlProDesktop;
 
+const DEFAULT_WORKSPACE_ID = 'ws-personal';
+
 const app = {
   connections: [],
+  workspaces: [],
+  activeWorkspaceId: DEFAULT_WORKSPACE_ID,
+  account: null,
   connection: null,
   databases: [],
   database: null,
@@ -80,10 +85,9 @@ function formatBytes(value) {
 
 function modal(html, wide = false) {
   const dialog = $('#modal');
-  if (dialog.open) dialog.close();
   dialog.className = wide ? 'wide' : '';
   dialog.innerHTML = html;
-  dialog.showModal();
+  if (!dialog.open) dialog.showModal();
 }
 
 function closeModal() {
@@ -401,6 +405,7 @@ function persistState() {
   persistTimer = setTimeout(() => {
     desktop.saveState({
       connectionId: app.connection ? app.connection.id : null,
+      workspaceId: app.activeWorkspaceId,
       database: app.database,
       table,
       mode,
@@ -414,14 +419,28 @@ function persistState() {
 
 async function init() {
   $('#treeSearch').addEventListener('input', debounce(renderSidebar, 180));
+  $('#workspaceSelect').addEventListener('change', (event) => switchWorkspace(event.target.value));
   $('#connectionList').addEventListener('click', onConnectionClick);
   $('#databaseTree').addEventListener('click', onTreeClick);
   $('#tabs').addEventListener('click', onTabClick);
 
   if (!desktop) {
+    ensureDefaultWorkspace();
+    renderWorkspaceSwitcher();
     renderSidebar();
     view('data');
     return;
+  }
+
+  if (desktop.account?.onStatus) {
+    desktop.account.onStatus((status) => {
+      app.account = status;
+      renderAccountChrome();
+      if (status.loggedIn && $('#accountSync')) renderAccountPanel(status);
+    });
+  }
+  if (desktop.account?.onApplied) {
+    desktop.account.onApplied(onSyncApplied);
   }
 
   desktop.onDbProgress?.((progress) => {
@@ -467,6 +486,13 @@ async function init() {
     historyRows = saved.history.map(normalizeHistory).filter(Boolean).slice(0, 100);
   }
   if (saved && typeof saved.table === 'string') table = saved.table;
+  if (saved && typeof saved.workspaceId === 'string') app.activeWorkspaceId = saved.workspaceId;
+
+  try {
+    await refreshWorkspaces();
+  } catch (error) {
+    toast(error.message, 'error');
+  }
 
   try {
     await refreshConnections();
@@ -485,20 +511,96 @@ async function init() {
     renderSidebar();
     view('data');
   }
+  await refreshAccountStatus();
+}
+
+function ensureDefaultWorkspace() {
+  if (!Array.isArray(app.workspaces) || !app.workspaces.length) {
+    app.workspaces = [{
+      id: DEFAULT_WORKSPACE_ID,
+      name: 'Cá nhân',
+      description: '',
+      isDefault: true,
+      connectionCount: 0
+    }];
+  }
+  if (!app.workspaces.some((workspace) => workspace.id === app.activeWorkspaceId)) {
+    const fallback = app.workspaces.find((workspace) => workspace.isDefault || workspace.id === DEFAULT_WORKSPACE_ID);
+    app.activeWorkspaceId = (fallback || app.workspaces[0]).id;
+  }
+}
+
+function activeWorkspace() {
+  ensureDefaultWorkspace();
+  return app.workspaces.find((workspace) => workspace.id === app.activeWorkspaceId) || app.workspaces[0];
+}
+
+function workspaceConnectionCount(workspaceId) {
+  return app.connections.filter((connection) => (connection.workspaceId || DEFAULT_WORKSPACE_ID) === workspaceId).length;
+}
+
+function renderWorkspaceSwitcher() {
+  const select = $('#workspaceSelect');
+  if (!select) return;
+  ensureDefaultWorkspace();
+  select.innerHTML = app.workspaces.map((workspace) => (
+    `<option value="${esc(workspace.id)}">${esc(workspace.name)} · ${workspaceConnectionCount(workspace.id)}</option>`
+  )).join('');
+  select.value = app.activeWorkspaceId;
+  select.title = activeWorkspace().description || 'Chọn workspace';
+}
+
+async function refreshWorkspaces() {
+  if (desktop?.workspaces) {
+    const workspaces = await call(desktop.workspaces.list());
+    if (Array.isArray(workspaces) && workspaces.length) app.workspaces = workspaces;
+  }
+  ensureDefaultWorkspace();
+  renderWorkspaceSwitcher();
+}
+
+async function switchWorkspace(workspaceId) {
+  if (!workspaceId || !app.workspaces.some((workspace) => workspace.id === workspaceId)) {
+    renderWorkspaceSwitcher();
+    return;
+  }
+  if (workspaceId === app.activeWorkspaceId) return;
+  if (app.connection) {
+    const current = app.connections.find((connection) => connection.id === app.connection.id);
+    const currentWorkspace = current ? current.workspaceId : app.connection.workspaceId;
+    if ((currentWorkspace || DEFAULT_WORKSPACE_ID) !== workspaceId) await disconnect();
+  }
+  app.activeWorkspaceId = workspaceId;
+  renderWorkspaceSwitcher();
+  renderSidebar();
+  view('data');
+  persistState();
 }
 
 async function refreshConnections() {
   if (!desktop) {
     app.connections = [];
+    ensureDefaultWorkspace();
+    renderWorkspaceSwitcher();
+    renderSidebar();
     return;
   }
   app.connections = await call(desktop.connections.list());
+  ensureDefaultWorkspace();
+  if (app.connection) {
+    const current = app.connections.find((connection) => connection.id === app.connection.id);
+    if (current) app.connection = current;
+  }
+  renderWorkspaceSwitcher();
   renderSidebar();
 }
 
 function renderSidebar() {
   const term = ($('#treeSearch').value || '').trim().toLowerCase();
-  const connections = app.connections.filter((connection) => {
+  const workspaceConnections = app.connections.filter((connection) => (
+    connection.workspaceId || DEFAULT_WORKSPACE_ID
+  ) === app.activeWorkspaceId);
+  const connections = workspaceConnections.filter((connection) => {
     if (!term) return true;
     return [connection.name, connection.host, connection.user, connection.database]
       .some((value) => String(value || '').toLowerCase().includes(term));
@@ -520,7 +622,7 @@ function renderSidebar() {
 
   $('#connectionList').innerHTML = connectionHtml || `
     <div class="empty small">
-      Chưa có kết nối.<br>
+      ${term ? 'Không có kết nối phù hợp.' : `Workspace <strong>${esc(activeWorkspace().name)}</strong> chưa có kết nối.`}<br>
       <button onclick="connection()">Kết nối mới</button>
       <button onclick="importNavicat()">Nhập Navicat</button>
     </div>
@@ -623,6 +725,10 @@ async function refreshDatabases() {
 async function connectTo(id, options = {}) {
   const profile = app.connections.find((connection) => connection.id === id);
   if (!profile) return;
+  if (profile.workspaceId && profile.workspaceId !== app.activeWorkspaceId) {
+    app.activeWorkspaceId = profile.workspaceId;
+    renderWorkspaceSwitcher();
+  }
   if (app.connection && app.connection.id === id && app.database && options.keepSession) {
     renderSidebar();
     return;
@@ -851,6 +957,7 @@ function closeQueryTab(index) {
 }
 
 function updateChrome() {
+  document.body.classList.toggle('query-mode', mode === 'query');
   const label = mode === 'query' ? 'QUERY' : mode === 'history' ? 'WORKSPACE' : mode === 'data' ? 'TABLE' : mode.toUpperCase();
   const title = mode === 'query' ? 'SQL Editor' : mode === 'history' ? 'Lịch sử truy vấn' : (table || app.database || 'Workspace');
   $('#title').innerHTML = `${esc(title)} <span>${label}</span>`;
@@ -1292,10 +1399,43 @@ function renderQueryView() {
   $('#runQueryBtn').addEventListener('click', runQuery);
   $('#saveQueryBtn').addEventListener('click', saveQuery);
   $('#cancelQueryBtn').addEventListener('click', cancelQuery);
+  $('#queryResult').addEventListener('click', (event) => {
+    const resultTab = event.target.closest('[data-result-tab]');
+    if (resultTab) {
+      const result = app.query.result;
+      const key = resultTab.dataset.resultTab;
+      if (!result || result.kind !== 'batch' || !queryBatchTabs(result).some((item) => item.key === key)) return;
+      app.query.resultTab = key;
+      app.query.resultView = 'data';
+      $('#queryResult').innerHTML = queryResultHtml();
+      $('#queryResult [role="tab"][aria-selected="true"]')?.focus();
+      return;
+    }
+    const detailTab = event.target.closest('[data-result-view]');
+    if (!detailTab) return;
+    const viewName = detailTab.dataset.resultView;
+    if (viewName !== 'data' && viewName !== 'information') return;
+    app.query.resultView = viewName;
+    $('#queryResult').innerHTML = queryResultHtml();
+    $(`#queryResult [data-result-view="${viewName}"]`)?.focus();
+  });
+  $('#queryResult').addEventListener('keydown', (event) => {
+    const resultTab = event.target.closest('[data-result-tab]');
+    if (!resultTab || !['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(event.key)) return;
+    const result = app.query.result;
+    const tabs = result?.kind === 'batch' ? queryBatchTabs(result) : [];
+    if (!tabs.length) return;
+    event.preventDefault();
+    const current = tabs.findIndex((item) => item.key === resultTab.dataset.resultTab);
+    const next = event.key === 'Home' ? 0
+      : event.key === 'End' ? tabs.length - 1
+        : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    $(`#queryResult [data-result-tab="${tabs[next].key}"]`)?.click();
+  });
   updateQueryButtons();
 }
 
-function singleQueryResultHtml(result) {
+function singleQueryResultHtml(result, compact = false) {
   if (result.kind === 'ok') {
     return `<div class="resulttitle">✓ Thành công · ${result.affectedRows} dòng bị ảnh hưởng${result.insertId !== null ? ` · insert id ${esc(result.insertId)}` : ''} · ${result.durationMs} ms</div>`;
   }
@@ -1314,10 +1454,80 @@ function singleQueryResultHtml(result) {
     </tr>
   `).join('') || `<tr><td colspan="${result.columns.length + 1}" class="empty">Không có dòng nào.</td></tr>`;
   return `
-    <div class="resulttitle">✓ ${result.rows.length} dòng · ${result.durationMs} ms${result.truncated ? ' · đã giới hạn 5000 dòng' : ''}</div>
+    ${compact ? '' : `<div class="resulttitle">✓ ${result.rows.length} dòng · ${result.durationMs} ms${result.truncated ? ' · đã giới hạn 5000 dòng' : ''}</div>`}
     <div class="tablebox"><table><thead>${header}</thead><tbody>${body}</tbody></table></div>
-    ${result.truncated ? '<div class="hint">Kết quả vượt quá 5000 dòng nên đã bị cắt và kết nối được làm mới ở lần chạy sau.</div>' : ''}
+    ${compact ? `<div class="query-grid-status">${result.rows.length} dòng · ${result.durationMs} ms${result.truncated ? ' · đã giới hạn dữ liệu hiển thị' : ''}</div>` : ''}
+    ${!compact && result.truncated ? '<div class="hint">Kết quả hiển thị đã đạt giới hạn dòng. Truy vấn vẫn chạy hết và kết nối vẫn được giữ.</div>' : ''}
   `;
+}
+
+function queryBatchTabs(result) {
+  const output = [
+    { key: 'message', label: 'Message' },
+    { key: 'summary', label: 'Summary' }
+  ];
+  let number = 0;
+  for (const entry of result.results || []) {
+    if (!entry.ok || entry.result?.kind !== 'rows') continue;
+    number += 1;
+    output.push({ key: `result-${entry.index}`, label: `Result ${number}`, entry });
+  }
+  return output;
+}
+
+function queryBatchMessageHtml(result) {
+  const messages = result.results.map((entry) => {
+    const detail = !entry.ok
+      ? entry.error?.message || 'Không thể chạy câu lệnh.'
+      : entry.result.kind === 'rows'
+        ? `${entry.result.rows.length} dòng${entry.result.truncated ? ' (đã giới hạn hiển thị)' : ''}`
+        : `${entry.result.affectedRows} dòng bị ảnh hưởng`;
+    return `<div class="query-message-row ${entry.ok ? '' : 'failed'}">
+      <span class="query-message-mark">${entry.ok ? '✓' : '✕'}</span>
+      <span><strong>Câu lệnh #${entry.index}</strong> · ${esc(detail)}
+        <small>${esc(entry.sql.slice(0, 240))}</small>
+      </span>
+      <span class="query-message-time">${entry.ok ? `${entry.result.durationMs} ms` : 'Lỗi'}</span>
+    </div>`;
+  }).join('');
+  const remaining = result.statementCount - result.executedCount;
+  return `<div class="query-message-overview ${result.failedCount ? 'failed' : ''}">
+    ${result.failedCount ? 'Có lỗi' : 'Hoàn tất'} · ${result.succeededCount}/${result.statementCount} câu lệnh thành công · ${result.durationMs} ms
+  </div>${messages}${remaining > 0 ? `<div class="query-message-remaining">${remaining} câu lệnh phía sau chưa được chạy.</div>` : ''}`;
+}
+
+function queryBatchSummaryHtml(result) {
+  const rows = result.results.map((entry) => {
+    const count = !entry.ok ? '—' : entry.result.kind === 'rows'
+      ? `${entry.result.rows.length} dòng`
+      : `${entry.result.affectedRows} dòng ảnh hưởng`;
+    return `<tr>
+      <td>${entry.index}</td>
+      <td><span class="query-summary-status ${entry.ok ? '' : 'failed'}">${entry.ok ? 'Thành công' : 'Lỗi'}</span></td>
+      <td>${esc(count)}</td>
+      <td>${entry.ok ? `${entry.result.durationMs} ms` : '—'}</td>
+      <td class="mono" title="${esc(entry.sql.slice(0, 500))}">${esc(entry.sql.replace(/\s+/g, ' ').slice(0, 180))}</td>
+    </tr>`;
+  }).join('');
+  return `<div class="query-summary-line">${result.succeededCount}/${result.statementCount} câu lệnh thành công · ${result.durationMs} ms</div>
+    <div class="tablebox"><table>
+      <thead><tr><th>#</th><th>Trạng thái</th><th>Kết quả</th><th>Thời gian</th><th>SQL</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
+
+function queryResultInformationHtml(entry) {
+  const result = entry.result;
+  return `<div class="query-result-information">
+    <div class="query-summary-line">Câu lệnh #${entry.index} · ${result.rows.length} dòng · ${result.durationMs} ms</div>
+    <div class="tablebox"><table>
+      <thead><tr><th>#</th><th>Tên cột</th><th>Kiểu dữ liệu</th><th>Bảng</th></tr></thead>
+      <tbody>${result.columns.map((column, index) => `<tr>
+        <td>${index + 1}</td><td class="mono">${esc(column.name)}</td>
+        <td>${esc(column.type)}</td><td>${esc(column.table || '—')}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+  </div>`;
 }
 
 function queryResultHtml() {
@@ -1329,36 +1539,58 @@ function queryResultHtml() {
     return `<div class="empty">▷<br><br>Chạy truy vấn để xem kết quả.<br><br>Kết nối đang dùng: ${esc(app.connection?.name || '—')}</div>`;
   }
   if (result.kind !== 'batch') return singleQueryResultHtml(result);
+  if (!Array.isArray(result.results) || !result.results.length) {
+    return '<div class="errorbox">Không có kết quả câu lệnh để hiển thị.</div>';
+  }
 
-  const completed = `${result.succeededCount}/${result.statementCount} câu lệnh thành công`;
-  const summaryClass = result.failedCount ? 'query-batch-summary failed' : 'query-batch-summary';
-  const panels = result.results.map((entry) => {
-    const statement = `<pre class="query-statement">${esc(entry.sql)}</pre>`;
-    const content = entry.ok
-      ? singleQueryResultHtml(entry.result)
-      : `<div class="errorbox">${esc(entry.error?.message || 'Không thể chạy câu lệnh.')}${entry.error?.code ? `<br><small>${esc(entry.error.code)}</small>` : ''}</div>`;
-    return `
-      <section class="query-result-set ${entry.ok ? '' : 'failed'}">
-        <div class="query-result-heading">
-          <strong>Câu lệnh #${entry.index}</strong>
-          <span class="badge ${entry.ok ? '' : 'pending'}">${entry.ok ? 'Thành công' : 'Lỗi'}</span>
-        </div>
-        ${statement}
-        ${content}
-      </section>
-    `;
-  }).join('');
-  const stopped = result.executedCount < result.statementCount
-    ? `<div class="hint"><strong>Đã dừng.</strong> ${result.statementCount - result.executedCount} câu lệnh phía sau chưa được chạy.</div>`
-    : '';
+  const tabs = queryBatchTabs(result);
+  const selected = tabs.find((item) => item.key === app.query.resultTab) || tabs.find((item) => item.entry) || tabs[0];
+  const tabBar = tabs.map((item) => `<button type="button" role="tab" id="queryOutputTab-${item.key}"
+    aria-controls="queryOutputPanel" aria-selected="${item.key === selected.key ? 'true' : 'false'}"
+    tabindex="${item.key === selected.key ? '0' : '-1'}"
+    class="query-output-tab ${item.key === selected.key ? 'selected' : ''}"
+    data-result-tab="${item.key}">${item.label}</button>`).join('');
+  let content;
+  if (selected.key === 'message') content = queryBatchMessageHtml(result);
+  else if (selected.key === 'summary') content = queryBatchSummaryHtml(result);
+  else {
+    const information = app.query.resultView === 'information';
+    content = `<div class="query-result-view-tabs">
+      <button type="button" class="${information ? '' : 'selected'}" data-result-view="data">Data</button>
+      <button type="button" class="${information ? 'selected' : ''}" data-result-view="information">Information</button>
+    </div>${information ? queryResultInformationHtml(selected.entry) : singleQueryResultHtml(selected.entry.result, true)}`;
+  }
   return `
-    <div class="${summaryClass}">
-      <strong>${result.failedCount ? 'Có lỗi' : 'Hoàn tất'}</strong>
-      <span>${completed} · ${result.durationMs} ms</span>
+    <div class="query-output">
+      <div class="query-output-tabs" role="tablist" aria-label="Kết quả truy vấn">${tabBar}</div>
+      <div class="query-output-panel" id="queryOutputPanel" role="tabpanel" aria-labelledby="queryOutputTab-${selected.key}">${content}</div>
     </div>
-    <div class="query-result-list">${panels}</div>
-    ${stopped}
   `;
+}
+
+async function refreshQueryMetadata(result) {
+  const entries = result.kind === 'batch'
+    ? result.results.filter((entry) => entry.ok).map((entry) => entry.result)
+    : [result];
+  const changedDatabase = typeof result.activeDatabase === 'string'
+    && result.activeDatabase !== app.database;
+  if (!changedDatabase && !entries.some((entry) => entry.kind === 'ok')) return;
+  invalidateSqlAutocomplete();
+  if (changedDatabase) {
+    app.database = result.activeDatabase;
+    table = null;
+    app.columns = [];
+    app.rows = [];
+    app.total = null;
+    updateChrome();
+  }
+  if (!app.connection || !app.database) return;
+  try {
+    app.tables = await call(desktop.db.tables(app.database));
+    renderSidebar();
+  } catch {
+    // A successful query result must remain visible if metadata refresh fails.
+  }
 }
 
 function updateQueryButtons() {
@@ -1415,6 +1647,11 @@ async function runQuery() {
     }
     tab.result = result;
     tab.error = null;
+    tab.resultTab = result.kind === 'batch'
+      ? (result.failedCount ? 'message' : queryBatchTabs(result).find((item) => item.entry)?.key || 'message')
+      : null;
+    tab.resultView = 'data';
+    await refreshQueryMetadata(result);
     const batchFailed = result.kind === 'batch' && result.failedCount > 0;
     const historyMessage = result.kind === 'batch'
       ? `${result.succeededCount}/${result.statementCount} câu lệnh`
@@ -1643,6 +1880,466 @@ function confirmAction(title, message, confirmLabel = 'Xác nhận') {
   });
 }
 
+function workspaceForm(existing) {
+  if (!desktop?.workspaces) {
+    toast('Workspace chỉ khả dụng trong bản desktop.', 'error');
+    return;
+  }
+  const workspace = existing || null;
+  modal(`
+    <h2>${workspace ? 'Sửa workspace' : 'Workspace mới'}</h2>
+    <p>Workspace giúp nhóm các kết nối theo dự án và được đồng bộ cùng tài khoản.</p>
+    <form id="workspaceForm">
+      <label>Tên workspace</label>
+      <input id="wsName" required maxlength="80" value="${esc(workspace?.name || '')}" placeholder="Ví dụ: Dự án website">
+      <label>Mô tả (tùy chọn)</label>
+      <input id="wsDescription" maxlength="500" value="${esc(workspace?.description || '')}" placeholder="Ghi chú ngắn về workspace">
+      <div class="errorbox hidden" id="wsError"></div>
+      <div class="actions">
+        <button type="button" id="wsCancel">Hủy</button>
+        <button type="submit" class="primary">${workspace ? 'Lưu' : 'Tạo workspace'}</button>
+      </div>
+    </form>
+  `);
+  const form = $('#workspaceForm');
+  const errorBox = $('#wsError');
+  $('#wsCancel').addEventListener('click', closeModal);
+  $('#wsName').focus();
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    errorBox.classList.add('hidden');
+    try {
+      const saved = await call(desktop.workspaces.save({
+        id: workspace ? workspace.id : undefined,
+        name: $('#wsName').value,
+        description: $('#wsDescription').value
+      }));
+      closeModal();
+      await refreshWorkspaces();
+      renderSidebar();
+      if (!workspace && !app.connection) {
+        await switchWorkspace(saved.id);
+      }
+      toast(workspace ? 'Đã cập nhật workspace' : `Đã tạo workspace "${saved.name}"`);
+    } catch (error) {
+      errorBox.textContent = error.message;
+      errorBox.classList.remove('hidden');
+    }
+  });
+}
+
+function workspaceManager() {
+  if (!desktop?.workspaces) {
+    toast('Workspace chỉ khả dụng trong bản desktop.', 'error');
+    return;
+  }
+  ensureDefaultWorkspace();
+  const rows = app.workspaces.map((workspace) => {
+    const isDefault = workspace.isDefault || workspace.id === DEFAULT_WORKSPACE_ID;
+    const active = workspace.id === app.activeWorkspaceId;
+    return `
+      <div class="workspacerow ${active ? 'active' : ''}">
+        <div class="workspaceinfo">
+          <strong>${esc(workspace.name)}${isDefault ? '<span class="badge">Mặc định</span>' : ''}</strong>
+          <div class="muted">${esc(workspace.description || 'Không có mô tả')}</div>
+        </div>
+        <span class="workspacecount">${workspaceConnectionCount(workspace.id)} kết nối</span>
+        <div class="workspaceactions">
+          <button type="button" data-ws-open="${esc(workspace.id)}" ${active ? 'disabled' : ''}>Mở</button>
+          ${isDefault ? '' : `
+            <button type="button" data-ws-edit="${esc(workspace.id)}">Sửa</button>
+            <button type="button" class="danger" data-ws-delete="${esc(workspace.id)}">Xóa</button>
+          `}
+        </div>
+      </div>
+    `;
+  }).join('');
+  modal(`
+    <h2>Workspace</h2>
+    <p>Chọn workspace đang làm việc. Xóa workspace sẽ chuyển các kết nối về workspace mặc định.</p>
+    <div class="workspacelist">${rows}</div>
+    <div class="actions">
+      <button type="button" id="wsNew">＋ Workspace mới</button>
+      <span class="spacer"></span>
+      <button type="button" id="wsClose">Đóng</button>
+    </div>
+  `);
+  $('#wsClose').addEventListener('click', closeModal);
+  $('#wsNew').addEventListener('click', () => workspaceForm());
+  document.querySelectorAll('[data-ws-open]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const workspaceId = button.dataset.wsOpen;
+      closeModal();
+      await switchWorkspace(workspaceId);
+    });
+  });
+  document.querySelectorAll('[data-ws-edit]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const workspace = app.workspaces.find((entry) => entry.id === button.dataset.wsEdit);
+      if (workspace) workspaceForm(workspace);
+    });
+  });
+  document.querySelectorAll('[data-ws-delete]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const workspace = app.workspaces.find((entry) => entry.id === button.dataset.wsDelete);
+      if (workspace) removeWorkspace(workspace);
+    });
+  });
+}
+
+async function removeWorkspace(workspace) {
+  const count = workspaceConnectionCount(workspace.id);
+  const confirmed = await confirmAction(
+    'Xóa workspace?',
+    `Workspace "${workspace.name}" sẽ bị xóa.${count ? ` ${count} kết nối sẽ được chuyển về workspace "Cá nhân".` : ''}`,
+    'Xóa workspace'
+  );
+  if (!confirmed) return;
+  try {
+    const result = await call(desktop.workspaces.remove(workspace.id));
+    await refreshWorkspaces();
+    await refreshConnections();
+    if (!app.connection) view('data');
+    toast(`Đã xóa workspace "${result.name}"${result.moved ? `, chuyển ${result.moved} kết nối về Cá nhân` : ''}.`);
+    workspaceManager();
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+function readSyncServerUrl() {
+  try {
+    return localStorage.getItem('sqlpro.syncServerUrl') || '';
+  } catch {
+    return '';
+  }
+}
+
+function saveSyncServerUrl(value) {
+  try {
+    if (value) localStorage.setItem('sqlpro.syncServerUrl', value);
+  } catch {
+    // localStorage can be unavailable; the URL is only a convenience
+  }
+}
+
+function isInsecureHttpServer(value) {
+  try {
+    const url = new URL(String(value || '').trim());
+    if (url.protocol !== 'http:') return false;
+    return !['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function accountInitials(email) {
+  const value = String(email || '').trim();
+  return value ? value.slice(0, 2).toUpperCase() : 'SP';
+}
+
+function accountStateLabel(status) {
+  if (!status || !status.loggedIn) return 'Chưa đăng nhập';
+  const labels = {
+    idle: 'Sẵn sàng',
+    pending: 'Chờ đồng bộ',
+    syncing: 'Đang đồng bộ…',
+    synced: 'Đã đồng bộ',
+    offline: 'Ngoại tuyến',
+    error: 'Lỗi đồng bộ',
+    'reauth-required': 'Cần đăng nhập lại'
+  };
+  return labels[status.state] || 'Sẵn sàng';
+}
+
+function accountStateClass(status) {
+  if (!status || !status.loggedIn) return 'signed-out';
+  if (status.state === 'reauth-required') return 'reauth';
+  if (['pending', 'syncing', 'synced', 'offline', 'error'].includes(status.state)) return status.state;
+  return 'idle';
+}
+
+function formatSyncTime(value) {
+  if (!value) return 'Chưa đồng bộ';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Chưa đồng bộ';
+  return date.toLocaleString('vi-VN', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+function renderAccountChrome() {
+  const loggedIn = Boolean(app.account && app.account.loggedIn);
+  const email = loggedIn ? app.account.email : '';
+  const initials = accountInitials(email);
+  const label = accountStateLabel(app.account);
+  const initialsElement = $('#accountInitials');
+  const avatarElement = $('#accountAvatar');
+  if (initialsElement) initialsElement.textContent = initials;
+  if (avatarElement) avatarElement.textContent = initials;
+  const dot = $('#syncDot');
+  if (dot) {
+    dot.className = `syncdot ${accountStateClass(app.account)}`;
+    dot.title = label;
+  }
+  const accountButton = $('#accountButton');
+  if (accountButton) accountButton.title = loggedIn ? `${email} · ${label}` : 'Tài khoản và đồng bộ';
+  if (avatarElement) avatarElement.title = loggedIn ? `${email} · ${label}` : 'Tài khoản và đồng bộ';
+}
+
+async function refreshAccountStatus() {
+  if (!desktop?.account) {
+    renderAccountChrome();
+    return;
+  }
+  try {
+    app.account = await call(desktop.account.status());
+  } catch {
+    // keep the last known status when the main process is unavailable
+  }
+  renderAccountChrome();
+}
+
+let syncRefreshTimer;
+function onSyncApplied() {
+  clearTimeout(syncRefreshTimer);
+  syncRefreshTimer = setTimeout(async () => {
+    const openConnectionId = app.connection ? app.connection.id : null;
+    try {
+      await refreshWorkspaces();
+      await refreshConnections();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+    if (openConnectionId && !app.connections.some((connection) => connection.id === openConnectionId)) {
+      toast('Kết nối đang mở đã bị xóa từ thiết bị khác.');
+      await disconnect();
+    } else {
+      renderWorkspaceSwitcher();
+      renderSidebar();
+    }
+    await refreshAccountStatus();
+  }, 250);
+}
+
+async function accountModal() {
+  if (!desktop?.account) {
+    modal(`
+      <h2>Tài khoản &amp; đồng bộ</h2>
+      <p>Tính năng đồng bộ chỉ khả dụng trong bản desktop của SqlPro.</p>
+      <div class="actions"><button type="button" onclick="closeModal()">Đóng</button></div>
+    `);
+    return;
+  }
+  try {
+    app.account = await call(desktop.account.status());
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+  renderAccountChrome();
+  if (app.account && app.account.loggedIn) renderAccountPanel(app.account);
+  else accountAuthModal(false);
+}
+
+function accountAuthModal(registerMode, prefill = {}) {
+  if (!desktop?.account) return;
+  const serverUrl = prefill.serverUrl || readSyncServerUrl() || app.account?.defaultServerUrl || 'http://localhost:8080';
+  const email = prefill.email || '';
+  modal(`
+    <h2>${registerMode ? 'Tạo tài khoản đồng bộ' : 'Đăng nhập đồng bộ'}</h2>
+    <p>Đồng bộ connection và workspace giữa các máy. Dữ liệu được mã hóa ngay trên máy trước khi gửi lên server.</p>
+    <div class="accounttabs">
+      <button type="button" id="accountTabLogin" class="${registerMode ? '' : 'selected'}">Đăng nhập</button>
+      <button type="button" id="accountTabRegister" class="${registerMode ? 'selected' : ''}">Tạo tài khoản</button>
+    </div>
+    <form id="accountForm">
+      <label>Server đồng bộ</label>
+      <input id="accountServer" type="url" required autocomplete="url" value="${esc(serverUrl)}" placeholder="https://sync.example.com">
+      <div class="accounthint">Tự host bằng Docker: <span class="mono">docker compose up -d</span> · mặc định <span class="mono">http://localhost:8080</span></div>
+      <div class="accountwarn hidden" id="insecureWarning">Server dùng HTTP không mã hóa. Chỉ dùng trong mạng tin cậy hoặc khi đang thử nghiệm.</div>
+      <label class="checkline hidden" id="allowInsecureRow"><input type="checkbox" id="allowInsecure"> Tôi hiểu rủi ro khi dùng HTTP không an toàn</label>
+      <label>Email</label>
+      <input id="accountEmail" type="email" required autocomplete="username" value="${esc(email)}" placeholder="ban@example.com">
+      <label>${registerMode ? 'Mật khẩu đồng bộ' : 'Mật khẩu'}</label>
+      <input id="accountPassword" type="password" required ${registerMode ? 'minlength="10"' : ''} autocomplete="${registerMode ? 'new-password' : 'current-password'}" placeholder="${registerMode ? 'Ít nhất 10 ký tự' : 'Mật khẩu của bạn'}">
+      ${registerMode ? `
+        <label>Nhập lại mật khẩu</label>
+        <input id="accountPasswordConfirm" type="password" required minlength="10" autocomplete="new-password" placeholder="Nhập lại mật khẩu">
+        <div class="accountwarn">Mật khẩu này tạo khóa mã hóa dữ liệu đồng bộ và <strong>không thể khôi phục</strong>. Nếu quên mật khẩu, dữ liệu trên server sẽ không thể giải mã.</div>
+      ` : `
+        <label class="checkline"><input type="checkbox" id="accountRemember" checked> Ghi nhớ đăng nhập trên máy này</label>
+      `}
+      <div class="errorbox hidden" id="accountError"></div>
+      <div class="actions">
+        <button type="button" id="accountOffline">Dùng offline</button>
+        <span class="spacer"></span>
+        <button type="submit" class="primary" id="accountSubmit">${registerMode ? 'Tạo tài khoản' : 'Đăng nhập'}</button>
+      </div>
+    </form>
+  `);
+  const form = $('#accountForm');
+  const errorBox = $('#accountError');
+  const serverInput = $('#accountServer');
+  const updateInsecure = () => {
+    const insecure = isInsecureHttpServer(serverInput.value);
+    $('#allowInsecureRow').classList.toggle('hidden', !insecure);
+    $('#insecureWarning').classList.toggle('hidden', !insecure);
+    if (!insecure) $('#allowInsecure').checked = false;
+  };
+  serverInput.addEventListener('input', updateInsecure);
+  updateInsecure();
+  $('#accountTabLogin').addEventListener('click', () => {
+    accountAuthModal(false, { serverUrl: serverInput.value, email: $('#accountEmail').value });
+  });
+  $('#accountTabRegister').addEventListener('click', () => {
+    accountAuthModal(true, { serverUrl: serverInput.value, email: $('#accountEmail').value });
+  });
+  $('#accountOffline').addEventListener('click', closeModal);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    errorBox.classList.add('hidden');
+    const password = $('#accountPassword').value;
+    if (registerMode && password !== $('#accountPasswordConfirm').value) {
+      errorBox.textContent = 'Mật khẩu nhập lại không khớp.';
+      errorBox.classList.remove('hidden');
+      return;
+    }
+    const submit = $('#accountSubmit');
+    submit.disabled = true;
+    submit.textContent = 'Đang kết nối…';
+    try {
+      saveSyncServerUrl(serverInput.value.trim());
+      const payload = {
+        email: $('#accountEmail').value.trim(),
+        password,
+        serverUrl: serverInput.value.trim(),
+        allowInsecure: $('#allowInsecure').checked
+      };
+      if (registerMode) await call(desktop.account.register(payload));
+      else await call(desktop.account.login({ ...payload, remember: $('#accountRemember').checked }));
+      closeModal();
+      toast(registerMode ? 'Đã tạo tài khoản. Đang đồng bộ dữ liệu…' : 'Đã đăng nhập. Đang đồng bộ dữ liệu…');
+      await refreshAccountStatus();
+    } catch (error) {
+      errorBox.textContent = error.message;
+      errorBox.classList.remove('hidden');
+      if (error.code === 'SYNC_ACCOUNT_MISMATCH') {
+        const reset = document.createElement('button');
+        reset.type = 'button';
+        reset.className = 'danger';
+        reset.id = 'accountResetLocal';
+        reset.textContent = 'Sao lưu & xóa dữ liệu local…';
+        errorBox.appendChild(document.createElement('br'));
+        errorBox.appendChild(reset);
+        reset.addEventListener('click', () => resetLocalAccountData({
+          registerMode,
+          serverUrl: serverInput.value,
+          email: $('#accountEmail').value
+        }));
+      }
+      submit.disabled = false;
+      submit.textContent = registerMode ? 'Tạo tài khoản' : 'Đăng nhập';
+    }
+  });
+  $('#accountEmail').focus();
+}
+
+async function resetLocalAccountData(prefill) {
+  const confirmed = await confirmAction(
+    'Đổi tài khoản đồng bộ?',
+    'Dữ liệu local sẽ được sao lưu tự động rồi xóa khỏi SqlPro, sau đó bạn có thể đăng nhập tài khoản khác. Các thay đổi chưa đồng bộ chỉ còn trong tệp sao lưu.',
+    'Sao lưu & xóa'
+  );
+  if (!confirmed) {
+    accountAuthModal(prefill.registerMode, prefill);
+    return;
+  }
+  try {
+    await disconnect();
+    const result = await call(desktop.account.resetLocal());
+    app.activeWorkspaceId = DEFAULT_WORKSPACE_ID;
+    closeModal();
+    await refreshWorkspaces();
+    await refreshConnections();
+    renderWorkspaceSwitcher();
+    renderSidebar();
+    view('data');
+    persistState();
+    await refreshAccountStatus();
+    toast(result.backupName
+      ? `Đã sao lưu dữ liệu cũ vào ${result.backupName} và xóa dữ liệu local.`
+      : 'Đã xóa dữ liệu local.');
+    accountAuthModal(prefill.registerMode, prefill);
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+function renderAccountPanel(status) {
+  const email = status.email || '';
+  const label = accountStateLabel(status);
+  const errorHtml = status.error?.message
+    ? `<div class="errorbox">${esc(status.error.message)}</div>`
+    : '';
+  const reauth = status.state === 'reauth-required';
+  modal(`
+    <h2>Tài khoản &amp; đồng bộ</h2>
+    <div class="accountidentity">
+      <div class="accountbigavatar">${esc(accountInitials(email))}</div>
+      <div>
+        <strong>${esc(email)}</strong>
+        <div class="muted">${esc(status.serverUrl || '')}</div>
+      </div>
+      <span class="syncpill ${accountStateClass(status)}">${esc(label)}</span>
+    </div>
+    <div class="accountgrid">
+      <div><span>Lần đồng bộ cuối</span><strong>${esc(formatSyncTime(status.lastSyncAt))}</strong></div>
+      <div><span>Revision</span><strong>${esc(status.revision ?? 0)}</strong></div>
+      <div><span>Ghi nhớ đăng nhập</span><strong>${status.remember ? 'Có' : 'Không'}</strong></div>
+      <div><span>Mã hóa</span><strong>Đầu cuối</strong></div>
+    </div>
+    ${errorHtml}
+    <div class="accountnote">Connection và workspace được mã hóa trên máy trước khi gửi lên server. Server không đọc được host, user hay mật khẩu. Mật khẩu không thể khôi phục.</div>
+    <div class="actions">
+      <button type="button" id="accountLogout">Đăng xuất</button>
+      <span class="spacer"></span>
+      <button type="button" id="accountClose">Đóng</button>
+      <button type="button" class="primary" id="accountSync" ${status.state === 'syncing' ? 'disabled' : ''}>${reauth ? 'Đăng nhập lại' : 'Đồng bộ ngay'}</button>
+    </div>
+  `);
+  $('#accountClose').addEventListener('click', closeModal);
+  $('#accountSync').addEventListener('click', async () => {
+    if (reauth) {
+      closeModal();
+      accountAuthModal(false, { serverUrl: status.serverUrl, email });
+      return;
+    }
+    const button = $('#accountSync');
+    button.disabled = true;
+    button.textContent = 'Đang đồng bộ…';
+    try {
+      await call(desktop.account.syncNow());
+      await refreshAccountStatus();
+      if (app.account?.loggedIn) renderAccountPanel(app.account);
+      else closeModal();
+      toast('Đã đồng bộ dữ liệu');
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = 'Đồng bộ ngay';
+      await refreshAccountStatus();
+      toast(error.message, 'error');
+    }
+  });
+  $('#accountLogout').addEventListener('click', async () => {
+    try {
+      await call(desktop.account.logout());
+      closeModal();
+      await refreshAccountStatus();
+      toast('Đã đăng xuất. Dữ liệu local vẫn được giữ.');
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  });
+}
+
 function connection(profile) {
   const existing = profile || null;
   const p = existing || {};
@@ -1669,8 +2366,14 @@ function connection(profile) {
         <div><label>Username</label><input id="connUser" value="${esc(p.user || 'root')}"></div>
         <div><label>Password</label><input id="connPassword" type="password" placeholder="${savedPassword ? 'Để trống = giữ mật khẩu đã lưu' : 'Nhập mật khẩu'}"></div>
       </div>
-      <label>Database mặc định (tùy chọn)</label>
-      <input id="connDatabase" value="${esc(p.database || '')}" placeholder="Bỏ trống để chọn sau">
+      <div class="formrow">
+        <div><label>Workspace</label><select id="connWorkspace">
+          ${app.workspaces.map((workspace) => `
+            <option value="${esc(workspace.id)}" ${(p.workspaceId || app.activeWorkspaceId) === workspace.id ? 'selected' : ''}>${esc(workspace.name)}</option>
+          `).join('')}
+        </select></div>
+        <div><label>Database mặc định (tùy chọn)</label><input id="connDatabase" value="${esc(p.database || '')}" placeholder="Bỏ trống để chọn sau"></div>
+      </div>
       <label class="checkline"><input type="checkbox" id="connSsl" ${p.ssl?.enabled ? 'checked' : ''}> Dùng SSL/TLS</label>
       <div id="sslFields" class="optionbox ${p.ssl?.enabled ? '' : 'hidden'}">
         <label class="checkline"><input type="checkbox" id="connSslVerify" ${p.ssl?.verify ? 'checked' : ''}> Xác thực chứng chỉ (mặc định chấp nhận cert tự ký như Navicat)</label>
@@ -1733,6 +2436,7 @@ function connection(profile) {
   const readForm = () => {
     const payload = {
       id: existing ? existing.id : undefined,
+      workspaceId: $('#connWorkspace').value,
       name: $('#connName').value,
       type: $('#connType').value,
       host: $('#connHost').value,
@@ -1789,6 +2493,7 @@ function connection(profile) {
     try {
       const saved = await call(desktop.connections.save(readForm()));
       closeModal();
+      if (saved.workspaceId) app.activeWorkspaceId = saved.workspaceId;
       await refreshConnections();
       await connectTo(saved.id);
     } catch (error) {
@@ -1865,8 +2570,9 @@ function connectionMenu(id) {
 async function importNavicat() {
   if (!desktop) return;
   try {
-    const result = await call(desktop.connections.importNavicat());
+    const result = await call(desktop.connections.importNavicat(app.activeWorkspaceId));
     if (result.canceled) return;
+    await refreshWorkspaces();
     await refreshConnections();
     renderSidebar();
     const parts = [];

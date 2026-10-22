@@ -1,0 +1,17 @@
+# Chỉ gửi phần server và website vào Docker build context.
+.git
+.github
+node_modules
+server/node_modules
+server/data
+server/test
+release
+test
+electron
+build
+*.log
+*.deb
+*.AppImage
+*.exe
+.env
+.DS_Store

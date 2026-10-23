@@ -2413,11 +2413,27 @@ async function inlineEditCell(td) {
   const originalDisplay = td.innerHTML;
   td.classList.add('editing-cell');
 
+  const cellHeight = td.offsetHeight || 0;
+  const initialHeight = Math.max(cellHeight, 38);
+
   const input = document.createElement('textarea');
   input.className = 'inline-cell-editor';
   input.value = originalVal === null || originalVal === undefined ? '' : String(originalVal);
+  input.style.minHeight = `${initialHeight}px`;
+  input.style.height = `${initialHeight}px`;
+  input.placeholder = (colMeta && colMeta.nullable === 'YES') ? 'Gõ NULL để gán null...' : 'Nhập giá trị...';
+  input.title = 'Enter: Lưu · Esc: Hủy · Shift+Enter: Xuống dòng';
+
+  const autoResize = () => {
+    input.style.height = 'auto';
+    const nextHeight = Math.min(Math.max(input.scrollHeight, initialHeight), 220);
+    input.style.height = `${nextHeight}px`;
+  };
+  input.addEventListener('input', autoResize);
+
   td.innerHTML = '';
   td.appendChild(input);
+  autoResize();
   input.focus();
   input.select();
 
@@ -2473,12 +2489,20 @@ async function inlineEditCell(td) {
   };
 
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if ((e.key === 'Enter' && !e.shiftKey) || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) {
       e.preventDefault();
       commit();
     } else if (e.key === 'Escape') {
       e.preventDefault();
       cancel();
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      commit().then(() => {
+        const targetCell = e.shiftKey ? td.previousElementSibling : td.nextElementSibling;
+        if (targetCell && targetCell.dataset && targetCell.dataset.col) {
+          inlineEditCell(targetCell);
+        }
+      });
     }
   });
 

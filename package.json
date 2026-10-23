@@ -26,9 +26,9 @@
     "server:test": "npm --prefix server test",
     "docker:build": "docker compose build",
     "docker:up": "docker compose up -d",
-    "pack:linux": "electron-builder --linux AppImage deb",
-    "pack:windows": "electron-builder --win nsis portable",
-    "pack:windows:zip": "electron-builder --win zip",
+    "pack:linux": "electron-builder --linux AppImage deb --publish never",
+    "pack:windows": "electron-builder --win nsis portable --publish never",
+    "pack:windows:zip": "electron-builder --win zip --publish never",
     "pack:dir": "electron-builder --dir"
   },
   "devDependencies": {

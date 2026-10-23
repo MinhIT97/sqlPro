@@ -1,42 +1,46 @@
 'use strict';
 
 (function setupWebsite() {
-  const header = document.querySelector('#siteHeader');
-  const nav = document.querySelector('#siteNav');
-  const navToggle = document.querySelector('#navToggle');
-  const copyButtons = document.querySelectorAll('[data-copy-target]');
-  const year = document.querySelector('#year');
+  function initCopyrightYear() {
+    const year = document.querySelector('#year');
+    if (year) year.textContent = String(new Date().getFullYear());
+  }
 
-  if (year) year.textContent = String(new Date().getFullYear());
+  function initStickyHeader() {
+    const header = document.querySelector('#siteHeader');
+    if (!header) return;
 
-  if (header) {
     const updateHeader = () => header.classList.toggle('scrolled', window.scrollY > 8);
     updateHeader();
     window.addEventListener('scroll', updateHeader, { passive: true });
   }
 
-  if (navToggle && nav) {
+  function initMobileNavigation() {
+    const nav = document.querySelector('#siteNav');
+    const toggle = document.querySelector('#navToggle');
+    if (!nav || !toggle) return;
+
+    const label = toggle.querySelector('.sr-only');
+    const isOpen = () => toggle.getAttribute('aria-expanded') === 'true';
     const setOpen = (open) => {
       nav.classList.toggle('open', open);
-      navToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-      const label = navToggle.querySelector('.sr-only');
+      toggle.setAttribute('aria-expanded', String(open));
       if (label) label.textContent = open ? 'Đóng menu' : 'Mở menu';
     };
-    navToggle.addEventListener('click', () => {
-      setOpen(navToggle.getAttribute('aria-expanded') !== 'true');
-    });
+
+    toggle.addEventListener('click', () => setOpen(!isOpen()));
     nav.querySelectorAll('a').forEach((link) => {
       link.addEventListener('click', () => setOpen(false));
     });
     document.addEventListener('click', (event) => {
-      if (navToggle.getAttribute('aria-expanded') !== 'true') return;
-      if (nav.contains(event.target) || navToggle.contains(event.target)) return;
-      setOpen(false);
+      if (isOpen() && !nav.contains(event.target) && !toggle.contains(event.target)) {
+        setOpen(false);
+      }
     });
     document.addEventListener('keydown', (event) => {
-      if (event.key !== 'Escape' || navToggle.getAttribute('aria-expanded') !== 'true') return;
+      if (event.key !== 'Escape' || !isOpen()) return;
       setOpen(false);
-      navToggle.focus();
+      toggle.focus();
     });
   }
 
@@ -45,35 +49,56 @@
       await navigator.clipboard.writeText(value);
       return;
     }
+
     const area = document.createElement('textarea');
     area.value = value;
     area.setAttribute('readonly', '');
     area.style.position = 'fixed';
     area.style.opacity = '0';
     document.body.appendChild(area);
-    area.select();
-    const copied = document.execCommand('copy');
-    area.remove();
-    if (!copied) throw new Error('copy failed');
+    try {
+      area.select();
+      if (!document.execCommand('copy')) throw new Error('copy failed');
+    } finally {
+      area.remove();
+    }
   }
 
-  copyButtons.forEach((button) => {
-    button.addEventListener('click', async () => {
-      const target = document.getElementById(button.dataset.copyTarget);
-      const label = button.querySelector('span');
-      if (!target || !label) return;
-      try {
-        await copyText(target.textContent.trim());
-        button.classList.add('copied');
-        label.textContent = 'Đã sao chép';
-      } catch {
-        label.textContent = 'Không sao chép được';
-      }
-      clearTimeout(button.__copyTimer);
-      button.__copyTimer = setTimeout(() => {
-        button.classList.remove('copied');
-        label.textContent = 'Sao chép';
-      }, 2200);
+  function initCopyButtons() {
+    const timers = new WeakMap();
+    const versions = new WeakMap();
+    document.querySelectorAll('[data-copy-target]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const target = document.getElementById(button.dataset.copyTarget);
+        const label = button.querySelector('span');
+        if (!target || !label) return;
+
+        const version = (versions.get(button) || 0) + 1;
+        versions.set(button, version);
+        const pendingTimer = timers.get(button);
+        if (pendingTimer) clearTimeout(pendingTimer);
+        try {
+          await copyText(target.textContent.trim());
+          if (versions.get(button) !== version) return;
+          button.classList.add('copied');
+          label.textContent = 'Đã sao chép';
+        } catch {
+          if (versions.get(button) !== version) return;
+          button.classList.remove('copied');
+          label.textContent = 'Không sao chép được';
+        }
+
+        timers.set(button, setTimeout(() => {
+          button.classList.remove('copied');
+          label.textContent = 'Sao chép';
+          timers.delete(button);
+        }, 2200));
+      });
     });
-  });
+  }
+
+  initCopyrightYear();
+  initStickyHeader();
+  initMobileNavigation();
+  initCopyButtons();
 }());

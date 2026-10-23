@@ -109,6 +109,8 @@ npm run server:test
 
 Website tĩnh nằm trong `website/`, được server Express phục vụ tại `/`, không cần bước build và không dùng CDN. Nội dung gồm tính năng, mô hình mã hóa, workspace, hướng dẫn tự host, FAQ và liên kết tải bản phát hành mới nhất.
 
+Quy ước kiến trúc, design pattern và chuẩn code của dự án được ghi trong [`agent.md`](agent.md).
+
 ## Sao lưu và phục hồi
 
 Chọn database trong thanh bên rồi dùng **⇩ Sao lưu** / **⇧ Phục hồi**, hoặc menu **Tệp → Sao lưu database… / Phục hồi database…**.

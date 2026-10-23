@@ -946,7 +946,7 @@ class DatabaseSession {
   async listRoutines(database) {
     const { result } = await this.raw(
       `SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS type, DATA_TYPE AS returnType,
-              IS_DETERMINISTIC AS deterministic, SECURITY_TYPE AS security,
+              IS_DETERMINISTIC AS \`deterministic\`, SECURITY_TYPE AS security,
               DEFINER AS definer, ROUTINE_COMMENT AS comment,
               CREATED AS createdAt, LAST_ALTERED AS updatedAt
          FROM information_schema.ROUTINES

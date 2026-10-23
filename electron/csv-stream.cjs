@@ -19,6 +19,7 @@ class CsvStreamParser {
     this.rowStarted = false;
     this.pendingCr = false;
     this.started = false;
+    this.pendingQuote = false;
     this.line = 1;
   }
 
@@ -29,7 +30,18 @@ class CsvStreamParser {
       if (input.length) this.started = true;
     }
     this.rows = [];
-    for (let index = 0; index < input.length; index += 1) {
+    let startIndex = 0;
+    if (this.pendingQuote && input.length) {
+      this.pendingQuote = false;
+      if (input[0] === this.quote) {
+        this.field += this.quote;
+        startIndex = 1;
+      } else {
+        this.quoted = false;
+        this.afterQuote = true;
+      }
+    }
+    for (let index = startIndex; index < input.length; index += 1) {
       const character = input[index];
       if (this.pendingCr) {
         this.pendingCr = false;
@@ -37,7 +49,9 @@ class CsvStreamParser {
       }
       if (this.quoted) {
         if (character === this.quote) {
-          if (input[index + 1] === this.quote) {
+          if (index + 1 >= input.length) {
+            this.pendingQuote = true;
+          } else if (input[index + 1] === this.quote) {
             this.field += this.quote;
             index += 1;
           } else {
@@ -104,6 +118,11 @@ class CsvStreamParser {
   }
 
   end() {
+    if (this.pendingQuote) {
+      this.pendingQuote = false;
+      this.quoted = false;
+      this.afterQuote = true;
+    }
     if (this.quoted) throw new Error(`CSV không hợp lệ: chuỗi trích dẫn chưa đóng ở dòng ${this.line}.`);
     this.pendingCr = false;
     if (this.rowStarted || this.row.length || this.fieldStarted || this.field !== '') {

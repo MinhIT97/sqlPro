@@ -6,7 +6,7 @@ Tài liệu này mô tả kiến trúc đang dùng và quy tắc cho thay đổi
 
 | Phần | Pattern / cách tổ chức | Quy tắc sử dụng |
 | --- | --- | --- |
-| `website/` | Module khởi tạo bằng IIFE và các hàm `init...` độc lập | Mỗi hành vi DOM (header, menu, copy) có hàm khởi tạo riêng; trạng thái ngắn hạn nằm trong closure, không gắn thuộc tính tự chế lên DOM. |
+| `website/` | Module khởi tạo bằng IIFE và các hàm `init...` độc lập | Mỗi hành vi DOM có hàm khởi tạo riêng; trạng thái ngắn hạn nằm trong closure. `core.js` giữ logic thuần cho bộ cài, checksum, tìm kiếm và cấu hình tự host; `app.js` điều phối API/DOM. HTML song ngữ được sinh từ template chung trong `scripts/build-website.cjs` và nội dung `scripts/website-docs.cjs`, vẫn dùng được khi không có JavaScript. |
 | `website/styles.css` | Design tokens và CSS theo component | Màu, font, bán kính, bóng dùng biến ở `:root`; style nằm trong nhóm component tương ứng; responsive ở các breakpoint hiện có. |
 | `electron/main.cjs` + `electron/preload.cjs` + `app.js` | Phân lớp main / preload facade / renderer | Main sở hữu hệ điều hành, tệp, secret và database; preload chỉ công bố API IPC có tên rõ; renderer chỉ giữ trạng thái và vẽ UI. |
 | `electron/database.cjs` | Session object cho kết nối database | `DatabaseSession` giữ vòng đời kết nối, timeout và hủy; thao tác SQL đi qua session thay vì kết nối trực tiếp từ renderer. |
@@ -33,9 +33,10 @@ Tài liệu này mô tả kiến trúc đang dùng và quy tắc cho thay đổi
 ```bash
 npm run check
 npm run test:renderer
+npm run test:website
 npm --prefix server run check
 npm run server:test
 git diff --check
 ```
 
-Website nằm trong `website/` và được Express phục vụ trực tiếp, nên kiểm tra `website/index.html`, menu di động và nút sao chép trong browser khi sửa phần này. `npm run pack:linux` và `npm run pack:windows` chỉ cần chạy khi thay đổi ảnh hưởng bản đóng gói hoặc cần tạo bộ cài.
+Website nằm trong `website/` và được Express phục vụ trực tiếp. Khi sửa nội dung/layout HTML, sửa generator rồi chạy `npm run website:build`; commit cả sáu trang HTML đã sinh. Không cần build lúc chạy server. Kiểm tra menu, copy, tìm kiếm, song ngữ, tải bộ cài, changelog và generator tự host bằng `npm run test:website`. Ảnh trong `website/assets/screenshots/` được chụp từ renderer với dữ liệu demo bằng biến `SQLPRO_SCREENSHOT_DIR` khi chạy `npm run test:renderer`. `npm run pack:linux` và `npm run pack:windows` chỉ cần chạy khi thay đổi ảnh hưởng bản đóng gói hoặc cần tạo bộ cài.

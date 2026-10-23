@@ -143,6 +143,24 @@ Mở bằng nút **Nhập**/**Xuất** trên thanh công cụ bảng hoặc menu
 
 ## Chạy khi phát triển
 
+### Website giới thiệu và tài liệu
+
+Website được server phục vụ trực tiếp, có sáu trang tĩnh: `index.html`, `docs.html`, `changelog.html` và các bản tiếng Anh tương ứng `.en.html`. Tài liệu có tìm kiếm không dấu và mã lỗi; trang tải hiển thị thông tin bộ cài/checksum do GitHub cung cấp; changelog lấy bản phát hành công khai. Khi API lỗi, các trang vẫn giữ liên kết GitHub Releases dự phòng.
+
+Công cụ tự host tạo `.env`, `compose.yaml` và Caddyfile ngay trong trình duyệt. Chế độ localhost chỉ bind loopback; chế độ HTTPS chỉ mở cổng 80/443 của Caddy và giữ app trong mạng Compose. Công cụ không triển khai server thay người dùng.
+
+Sửa template tại `scripts/build-website.cjs`, nội dung tài liệu tại `scripts/website-docs.cjs`, rồi chạy `npm run website:build`. Commit cả các trang HTML được sinh; server không cần chạy bước build. `npm run check` kiểm tra các trang còn khớp source. Chạy `npm run test:website` để kiểm tra bằng Chromium; cần cài dependencies ở cả root và `server/`. Trên Linux không có màn hình, dùng `xvfb-run -a npm run test:website`.
+
+Ảnh sản phẩm được chụp từ chính renderer với dữ liệu demo. Video WebM ngắn được tạo từ ba ảnh này, không có âm thanh, có caption Việt/Anh. Để cập nhật ảnh và video trên PowerShell:
+
+```powershell
+$env:SQLPRO_SCREENSHOT_DIR = Join-Path (Get-Location) 'website/assets/screenshots'
+npm run test:renderer
+Remove-Item Env:SQLPRO_SCREENSHOT_DIR
+```
+
+### Ứng dụng desktop
+
 Yêu cầu Node.js 22 trở lên.
 
 ```bash

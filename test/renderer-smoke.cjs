@@ -153,6 +153,38 @@ async function confirmPending(expression, accept = true) {
   await evaluate('window.pendingAction');
 }
 
+async function captureProductShots() {
+  const directory = process.env.SQLPRO_SCREENSHOT_DIR;
+  if (!directory) return;
+  fs.mkdirSync(directory, { recursive: true });
+  const capture = async (name) => {
+    // Resizing forces a fresh compositor frame in a hidden window on Windows.
+    win.setContentSize(1346, 837);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    win.setContentSize(1344, 835);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    fs.writeFileSync(path.join(directory, `${name}.png`), (await win.webContents.capturePage()).toPNG());
+  };
+  await evaluate(`
+    closeModal();
+    $('#toast').style.display = 'none';
+    app.tables = ${JSON.stringify(tables.map((entry) => ({ ...entry, rowEstimate: entry.name === 'users' ? 3 : 0 })))};
+    app.connections = [{ id: 'test', name: 'Demo workspace', host: 'localhost', port: 3306, user: 'demo', ssh: { enabled: false }, workspaceId: app.activeWorkspaceId }];
+    app.connection = app.connections[0]; app.database = 'test';
+    app.query.sql = 'SELECT id, name, email FROM users LIMIT 100;';
+    app.query.result = { kind: 'rows', columns: [{ name: 'id', type: 'INT' }, { name: 'name', type: 'VARCHAR' }, { name: 'email', type: 'VARCHAR' }], rows: [[1, 'Alex', 'alex@example.com'], [2, 'Linh', 'linh@example.com'], [3, 'Sam', 'sam@example.com']], durationMs: 4 };
+    app.query.error = ''; mode = 'query'; renderSidebar(); renderQueryView(); setConnectionState('connected', 'Demo local');
+  `);
+  await capture('editor');
+  await evaluate('connection(app.connections[0])');
+  await capture('connection');
+  await evaluate('closeModal(); backupDatabase()');
+  await until("Boolean($('#backupRoutineList .backup-routine'))");
+  await capture('backup');
+  await evaluate('closeModal()');
+  await require('../scripts/encode-website-demo.cjs')(directory);
+}
+
 app.whenReady().then(async () => {
   win = new BrowserWindow({ show: false, width: 1360, height: 900, webPreferences: {
     preload: path.join(root, 'electron/preload.cjs'), contextIsolation: true, backgroundThrottling: false
@@ -431,6 +463,7 @@ app.whenReady().then(async () => {
     assert.ok(saved);
     assert.ok(saved.history.every((entry) => typeof entry.sql === 'string'));
   });
+  await captureProductShots();
   console.log(`Renderer smoke: ${checks}/${checks} passed`);
   win.destroy();
   app.exit(0);

@@ -24,6 +24,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - run: npm ci --prefix server
+      - name: Website browser checks
+        run: xvfb-run -a npm run test:website -- --no-sandbox
 
   server:
     name: Server tests

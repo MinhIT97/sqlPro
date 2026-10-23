@@ -388,17 +388,21 @@ TRUST_PROXY=0</code></pre>
           <p>Cài đặt native, không cần runtime đi kèm. Kết nối Navicat hiện có có thể nhập ngay từ lần chạy đầu tiên.</p>
         </div>
         <div class="download-actions">
-          <a class="download-button" href="https://github.com/MinhIT97/sqlPro/releases/latest" rel="noopener">
+          <a class="download-button" id="downloadLinux" href="https://github.com/MinhIT97/sqlPro/releases" rel="noopener">
             <span class="download-os">Ubuntu / Linux</span>
-            <strong>Tải gói cài đặt</strong>
-            <span class="download-meta">.deb · AppImage</span>
+            <strong>Kiểm tra bản phát hành…</strong>
+            <span class="download-meta">Gói .deb</span>
           </a>
-          <a class="download-button" href="https://github.com/MinhIT97/sqlPro/releases/latest" rel="noopener">
+          <a class="download-button" id="downloadWindows" href="https://github.com/MinhIT97/sqlPro/releases" rel="noopener">
             <span class="download-os">Windows</span>
-            <strong>Tải gói cài đặt</strong>
-            <span class="download-meta">NSIS · Portable</span>
+            <strong>Kiểm tra bản phát hành…</strong>
+            <span class="download-meta">Bộ cài .exe</span>
           </a>
-          <p class="download-note">Bản phát hành mới nhất trên GitHub Releases. Yêu cầu Node.js 22 chỉ khi chạy từ mã nguồn.</p>
+          <div class="download-alternatives" id="downloadAlternatives" hidden>
+            <a id="downloadAppImage" href="https://github.com/MinhIT97/sqlPro/releases" rel="noopener" hidden>Tải AppImage</a>
+            <a id="downloadPortable" href="https://github.com/MinhIT97/sqlPro/releases" rel="noopener" hidden>Tải bản Windows Portable</a>
+          </div>
+          <p class="download-note" id="downloadStatus" role="status" aria-live="polite">Đang kiểm tra bộ cài trên GitHub Releases…</p>
         </div>
       </div>
     </section>

@@ -1602,9 +1602,27 @@ button {
 .download-note {
   grid-column: 1 / -1;
   margin: 5px 0 0;
-  color: #839c96;
-  font-size: 10px;
+  color: #b7d0c9;
+  font-size: 11px;
   line-height: 1.55;
+}
+
+.download-alternatives {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  font-size: 12px;
+}
+
+.download-alternatives[hidden],
+.download-alternatives a[hidden] {
+  display: none;
+}
+
+.download-alternatives a {
+  color: #bdebdc;
+  text-underline-offset: 3px;
 }
 
 /* FAQ */

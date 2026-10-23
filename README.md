@@ -107,7 +107,7 @@ npm run server:test
 
 ## Website giới thiệu
 
-Website tĩnh nằm trong `website/`, được server Express phục vụ tại `/`, không cần bước build và không dùng CDN. Nội dung gồm tính năng, mô hình mã hóa, workspace, hướng dẫn tự host, FAQ và liên kết tải bản phát hành mới nhất.
+Website tĩnh nằm trong `website/`, được server Express phục vụ tại `/`, không cần bước build và không dùng CDN. Nội dung gồm tính năng, mô hình mã hóa, workspace, hướng dẫn tự host, FAQ và nút tải trực tiếp bộ cài từ GitHub Releases. Website đọc GitHub API để tìm đúng tệp `.deb`/`.exe` của bản mới nhất; khi chưa có Release, website hiển thị trạng thái chưa có bộ cài thay vì đưa người dùng tới một link tải lỗi.
 
 Quy ước kiến trúc, design pattern và chuẩn code của dự án được ghi trong [`agent.md`](agent.md).
 
@@ -174,6 +174,8 @@ npm run pack:windows:zip
 - `.github/workflows/ci.yml`: chạy check/test desktop, test server và build thử Docker image trên push và pull request.
 - `.github/workflows/docker-publish.yml`: publish multi-arch image `ghcr.io/minhit97/sqlpro-server` khi push lên nhánh mặc định hoặc tag `v*`.
 - `.github/workflows/build-desktop.yml`: build installer Ubuntu/Windows trên tag `v*`, sau đó tự tạo GitHub Release và đính kèm các tệp trong `release/`.
+
+Muốn các nút tải trên website hoạt động, cần đẩy tag phiên bản (ví dụ `v0.3.5`) lên GitHub và chờ workflow `build-desktop.yml` tạo Release thành công. Build khi push nhánh chỉ tạo artifact trong GitHub Actions, không tạo link tải công khai ổn định.
 
 Workflow release dùng `GITHUB_TOKEN` có sẵn, không cần thêm secret. Việc publish GHCR dùng `packages: write` của token workflow.
 

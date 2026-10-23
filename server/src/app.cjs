@@ -15,7 +15,7 @@ const WEBSITE_CSP = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
   "font-src 'self'",
-  "connect-src 'none'",
+  "connect-src https://api.github.com",
   "object-src 'none'",
   "frame-ancestors 'none'",
   "base-uri 'none'",

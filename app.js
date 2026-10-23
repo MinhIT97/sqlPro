@@ -3,10 +3,20 @@
 let table = null;
 let mode = 'data';
 let historyRows = [];
+let savedQueries = [];
+let activeTransfer = null;
+let transferTaskSeq = 0;
 
 const desktop = window.sqlProDesktop;
 
 const DEFAULT_WORKSPACE_ID = 'ws-personal';
+const openTreeGroups = new Set(['tables']);
+const collapsedDbs = new Set();
+const collapsedConnections = new Set();
+const openConnectionIds = new Set();
+const connectionLocations = new Map();
+const connectionViews = new Map();
+let connectionSwitching = false;
 
 const app = {
   connections: [],
@@ -17,6 +27,10 @@ const app = {
   databases: [],
   database: null,
   tables: [],
+  backups: [],
+  selectedBackupId: null,
+  routineState: { loading: false, loaded: false, error: '', data: [] },
+  eventState: { loading: false, loaded: false, error: '', data: [] },
   server: '',
   serverType: 'mysql',
   columns: [],
@@ -33,9 +47,20 @@ const app = {
   relations: null
 };
 
-let queryTabs = [{ id: 1, title: 'Query 1', sql: null, result: null, error: null, running: false }];
+let queryTabs = [{
+  id: 1,
+  title: 'Query 1',
+  sql: null,
+  result: null,
+  error: null,
+  running: false,
+  profileId: null,
+  database: null,
+  taskId: null
+}];
 let activeQuery = 0;
 let queryId = 1;
+let queryTaskSeq = 0;
 let dataRequestId = 0;
 app.query = queryTabs[0];
 
@@ -89,6 +114,10 @@ function formatBytes(value) {
 
 function modal(html, wide = false) {
   const dialog = $('#modal');
+  if (!html.includes('data-transfer-running')) {
+    clearTimeout(window.__sqlproTaskTimer);
+    window.__sqlproTaskTimer = null;
+  }
   dialog.className = wide ? 'wide' : '';
   dialog.innerHTML = html;
   if (!dialog.open) dialog.showModal();
@@ -96,7 +125,145 @@ function modal(html, wide = false) {
 
 function closeModal() {
   const dialog = $('#modal');
+  if ($('#modal [data-transfer-running]')) {
+    clearTimeout(window.__sqlproTaskTimer);
+    window.__sqlproTaskTimer = null;
+  }
   if (dialog.open) dialog.close();
+}
+
+function taskProgressHtml(operation, target) {
+  const title = operation === 'backup' ? 'Đang sao lưu database'
+    : operation === 'restore' ? 'Đang phục hồi database'
+      : operation === 'export' ? 'Đang xuất dữ liệu'
+        : operation === 'import' ? 'Đang nhập dữ liệu' : 'Đang xóa bảng';
+  const icon = operation === 'backup' ? '↓'
+    : operation === 'restore' ? '↑'
+      : operation === 'export' ? '↗'
+        : operation === 'import' ? '↘' : '×';
+  const label = operation === 'backup' ? 'Đã ghi'
+    : operation === 'restore' ? 'Đã đọc'
+      : operation === 'export' ? 'Đã ghi tệp'
+        : operation === 'import' ? 'Đã đọc tệp' : 'Đang xử lý';
+  const cancellable = operation !== 'drop-table';
+  const percent = operation === 'restore' || operation === 'import' ? 'value="0" max="100"' : '';
+  return `
+    <div class="transfer-progress transfer-${operation}" data-transfer-running="${operation}" role="status" aria-live="polite">
+      <div class="task-heading"><span class="task-icon" aria-hidden="true">${icon}</span><div>
+        <span class="task-eyebrow">TÁC VỤ DATABASE</span><h2>${title}</h2>
+      </div><span class="task-running">Đang chạy</span></div>
+      <div class="task-target" title="${esc(target)}">${esc(target)}</div>
+      <div class="task-steps"><span class="done">✓ Chuẩn bị</span><span class="active" id="taskCurrentStep">● Đang xử lý</span><span>○ Hoàn tất</span></div>
+      <progress id="transferBar" ${percent} aria-label="Tiến độ ${title.toLowerCase()}"></progress>
+      <div class="task-metrics"><div><span>TIẾN TRÌNH</span><strong id="transferDetail">Đang chuẩn bị…</strong></div>
+        <div><span>${label.toUpperCase()}</span><strong id="transferSize">${operation === 'drop-table' ? 'Đang chờ máy chủ' : '0 B'}</strong></div></div>
+      <div class="task-footer"><span>Giữ SqlPro mở cho đến khi tác vụ hoàn tất.</span><span id="taskElapsed">00:00</span>
+        ${cancellable ? '<button type="button" class="task-cancel-btn" data-cancel-transfer>Hủy tác vụ</button>' : ''}
+      </div>
+    </div>`;
+}
+
+function startTaskClock() {
+  clearTimeout(window.__sqlproTaskTimer);
+  const startedAt = Date.now();
+  const tick = () => {
+    const elapsed = $('#taskElapsed');
+    if (!$('#modal [data-transfer-running]') || !elapsed) return;
+    const seconds = Math.floor((Date.now() - startedAt) / 1000);
+    elapsed.textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+    window.__sqlproTaskTimer = setTimeout(tick, 1000);
+  };
+  tick();
+}
+
+function newTransferTaskId(operation) {
+  transferTaskSeq += 1;
+  return `${operation}-${Date.now()}-${transferTaskSeq}`;
+}
+
+function cancelActiveTransfer() {
+  const transfer = activeTransfer;
+  if (!transfer || !transfer.taskId) {
+    toast('Không xác định được tác vụ cần hủy.', 'error');
+    return Promise.resolve();
+  }
+  if (transfer.canceling) return Promise.resolve();
+  transfer.canceling = true;
+  const button = document.querySelector('[data-cancel-transfer]');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Đang hủy…';
+  }
+  return call(desktop.db.cancelTask(transfer.profileId, transfer.taskId))
+    .then((result) => {
+      if (result && result.canceled) toast('Đã yêu cầu hủy tác vụ. SqlPro sẽ dừng ở ranh giới an toàn.');
+      else toast('Tác vụ đã dừng trước khi yêu cầu hủy được xử lý.');
+    })
+    .catch((error) => {
+      transfer.canceling = false;
+      if (button) {
+        button.disabled = false;
+        button.textContent = 'Hủy tác vụ';
+      }
+      toast(error.message, 'error');
+    });
+}
+
+function showTransferProgress(operation, database, context = {}) {
+  activeTransfer = {
+    operation,
+    database,
+    taskId: context.taskId || null,
+    profileId: context.profileId || null,
+    canceling: false
+  };
+  modal(`
+    ${taskProgressHtml(operation, database)}
+  `);
+  const cancelButton = document.querySelector('[data-cancel-transfer]');
+  if (cancelButton) cancelButton.addEventListener('click', cancelActiveTransfer);
+  startTaskClock();
+}
+
+function showTableDropProgress(database, tableName) {
+  modal(taskProgressHtml('drop-table', `${database}.${tableName}`));
+  startTaskClock();
+}
+
+function updateTransferProgress(progress) {
+  if (!progress || !['backup', 'restore', 'import', 'export'].includes(progress.operation)) return;
+  if (!activeTransfer || activeTransfer.operation !== progress.operation) return;
+  if (progress.taskId && activeTransfer.taskId && progress.taskId !== activeTransfer.taskId) return;
+  if (progress.profileId && activeTransfer.profileId && progress.profileId !== activeTransfer.profileId) return;
+  const running = $('#modal [data-transfer-running]');
+  if (!running || running.dataset.transferRunning !== progress.operation) return;
+  const detail = $('#transferDetail');
+  const size = $('#transferSize');
+  const bar = $('#transferBar');
+  const step = $('#taskCurrentStep');
+  if (progress.operation === 'backup') {
+    detail.textContent = `${Number(progress.rows || 0).toLocaleString()} dòng · ${Number(progress.objects || 0).toLocaleString()} đối tượng`;
+    size.textContent = `Đã ghi ${formatBytes(progress.bytes)}`;
+    if (step) step.textContent = progress.rows ? '● Đang xuất dữ liệu' : '● Đang xuất cấu trúc';
+  } else if (progress.operation === 'export') {
+    detail.textContent = `${Number(progress.rows || 0).toLocaleString()} dòng đã xuất`;
+    size.textContent = `Đã ghi ${formatBytes(progress.bytes)}`;
+    if (step) step.textContent = '● Đang ghi tệp';
+  } else if (progress.operation === 'import') {
+    const written = progress.transaction === 'all'
+      ? Number(progress.written || 0)
+      : Number(progress.committed ?? progress.written ?? 0);
+    const duplicates = Number(progress.duplicates || 0);
+    detail.textContent = `${Number(progress.rows || 0).toLocaleString()} dòng đã đọc · ${written.toLocaleString()} đã ghi${duplicates ? ` · ${duplicates.toLocaleString()} trùng` : ''}`;
+    size.textContent = `${formatBytes(progress.bytes)} / ${formatBytes(progress.totalBytes)}`;
+    if (bar) bar.value = progress.totalBytes ? Math.min(100, Math.round(progress.bytes / progress.totalBytes * 100)) : 0;
+    if (step) step.textContent = '● Đang nhập dữ liệu';
+  } else {
+    detail.textContent = `${Number(progress.executed || 0).toLocaleString()} câu lệnh đã chạy${progress.skipped ? ` · ${progress.skipped} bỏ qua` : ''}`;
+    size.textContent = `${formatBytes(progress.bytes)} / ${formatBytes(progress.totalBytes)}`;
+    if (bar) bar.value = progress.totalBytes ? Math.min(100, Math.round(progress.bytes / progress.totalBytes * 100)) : 0;
+    if (step) step.textContent = '● Đang chạy SQL';
+  }
 }
 
 function setStatus(text) {
@@ -132,6 +299,9 @@ async function call(promise) {
   if (!response.ok) {
     const error = new Error(response.error?.message || 'Đã xảy ra lỗi.');
     error.code = response.error?.code || '';
+    if (response.error?.fingerprint) error.fingerprint = response.error.fingerprint;
+    if (response.error?.expectedFingerprint) error.expectedFingerprint = response.error.expectedFingerprint;
+    if (response.error?.partial) error.partial = response.error.partial;
     throw error;
   }
   return response.data;
@@ -148,6 +318,80 @@ function quoteSqlString(value) {
 function defaultSql() {
   if (!table || !app.database) return 'SELECT 1;';
   return `SELECT *\nFROM ${quoteId(app.database)}.${quoteId(table)}\nLIMIT 100;`;
+}
+
+function newQueryTaskId() {
+  queryTaskSeq += 1;
+  return `query-${Date.now()}-${queryTaskSeq}`;
+}
+
+function activeQueryTarget() {
+  return {
+    profileId: app.connection ? app.connection.id : null,
+    database: app.database || null
+  };
+}
+
+function queryTargetConnection(tab) {
+  if (!tab || !tab.profileId) return null;
+  if (app.connection && app.connection.id === tab.profileId) return app.connection;
+  return app.connections.find((connection) => connection.id === tab.profileId) || null;
+}
+
+function queryTargetLabel(tab) {
+  const connection = queryTargetConnection(tab);
+  const name = connection && connection.name
+    ? connection.name
+    : (tab && tab.profileId ? 'kết nối không còn tồn tại' : 'chưa gắn kết nối');
+  return `${name} · ${(tab && tab.database) || 'không chọn database'}`;
+}
+
+async function ensureQueryTarget(tab) {
+  const connection = queryTargetConnection(tab);
+  if (connection) {
+    return { profileId: connection.id, database: tab.database || null, connection };
+  }
+  if (!tab.profileId && app.connection) {
+    tab.profileId = app.connection.id;
+    tab.database = tab.database || app.database || null;
+    renderQueryTabs();
+    const label = $('#queryTargetLabel');
+    if (label) label.textContent = `${queryTargetLabel(tab)}${table ? ` · ${table}` : ''} · Ctrl+Enter / Ctrl+E`;
+    const bindButton = $('#bindQueryTargetBtn');
+    if (bindButton) bindButton.style.display = 'none';
+    persistState();
+    return { profileId: tab.profileId, database: tab.database, connection: app.connection };
+  }
+  if (!app.connection) {
+    toast('Tab này chưa có kết nối hợp lệ. Hãy kết nối một máy chủ trong sidebar trước.', 'error');
+    return null;
+  }
+  const bound = await bindQueryTargetToActive(tab);
+  if (!bound) return null;
+  return { profileId: tab.profileId, database: tab.database, connection: app.connection };
+}
+
+async function bindQueryTargetToActive(tab = app.query) {
+  if (!tab) return false;
+  if (!app.connection) {
+    toast('Chưa có kết nối đang mở để gắn tab.', 'error');
+    return false;
+  }
+  const confirmed = await confirmAction(
+    'Gắn tab truy vấn vào kết nối?',
+    `Tab "${tab.title}" ${tab.profileId ? 'đang trỏ tới kết nối không còn tồn tại' : 'chưa được gắn kết nối'}.\n\nChạy trên: ${app.connection.name} · ${app.database || 'không chọn database'}.`,
+    'Gắn'
+  );
+  if (!confirmed) return false;
+  tab.profileId = app.connection.id;
+  tab.database = app.database || null;
+  renderQueryTabs();
+  const label = $('#queryTargetLabel');
+  if (label) label.textContent = `${queryTargetLabel(tab)}${table ? ` · ${table}` : ''} · Ctrl+Enter / Ctrl+E`;
+  const bindButton = $('#bindQueryTargetBtn');
+  if (bindButton) bindButton.style.display = 'none';
+  persistState();
+  return true;
 }
 
 function closeSqlSuggestions() {
@@ -181,7 +425,7 @@ function loadAutocompleteColumns(database, tableName) {
   const key = autocompleteCacheKey(database, tableName);
   const cached = sqlAutocomplete.columnCache.get(key);
   if (cached) return cached;
-  const pending = call(desktop.db.columns(database, tableName))
+  const pending = call(desktop.db.columns(database, tableName, app.connection?.id || null))
     .catch(() => {
       sqlAutocomplete.columnCache.delete(key);
       return [];
@@ -393,14 +637,32 @@ function acceptSqlSuggestion(editor, index = sqlAutocomplete.selected) {
 }
 
 function normalizeHistory(item) {
-  if (typeof item === 'string') return { sql: item, ok: true, at: '', durationMs: null };
+  if (typeof item === 'string') return { sql: item, ok: true, at: '', durationMs: null, profileId: null, database: null };
   if (!item || typeof item !== 'object' || typeof item.sql !== 'string') return null;
   return {
     sql: item.sql,
     ok: item.ok !== false,
     at: typeof item.at === 'string' ? item.at : '',
     durationMs: Number.isFinite(item.durationMs) ? item.durationMs : null,
-    message: typeof item.message === 'string' ? item.message : ''
+    message: typeof item.message === 'string' ? item.message : '',
+    profileId: typeof item.profileId === 'string' ? item.profileId : null,
+    database: typeof item.database === 'string' ? item.database : null
+  };
+}
+
+function normalizeSavedQuery(item) {
+  if (!item || typeof item !== 'object' || typeof item.sql !== 'string') return null;
+  const name = typeof item.name === 'string' && item.name.trim()
+    ? item.name.trim().slice(0, 80)
+    : 'Truy vấn không tên';
+  return {
+    id: typeof item.id === 'string' && item.id ? item.id : `saved-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    name,
+    sql: item.sql,
+    profileId: typeof item.profileId === 'string' ? item.profileId : null,
+    database: typeof item.database === 'string' ? item.database : null,
+    createdAt: typeof item.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
+    updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : new Date().toISOString()
   };
 }
 
@@ -418,9 +680,15 @@ function persistState() {
       table,
       mode,
       savedQuery: app.query?.sql ?? (sessionStorage.getItem('query') || ''),
-      queryTabs: queryTabs.map((tab) => ({ title: tab.title, sql: tab.sql ?? '' })),
+      queryTabs: queryTabs.map((tab) => ({
+        title: tab.title,
+        sql: tab.sql ?? '',
+        profileId: tab.profileId || null,
+        database: tab.database || null
+      })),
       activeQuery,
-      history: historyRows.slice(0, 100)
+      history: historyRows.slice(0, 100),
+      savedQueries: savedQueries.slice(0, 200)
     }).catch(() => undefined);
   }, 150);
 }
@@ -455,14 +723,14 @@ async function showErDiagramModal() {
 
   try {
     [tablesList, relationsData] = await Promise.all([
-      call(desktop.db.tables(database)), call(desktop.db.relations(database, null))
+      call(desktop.db.tables(database, connectionId)), call(desktop.db.relations(database, null, connectionId))
     ]);
 
     // Load columns for each table (up to 30 tables to avoid overload)
     const tablesToLoad = tablesList.slice(0, 30);
     await Promise.all(tablesToLoad.map(async (t) => {
       try {
-        const cols = await call(desktop.db.columns(database, t.name));
+        const cols = await call(desktop.db.columns(database, t.name, connectionId));
         tableColumns.set(t.name, cols);
       } catch (e) {
         tableColumns.set(t.name, []);
@@ -682,8 +950,16 @@ async function init() {
   $('#treeSearch').addEventListener('input', debounce(renderSidebar, 180));
   $('#workspaceSelect').addEventListener('change', (event) => switchWorkspace(event.target.value));
   $('#connectionList').addEventListener('click', onConnectionClick);
-  $('#databaseTree').addEventListener('click', onTreeClick);
-  $('#databaseTree').addEventListener('keydown', activateSidebarItem);
+  $('#connectionList').addEventListener('keydown', activateSidebarItem);
+  $('#workspace').addEventListener('click', onBackupManagerClick);
+  $('#workspace').addEventListener('keydown', (event) => {
+    if ((event.key === 'Enter' || event.key === ' ') && event.target.matches('[data-backup-row]')) {
+      event.preventDefault();
+      app.selectedBackupId = event.target.dataset.backupRow;
+      renderBackupsView();
+      renderSidebar();
+    }
+  });
   $('#tabs').addEventListener('click', onTabClick);
 
   if (!desktop) {
@@ -707,11 +983,19 @@ async function init() {
 
   desktop.onDbProgress?.((progress) => {
     if (!progress || typeof progress !== 'object') return;
+    updateTransferProgress(progress);
     if (progress.operation === 'backup') {
       setStatus(`Đang sao lưu… ${progress.rows || 0} dòng · ${formatBytes(progress.bytes)}`);
     } else if (progress.operation === 'restore') {
       setStatus(`Đang phục hồi… ${progress.executed || 0} câu lệnh · ${formatBytes(progress.bytes)}`);
+    } else if (progress.operation === 'export') {
+      setStatus(`Đang xuất… ${progress.rows || 0} dòng · ${formatBytes(progress.bytes)}`);
+    } else if (progress.operation === 'import') {
+      setStatus(`Đang nhập… ${progress.rows || 0} dòng đã đọc · ${formatBytes(progress.bytes)}`);
     }
+  });
+  $('#modal').addEventListener('cancel', (event) => {
+    if ($('#modal [data-transfer-running]')) event.preventDefault();
   });
 
   let saved = {};
@@ -729,7 +1013,14 @@ async function init() {
       sql: tab && typeof tab.sql === 'string' ? tab.sql : '',
       result: null,
       error: null,
-      running: false
+      running: false,
+      profileId: tab && typeof tab.profileId === 'string' && tab.profileId
+        ? tab.profileId
+        : (typeof saved.connectionId === 'string' ? saved.connectionId : null),
+      database: tab && typeof tab.database === 'string' && tab.database
+        ? tab.database
+        : (typeof saved.database === 'string' ? saved.database : null),
+      taskId: null
     }));
     queryId = queryTabs.reduce((max, tab) => {
       const match = /(\d+)\s*$/.exec(tab.title);
@@ -746,6 +1037,9 @@ async function init() {
   }
   if (saved && Array.isArray(saved.history)) {
     historyRows = saved.history.map(normalizeHistory).filter(Boolean).slice(0, 100);
+  }
+  if (saved && Array.isArray(saved.savedQueries)) {
+    savedQueries = saved.savedQueries.map(normalizeSavedQuery).filter(Boolean).slice(0, 200);
   }
   if (saved && typeof saved.table === 'string') table = saved.table;
   if (saved && typeof saved.workspaceId === 'string') app.activeWorkspaceId = saved.workspaceId;
@@ -848,6 +1142,11 @@ async function refreshConnections() {
     return;
   }
   app.connections = await call(desktop.connections.list());
+  if (desktop.db?.openProfiles) {
+    const ids = await call(desktop.db.openProfiles());
+    openConnectionIds.clear();
+    for (const id of ids) openConnectionIds.add(id);
+  }
   ensureDefaultWorkspace();
   if (app.connection) {
     const current = app.connections.find((connection) => connection.id === app.connection.id);
@@ -858,90 +1157,465 @@ async function refreshConnections() {
 }
 
 function renderSidebar() {
+  const list = $('#connectionList');
+  if (!list) return;
+  const scrollTop = list.scrollTop;
   const term = ($('#treeSearch').value || '').trim().toLowerCase();
   const workspaceConnections = app.connections.filter((connection) => (
     connection.workspaceId || DEFAULT_WORKSPACE_ID
   ) === app.activeWorkspaceId);
   const connections = workspaceConnections.filter((connection) => {
     if (!term) return true;
-    return [connection.name, connection.host, connection.user, connection.database]
+    return [connection.name, connection.host, connection.user, connection.database,
+      ...(app.connection?.id === connection.id ? app.databases : []),
+      ...(app.connection?.id === connection.id ? app.tables.map((entry) => entry.name) : [])]
       .some((value) => String(value || '').toLowerCase().includes(term));
   });
 
+  const activeBranch = app.connection ? renderDatabaseBranch(term) : '';
+  const chevronSvg = `<svg class="tree-chevron-svg" viewBox="0 0 16 16" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5l4.5 4.5-4.5 4.5"/></svg>`;
+
+  const activeConnectionId = app.connection?.id;
+  const hasActiveInList = Boolean(activeConnectionId && connections.some((c) => c.id === activeConnectionId));
+
   const connectionHtml = connections.map((connection) => {
-    const active = app.connection && app.connection.id === connection.id;
+    const active = Boolean(
+      app.connection && (
+        connection.id === activeConnectionId ||
+        (!hasActiveInList && connections.length === 1)
+      )
+    );
+    const isExpanded = active && !collapsedConnections.has(connection.id);
     const typeLabel = connection.type === 'mariadb' ? 'MARIA' : 'MYSQL';
     return `
-      <div class="connitem ${active ? 'active' : ''}" data-connection="${esc(connection.id)}">
+      <div class="connitem ${active ? 'active' : ''}" data-connection-id="${esc(connection.id)}">
         <div class="connhead">
-          <button class="conn-open" data-connection="${esc(connection.id)}" aria-label="Kết nối ${esc(connection.name)}"${active ? ' aria-current="true"' : ''}>
-            <i class="dot" style="background:${active ? '#24a68b' : '#c9d3db'}"></i>
-            <span class="name">${esc(connection.name)}</span>
+          <button class="conn-open" data-connection="${esc(connection.id)}" aria-label="Kết nối ${esc(connection.name)}"${active ? ' aria-current="true"' : ''}${active ? ` aria-expanded="${isExpanded}"` : ''}>
+            <span class="tree-chevron ${isExpanded ? 'open' : ''}" data-toggle-conn="${esc(connection.id)}">${chevronSvg}</span>
+            <i class="dot ${active || openConnectionIds.has(connection.id) ? 'connected' : ''}"></i>
+            <span class="name" title="${esc(connection.name)}">${esc(connection.name)}</span>
             <span class="badge type">${typeLabel}</span>
           </button>
           <button class="more" data-menu="${esc(connection.id)}" title="Tùy chọn" aria-label="Tùy chọn kết nối ${esc(connection.name)}">···</button>
         </div>
-        <div class="connmeta">${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port}${connection.ssh.enabled ? ' · SSH' : ''}</div>
+        <div class="connmeta" title="${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port}">${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port}${connection.ssh.enabled ? ' · SSH' : ''}</div>
+        ${isExpanded ? `<div class="conn-children">${activeBranch}</div>` : ''}
       </div>
     `;
   }).join('');
 
-  $('#connectionList').innerHTML = connectionHtml || `
+  list.innerHTML = connectionHtml || `
     <div class="empty small">
       ${term ? 'Không có kết nối phù hợp.' : `Workspace <strong>${esc(activeWorkspace().name)}</strong> chưa có kết nối.`}<br>
       <button onclick="connection()">Kết nối mới</button>
       <button onclick="importNavicat()">Nhập Navicat</button>
     </div>
   `;
+  list.scrollTop = scrollTop;
 
-  const tree = $('#databaseTree');
-  if (!app.connection) {
-    tree.innerHTML = '<div class="empty small">Chọn hoặc tạo kết nối để bắt đầu.</div>';
-    return;
-  }
-  if (!app.database) {
-    const databases = app.databases.filter((name) => !term || name.toLowerCase().includes(term));
-    tree.innerHTML = `
-      <div class="sideheading sub" data-databases-heading="1">DATABASE
-        <span class="headingactions">
-          <button id="createDbBtn" title="Tạo database mới">＋</button>
-          <button data-refresh-dbs="1" title="Làm mới">↻</button>
-        </span>
-      </div>
-      ${databases.length
-        ? databases.map((name) => `<div class="database dbitem" data-db="${esc(name)}" role="button" tabindex="0" aria-label="Mở database ${esc(name)}">▱ &nbsp; ${esc(name)}</div>`).join('')
-        : '<div class="empty small">Không có database phù hợp.</div>'}
-    `;
-    return;
-  }
+}
+
+function routineGroupContent(term) {
+  const state = app.routineState;
+  const actions = `
+    <div class="tree-actions-row">
+      <button class="tree-action" data-new-routine="procedure">＋ Procedure</button>
+      <button class="tree-action" data-new-routine="function">＋ Function</button>
+      <button class="tree-action" data-refresh-routines="1" title="Làm mới routines">↻</button>
+    </div>`;
+  if (state.loading) return `${actions}<div class="tree-empty">Đang tải routines…</div>`;
+  if (state.error) return `${actions}<div class="tree-empty tree-error">${esc(state.error)}</div><button class="tree-action" data-refresh-routines="1">↻ Thử lại</button>`;
+  if (!state.loaded) return `${actions}<div class="tree-empty">Đang chờ tải routines…</div>`;
+  if (!state.data.length) return `${actions}<div class="tree-empty">Database không có procedure/function.</div>`;
+  const entries = state.data.filter((entry) => !term || entry.name.toLowerCase().includes(term) || entry.type.includes(term));
+  return `${actions}${entries.map((entry) => `
+    <button class="tree-action routine-entry" data-routine="${esc(entry.name)}" data-routine-kind="${esc(entry.type)}" title="${esc(`${entry.type.toUpperCase()} ${entry.name}${entry.comment ? ` · ${entry.comment}` : ''}`)}">
+      <span class="tree-item-icon">ƒ</span>${esc(entry.name)}<span class="tree-kind">${entry.type === 'function' ? 'FUNC' : 'PROC'}</span>
+    </button>`).join('') || '<div class="tree-empty">Không có routine phù hợp.</div>'}`;
+}
+
+function eventGroupContent(term) {
+  const state = app.eventState;
+  const actions = `
+    <div class="tree-actions-row">
+      <button class="tree-action" data-new-event="1">＋ Event</button>
+      <button class="tree-action" data-refresh-events="1" title="Làm mới events">↻</button>
+    </div>`;
+  if (state.loading) return `${actions}<div class="tree-empty">Đang tải events…</div>`;
+  if (state.error) return `${actions}<div class="tree-empty tree-error">${esc(state.error)}</div><button class="tree-action" data-refresh-events="1">↻ Thử lại</button>`;
+  if (!state.loaded) return `${actions}<div class="tree-empty">Đang chờ tải events…</div>`;
+  if (!state.data.length) return `${actions}<div class="tree-empty">Database không có event.</div>`;
+  const entries = state.data.filter((entry) => !term || entry.name.toLowerCase().includes(term));
+  return `${actions}${entries.map((entry) => `
+    <button class="tree-action routine-entry" data-event="${esc(entry.name)}" title="${esc(`${entry.status} · ${entry.definer || ''}`)}">
+      <span class="tree-item-icon">◷</span>${esc(entry.name)}<span class="tree-kind">${esc(entry.status || 'EVENT')}</span>
+    </button>`).join('') || '<div class="tree-empty">Không có event phù hợp.</div>'}`;
+}
+
+function savedQueriesGroupContent(term) {
+  const entries = savedQueries.filter((entry) => (
+    !term || entry.name.toLowerCase().includes(term) || entry.sql.toLowerCase().includes(term)
+  ));
+  const connectionName = (profileId) => {
+    if (!profileId) return 'không rõ connection';
+    const connection = app.connections.find((item) => item.id === profileId);
+    return connection ? connection.name : 'connection đã xóa';
+  };
+  return `<div class="tree-actions-row">
+      <button class="tree-action" data-new-query="1">＋ Truy vấn mới</button>
+      <button class="tree-action" data-save-query="1">⌑ Lưu tab…</button>
+    </div>
+    ${entries.map((entry) => `
+      <div class="tree-action saved-query-entry" data-saved-query="${esc(entry.id)}" role="button" tabindex="0" title="${esc(`${entry.name} · ${connectionName(entry.profileId)} · ${entry.database || 'không chọn database'}`)}">
+        <span class="saved-query-name">⌑ ${esc(entry.name)}</span>
+        <span class="saved-query-target">${esc(connectionName(entry.profileId))} · ${esc(entry.database || '—')}</span>
+        <button class="saved-query-action" data-rename-saved-query="${esc(entry.id)}" title="Đổi tên" aria-label="Đổi tên ${esc(entry.name)}">✎</button>
+        <button class="saved-query-action" data-delete-saved-query="${esc(entry.id)}" title="Xóa" aria-label="Xóa ${esc(entry.name)}">×</button>
+      </div>`).join('') || '<div class="tree-empty">Chưa có truy vấn đã lưu.</div>'}`;
+}
+
+function renderDatabaseBranch(term) {
+  const dbList = (app.database && !app.databases.includes(app.database)) ? [app.database, ...app.databases] : app.databases;
+  const databases = dbList.filter((name) => !term || name.toLowerCase().includes(term) ||
+    (name === app.database && app.tables.some((entry) => entry.name.toLowerCase().includes(term))));
 
   const tables = app.tables.filter((entry) => entry.type === 'table' && (!term || entry.name.toLowerCase().includes(term)));
   const views = app.tables.filter((entry) => entry.type === 'view' && (!term || entry.name.toLowerCase().includes(term)));
-  tree.innerHTML = `
-    <div class="database" data-db-list="1" role="button" tabindex="0" title="Chọn database khác" aria-label="Chọn database khác, hiện tại ${esc(app.database)}">⌄ &nbsp;▱ &nbsp; ${esc(app.database)} <span>${app.tables.length}</span></div>
-    <div class="dbactions">
-      <button data-backup-db="1" title="Sao lưu database ra tệp .sql">⇩ Sao lưu</button>
-      <button data-restore-db="1" title="Phục hồi database từ tệp .sql">⇧ Phục hồi</button>
+
+  const chevronSvg = `<svg class="tree-chevron-svg" viewBox="0 0 16 16" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5l4.5 4.5-4.5 4.5"/></svg>`;
+
+  const group = (id, iconSvg, label, content, count = null) => `
+    <div class="treegroup-block">
+      <button class="treegroup-toggle" data-tree-group="${id}" aria-expanded="${openTreeGroups.has(id)}">
+        <span class="tree-chevron ${openTreeGroups.has(id) ? 'open' : ''}">${chevronSvg}</span>
+        <span class="tree-icon">${iconSvg}</span>
+        <span class="tree-group-label">${label}</span>
+        ${count === null ? '' : `<span class="tree-count">${count}</span>`}
+      </button>
+      ${openTreeGroups.has(id) ? `<div class="treegroup-children">${content}</div>` : ''}
+    </div>`;
+
+  const objectItem = (entry, iconSvg) => `
+    <div class="treeitem ${entry.name === table ? 'selected' : ''}" data-table="${esc(entry.name)}" role="button" tabindex="0" title="${esc(entry.name)}" aria-label="Mở ${entry.type === 'view' ? 'view' : 'bảng'} ${esc(entry.name)}"${entry.name === table ? ' aria-current="true"' : ''}>
+      <span class="tree-item-icon">${iconSvg}</span>
+      <span class="tree-object-name">${esc(entry.name)}</span>
+      ${entry.rowEstimate !== null && entry.type === 'table' ? `<span class="rowcount" title="${entry.rowEstimate} bản ghi">${Number(entry.rowEstimate).toLocaleString()}</span>` : ''}
+    </div>`;
+
+  const tableIcon = `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><line x1="2" y1="6.5" x2="14" y2="6.5"/><line x1="6.5" y1="6.5" x2="6.5" y2="13.5"/></svg>`;
+  const viewIcon = `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="2.5" width="12" height="11" rx="1.5" stroke-dasharray="2 1.5"/><line x1="2" y1="6.5" x2="14" y2="6.5"/><line x1="7" y1="6.5" x2="7" y2="13.5"/></svg>`;
+  const fnIcon = `<span style="font-style:italic;font-weight:bold;font-family:serif;font-size:12px;line-height:1">ƒ</span>`;
+  const eventIcon = `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="5.5"/><polyline points="8 4.5 8 8 10.5 9.5"/></svg>`;
+  const queryIcon = `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6"><polyline points="4 6 7 8.5 4 11"/><line x1="8" y1="11" x2="12" y2="11"/></svg>`;
+  const backupIcon = `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 2.5v7m-3-3l3 3 3-3M2.5 13h11"/></svg>`;
+
+  const groups = `
+    ${group('tables', tableIcon, 'Tables', `<button class="tree-action" id="createTableBtn">＋ Tạo bảng</button>${tables.map((entry) => objectItem(entry, tableIcon)).join('') || '<div class="tree-empty">Không có bảng</div>'}`, tables.length)}
+    ${group('views', viewIcon, 'Views', views.map((entry) => objectItem(entry, viewIcon)).join('') || '<div class="tree-empty">Không có view</div>', views.length)}
+    ${group('routines', fnIcon, 'Routines', routineGroupContent(term), app.routineState.loaded ? app.routineState.data.length : null)}
+    ${group('events', eventIcon, 'Events', eventGroupContent(term), app.eventState.loaded ? app.eventState.data.length : null)}
+    ${group('queries', queryIcon, 'Queries', savedQueriesGroupContent(term), savedQueries.length)}
+    ${group('backups', backupIcon, 'Backups', `${app.backups.map((backup) => `<button class="tree-action backup-entry ${app.selectedBackupId === backup.id && mode === 'backups' ? 'selected' : ''}" data-restore-backup="${esc(backup.id)}" title="${esc(backup.createdAt)} · ${formatBytes(backup.bytes)}">◴ ${esc(backup.name)}</button>`).join('') || '<div class="tree-empty">Chưa có bản sao lưu</div>'}`, app.backups.length)}`;
+
+  const dbSvg = `<svg class="db-svg-icon" viewBox="0 0 16 16" width="13" height="13" fill="currentColor">
+    <ellipse cx="8" cy="3.5" rx="5.5" ry="2"/>
+    <path d="M2.5 3.5v3.5c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2V3.5"/>
+    <path d="M2.5 7v3.5c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2V7"/>
+    <path d="M2.5 10.5v2c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2v-2"/>
+  </svg>`;
+
+  return `<div class="sideheading sub">DATABASE <span class="headingactions"><button id="createDbBtn" title="Tạo database mới">＋</button><button data-refresh-dbs="1" title="Làm mới">↻</button></span></div>
+    ${databases.map((name) => {
+      const isSelected = name === app.database;
+      const isExpanded = isSelected && !collapsedDbs.has(name);
+      return `<div class="database dbitem ${isSelected ? 'selected' : ''}" data-db="${esc(name)}" role="button" tabindex="0" title="${esc(name)}" aria-label="Mở database ${esc(name)}"${isExpanded ? ' aria-expanded="true"' : ''}>
+        <span class="tree-chevron ${isExpanded ? 'open' : ''}" data-toggle-db="${esc(name)}">${chevronSvg}</span>
+        <span class="tree-db-icon">${dbSvg}</span>
+        <span class="db-name">${esc(name)}</span>
+      </div>${isExpanded ? `<div class="db-children">${groups}</div>` : ''}`;
+    }).join('') || '<div class="tree-empty">Không có database phù hợp.</div>'}`;
+}
+
+function emptyObjectState() {
+  return { loading: false, loaded: false, error: '', data: [] };
+}
+
+function resetObjectMetadata() {
+  app.routineState = emptyObjectState();
+  app.eventState = emptyObjectState();
+}
+
+function loadOpenObjectGroups() {
+  if (!app.connection || !app.database) return;
+  if (openTreeGroups.has('routines')) loadObjectMetadata('routines');
+  if (openTreeGroups.has('events')) loadObjectMetadata('events');
+}
+
+async function loadObjectMetadata(kind, { force = false } = {}) {
+  if (!desktop?.db || !app.connection || !app.database) return;
+  const state = kind === 'events' ? app.eventState : app.routineState;
+  if (!force && (state.loading || state.loaded)) return;
+  const profileId = app.connection.id;
+  const database = app.database;
+  const stateRef = state;
+  state.loading = true;
+  state.error = '';
+  renderSidebar();
+  try {
+    const data = kind === 'events'
+      ? await call(desktop.db.events(database, profileId))
+      : await call(desktop.db.routines(database, profileId));
+    if (stateRef !== (kind === 'events' ? app.eventState : app.routineState)) return;
+    stateRef.data = Array.isArray(data) ? data : [];
+    stateRef.loaded = true;
+    stateRef.error = '';
+  } catch (error) {
+    if (stateRef !== (kind === 'events' ? app.eventState : app.routineState)) return;
+    stateRef.data = [];
+    stateRef.loaded = false;
+    stateRef.error = error.message || 'Không tải được metadata.';
+  } finally {
+    stateRef.loading = false;
+    renderSidebar();
+  }
+}
+
+async function openRoutineDetails(kind, name) {
+  if (!app.connection || !app.database) {
+    toast('Chưa chọn database.', 'error');
+    return;
+  }
+  const profileId = app.connection.id;
+  const database = app.database;
+  let detail;
+  try {
+    detail = await call(desktop.db.showCreate({ profileId, database, name, kind }));
+  } catch (error) {
+    modal(`
+      <h2>Không đọc được ${esc(kind)} ${esc(name)}</h2>
+      <div class="errorbox">${esc(error.message)}</div>
+      <p class="hint">Lỗi quyền truy cập được hiển thị riêng, không được coi là “chưa có đối tượng”.</p>
+      <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
+    `);
+    return;
+  }
+  const metaRows = Object.entries(detail.meta || {})
+    .filter(([, value]) => value !== null && value !== undefined && String(value) !== '')
+    .map(([key, value]) => `<tr><th>${esc(key)}</th><td>${esc(String(value))}</td></tr>`)
+    .join('');
+  modal(`
+    <h2>${esc(kind.toUpperCase())} · ${esc(name)}</h2>
+    <p class="hint">${esc(database)} · ${esc(profileId ? (app.connections.find((item) => item.id === profileId)?.name || profileId) : '')}</p>
+    ${metaRows ? `<div class="object-meta"><table>${metaRows}</table></div>` : ''}
+    <label>SHOW CREATE</label>
+    <pre class="object-sql">${esc(detail.sql || 'Không có nội dung SHOW CREATE.')}</pre>
+    <div class="actions">
+      <button class="danger" id="routineDrop" ${detail.sql ? '' : 'disabled'}>Xóa ${esc(kind)}</button>
+      <span class="spacer"></span>
+      <button onclick="closeModal()">Đóng</button>
+      <button class="primary" id="routineEdit" ${detail.sql ? '' : 'disabled'}>Mở trong SQL Editor</button>
     </div>
-    <div class="sideheading sub">BẢNG <span>${tables.length}</span>
-      <span class="headingactions">
-        <button id="createTableBtn" title="Tạo bảng mới">＋</button>
-      </span>
+  `, true);
+  $('#routineEdit').addEventListener('click', () => {
+    closeModal();
+    openRoutineEditor(kind, name, detail.sql);
+  });
+  $('#routineDrop').addEventListener('click', async () => {
+    const confirmed = await confirmAction(
+      `Xóa ${kind} ${name}?`,
+      `Lệnh DROP ${kind.toUpperCase()} sẽ chạy trên ${database}. Thao tác không thể hoàn tác.`,
+      'Xóa'
+    );
+    if (!confirmed) return;
+    try {
+      await call(desktop.db.query({
+        profileId,
+        database,
+        sql: `DROP ${kind.toUpperCase()} IF EXISTS ${quoteId(database)}.${quoteId(name)}`,
+        confirmed: true
+      }));
+      closeModal();
+      toast(`Đã xóa ${kind} ${name}.`, 'success');
+      await loadObjectMetadata(kind === 'event' ? 'events' : 'routines', { force: true });
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  });
+}
+
+function stripTrailingSemicolon(sql) {
+  return String(sql || '').trim().replace(/\s*;\s*$/, '');
+}
+
+function routineEditorSql(kind, database, name, createSql) {
+  if (!createSql) return '';
+  return `DROP ${kind.toUpperCase()} IF EXISTS ${quoteId(database)}.${quoteId(name)};\n\nDELIMITER $$\n${stripTrailingSemicolon(createSql)}$$\nDELIMITER ;\n`;
+}
+
+function openRoutineEditor(kind, name, createSql) {
+  if (!app.connection || !app.database) return;
+  const target = { profileId: app.connection.id, database: app.database };
+  const sql = routineEditorSql(kind, target.database, name, createSql);
+  if (!sql) {
+    toast('Không có DDL để mở trong SQL Editor.', 'error');
+    return;
+  }
+  newQuery(sql, target);
+  app.query.title = `${kind === 'event' ? 'Event' : kind === 'function' ? 'Function' : 'Procedure'} ${name}`.slice(0, 40);
+  updateChrome();
+  persistState();
+}
+
+function newRoutineModal(kind) {
+  if (!app.connection || !app.database) {
+    toast('Chọn database trước khi tạo routine.', 'error');
+    return;
+  }
+  const target = { profileId: app.connection.id, database: app.database };
+  const label = kind === 'event' ? 'Event' : kind === 'function' ? 'Function' : 'Procedure';
+  modal(`
+    <h2>Tạo ${label.toLowerCase()}</h2>
+    <p class="hint">SqlPro mở mẫu SQL trong editor; đây là thao tác bằng SQL, không phải form đồ họa đầy đủ.</p>
+    <label>Tên ${label.toLowerCase()}</label>
+    <input id="newRoutineName" value="${kind === 'event' ? 'event_moi' : kind === 'function' ? 'function_moi' : 'procedure_moi'}" maxlength="64">
+    <div class="actions">
+      <button onclick="closeModal()">Hủy</button>
+      <button class="primary" id="newRoutineGo">Mở SQL Editor</button>
     </div>
-    <div id="tree">
-      ${tables.map((entry) => `
-        <div class="treeitem ${entry.name === table ? 'selected' : ''}" data-table="${esc(entry.name)}" role="button" tabindex="0" aria-label="Mở bảng ${esc(entry.name)}"${entry.name === table ? ' aria-current="true"' : ''}>
-          <span>▦</span>${esc(entry.name)}${entry.rowEstimate !== null ? `<span class="rowcount">${entry.rowEstimate}</span>` : ''}
-        </div>
-      `).join('') || '<div class="empty small">Không có bảng.</div>'}
+  `);
+  $('#newRoutineGo').addEventListener('click', () => {
+    const name = $('#newRoutineName').value.trim();
+    if (!name) {
+      toast('Tên không được để trống.', 'error');
+      return;
+    }
+    const database = target.database;
+    let sql;
+    if (kind === 'event') {
+      sql = `DELIMITER $$\nCREATE EVENT ${quoteId(database)}.${quoteId(name)}\nON SCHEDULE EVERY 1 DAY\nDO BEGIN\n  -- Viết nội dung event tại đây\nEND$$\nDELIMITER ;\n`;
+    } else if (kind === 'function') {
+      sql = `DELIMITER $$\nCREATE FUNCTION ${quoteId(database)}.${quoteId(name)}()\nRETURNS INT\nDETERMINISTIC\nBEGIN\n  RETURN 1;\nEND$$\nDELIMITER ;\n`;
+    } else {
+      sql = `DELIMITER $$\nCREATE PROCEDURE ${quoteId(database)}.${quoteId(name)}()\nBEGIN\n  SELECT 1;\nEND$$\nDELIMITER ;\n`;
+    }
+    closeModal();
+    newQuery(sql, target);
+  });
+}
+
+function openSavedQuery(id) {
+  const entry = savedQueries.find((item) => item.id === id);
+  if (!entry) return;
+  newQuery(entry.sql, { profileId: entry.profileId, database: entry.database });
+  app.query.savedQueryId = entry.id;
+  app.query.title = entry.name.slice(0, 40);
+  updateChrome();
+  persistState();
+}
+
+function saveQuery() {
+  const editor = $('#sql');
+  if (editor && app.query) app.query.sql = editor.value;
+  const sql = app.query?.sql || '';
+  if (!sql.trim()) {
+    toast('Câu lệnh SQL đang trống.', 'error');
+    return;
+  }
+  sessionStorage.setItem('query', sql);
+  const existing = app.query.savedQueryId
+    ? savedQueries.find((entry) => entry.id === app.query.savedQueryId)
+    : null;
+  const suggested = existing
+    ? existing.name
+    : (app.query.title && !/^Query \d+$/.test(app.query.title) ? app.query.title : 'Truy vấn mới');
+  modal(`
+    <h2>${existing ? 'Cập nhật truy vấn đã lưu' : 'Lưu truy vấn'}</h2>
+    <p class="hint">Lưu cục bộ trên máy này cùng connection/database đích. SQL không được đưa vào vault đồng bộ.</p>
+    <label>Tên truy vấn</label>
+    <input id="savedQueryName" value="${esc(suggested)}" maxlength="80">
+    <div class="actions">
+      <button onclick="closeModal()">Hủy</button>
+      <button class="primary" id="savedQueryGo">Lưu</button>
     </div>
-    <div class="sideheading sub">VIEW <span>${views.length}</span></div>
-    ${views.map((entry) => `
-      <div class="treeitem ${entry.name === table ? 'selected' : ''}" data-table="${esc(entry.name)}" role="button" tabindex="0" aria-label="Mở view ${esc(entry.name)}"${entry.name === table ? ' aria-current="true"' : ''}>
-        <span>◫</span>${esc(entry.name)}
-      </div>
-    `).join('') || '<div class="empty small">Không có view.</div>'}
-  `;
+  `);
+  $('#savedQueryGo').addEventListener('click', () => {
+    const name = $('#savedQueryName').value.trim();
+    if (!name) {
+      toast('Tên truy vấn không được để trống.', 'error');
+      return;
+    }
+    const now = new Date().toISOString();
+    const target = { profileId: app.query.profileId || null, database: app.query.database || null };
+    if (existing) {
+      existing.name = name.slice(0, 80);
+      existing.sql = sql;
+      existing.profileId = target.profileId;
+      existing.database = target.database;
+      existing.updatedAt = now;
+    } else {
+      const entry = {
+        id: `saved-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        name: name.slice(0, 80),
+        sql,
+        ...target,
+        createdAt: now,
+        updatedAt: now
+      };
+      savedQueries.unshift(entry);
+      app.query.savedQueryId = entry.id;
+    }
+    savedQueries = savedQueries.slice(0, 200);
+    openTreeGroups.add('queries');
+    persistState();
+    renderSidebar();
+    closeModal();
+    toast('Đã lưu truy vấn trên máy.');
+  });
+}
+
+function renameSavedQuery(id) {
+  const entry = savedQueries.find((item) => item.id === id);
+  if (!entry) return;
+  modal(`
+    <h2>Đổi tên truy vấn</h2>
+    <label>Tên mới</label>
+    <input id="renameSavedQueryName" value="${esc(entry.name)}" maxlength="80">
+    <div class="actions">
+      <button onclick="closeModal()">Hủy</button>
+      <button class="primary" id="renameSavedQueryGo">Đổi tên</button>
+    </div>
+  `);
+  $('#renameSavedQueryGo').addEventListener('click', () => {
+    const name = $('#renameSavedQueryName').value.trim();
+    if (!name) {
+      toast('Tên truy vấn không được để trống.', 'error');
+      return;
+    }
+    entry.name = name.slice(0, 80);
+    entry.updatedAt = new Date().toISOString();
+    persistState();
+    renderSidebar();
+    closeModal();
+  });
+}
+
+async function deleteSavedQuery(id) {
+  const entry = savedQueries.find((item) => item.id === id);
+  if (!entry) return;
+  const confirmed = await confirmAction('Xóa truy vấn đã lưu?', `"${entry.name}" sẽ bị xóa khỏi danh sách cục bộ.`, 'Xóa');
+  if (!confirmed) return;
+  savedQueries = savedQueries.filter((item) => item.id !== id);
+  persistState();
+  renderSidebar();
+  toast('Đã xóa truy vấn đã lưu.');
+}
+
+function maybeRefreshObjectMetadata(sql, tab) {
+  if (!app.connection || tab.profileId !== app.connection.id) return;
+  if ((tab.database || null) !== (app.database || null)) return;
+  if (!/\b(?:CREATE|ALTER|DROP)\s+(?:PROCEDURE|FUNCTION|EVENT)\b/i.test(sql)) return;
+  if (/\b(?:PROCEDURE|FUNCTION)\b/i.test(sql)) loadObjectMetadata('routines', { force: true });
+  if (/\bEVENT\b/i.test(sql)) loadObjectMetadata('events', { force: true });
 }
 
 // ==========================================
@@ -1001,176 +1675,6 @@ function exportCurrentResult(format) {
   }
 }
 
-function parseCsv(text) {
-  const content = String(text ?? '').replace(/^\uFEFF/, '');
-  if (!content.trim()) return { headers: [], rows: [] };
-  // Inspect the first logical record; separators inside quotes are data.
-  const counts = new Map([[',', 0], [';', 0], ['\t', 0]]);
-  let quoted = false;
-  for (let i = 0; i < content.length; i += 1) {
-    const char = content[i];
-    if (char === '"') {
-      if (quoted && content[i + 1] === '"') i += 1;
-      else quoted = !quoted;
-    } else if (!quoted) {
-      if (char === '\r' || char === '\n') {
-        if ([...counts.values()].some(Boolean) || content.slice(0, i).trim()) break;
-      } else if (counts.has(char)) counts.set(char, counts.get(char) + 1);
-    }
-  }
-  const delimiter = [...counts].sort((a, b) => b[1] - a[1])[0][0];
-
-  const rows = [];
-  let currentRow = [];
-  let currentCell = '';
-  let state = 'start';
-  let recordStarted = false;
-  const finishRecord = () => {
-    currentRow.push(currentCell);
-    if (recordStarted) rows.push(currentRow);
-    currentRow = [];
-    currentCell = '';
-    state = 'start';
-    recordStarted = false;
-  };
-
-  for (let i = 0; i < content.length; i += 1) {
-    const char = content[i];
-    const nextChar = content[i + 1];
-    if (state === 'quoted') {
-      if (char === '"' && nextChar === '"') {
-        currentCell += '"';
-        i += 1;
-      } else if (char === '"') state = 'afterQuote';
-      else currentCell += char;
-    } else if (char === delimiter) {
-      currentRow.push(currentCell);
-      currentCell = '';
-      state = 'start';
-      recordStarted = true;
-    } else if (char === '\r' || char === '\n') {
-      if (char === '\r' && nextChar === '\n') i += 1;
-      finishRecord();
-    } else if (char === '"' && state === 'start') {
-      state = 'quoted';
-      recordStarted = true;
-    } else if (state === 'afterQuote') {
-      if (char !== ' ' && char !== '\t') throw new Error('CSV không hợp lệ: ký tự sau dấu nháy đóng.');
-    } else {
-      if (char === '"') throw new Error('CSV không hợp lệ: dấu nháy trong ô chưa được escape.');
-      currentCell += char;
-      state = 'unquoted';
-      recordStarted = true;
-    }
-  }
-  if (state === 'quoted') throw new Error('CSV không hợp lệ: ô có dấu nháy chưa được đóng.');
-  if (recordStarted) finishRecord();
-  if (!rows.length) return { headers: [], rows: [] };
-  const headers = rows[0];
-  const dataRows = rows.slice(1);
-  const invalidRow = dataRows.findIndex((row) => row.length !== headers.length);
-  if (invalidRow !== -1) throw new Error(`CSV không hợp lệ: bản ghi ${invalidRow + 2} có số cột khác tiêu đề.`);
-  return { headers, rows: dataRows };
-}
-
-async function importCsvModal() {
-  if (!app.database || !table) {
-    toast('Hãy chọn một bảng trước khi nhập.', 'error');
-    return;
-  }
-  const database = app.database;
-  const targetTable = table;
-  const targetCols = app.columns.filter((c) => !/auto_increment|(?:virtual|stored) generated/i.test(c.extra));
-  try {
-    const file = await desktop.openTextFile({
-      title: 'Chọn tệp CSV / TSV để nhập',
-      filters: [{ name: 'CSV / TSV / Văn bản', extensions: ['csv', 'tsv', 'txt'] }]
-    });
-    if (file.canceled) return;
-    const parsed = parseCsv(file.contents);
-    if (!parsed.headers.length || !parsed.rows.length) {
-      toast('Tệp không có dữ liệu hợp lệ.', 'error');
-      return;
-    }
-    if (parsed.rows.length > 5000) {
-      throw new Error('Chỉ nhập tối đa 5000 bản ghi mỗi lần. Hãy chia tệp CSV thành các tệp nhỏ hơn.');
-    }
-    const previewRows = parsed.rows.slice(0, 5);
-
-    const mappingHtml = targetCols.map((col) => {
-      const matchedIdx = parsed.headers.findIndex(
-        (h) => h.toLowerCase().trim() === col.name.toLowerCase().trim()
-      );
-      const options = [
-        '<option value="-1">-- Bỏ qua cột này --</option>',
-        ...parsed.headers.map((h, i) => `<option value="${i}" ${i === matchedIdx ? 'selected' : ''}>${esc(h)}</option>`)
-      ].join('');
-      return `
-        <div class="csv-mapping-row">
-          <span><strong>${esc(col.name)}</strong> <small class="muted">${esc(col.type)}</small></span>
-          <span>→</span>
-          <select data-db-col="${esc(col.name)}">${options}</select>
-        </div>
-      `;
-    }).join('');
-
-    const previewHeader = `<tr>${parsed.headers.map((h) => `<th>${esc(h)}</th>`).join('')}</tr>`;
-    const previewBody = previewRows.map((r) => `
-      <tr>${parsed.headers.map((_, i) => `<td>${esc(r[i] ?? '')}</td>`).join('')}</tr>
-    `).join('');
-
-    modal(`
-      <div class="dialog wide extra-wide">
-        <h2>Nhập CSV vào ${esc(database)}.${esc(targetTable)}</h2>
-        <p>Phát hiện <strong>${parsed.rows.length}</strong> dòng dữ liệu • Ghép các cột tệp CSV với cột trong bảng MySQL:</p>
-        <label>Ánh xạ cột (Column Mapping)</label>
-        <div class="csv-mapping-grid">${mappingHtml}</div>
-        <label style="margin-top:14px">Xem trước 5 dòng đầu tiên từ tệp CSV</label>
-        <div class="csv-preview-table"><table><thead>${previewHeader}</thead><tbody>${previewBody}</tbody></table></div>
-        <div class="actions">
-          <button onclick="closeModal()">Hủy</button>
-          <button class="primary" id="doCsvImportBtn">Bắt đầu nhập (${parsed.rows.length} dòng)</button>
-        </div>
-      </div>
-    `, true);
-
-    const importButton = $('#doCsvImportBtn');
-    importButton.addEventListener('click', async () => {
-      const mappings = [];
-      document.querySelectorAll('.csv-mapping-row select').forEach((sel) => {
-        const fileIdx = Number(sel.value);
-        if (fileIdx >= 0) mappings.push({ dbCol: sel.dataset.dbCol, fileIdx });
-      });
-      if (!mappings.length) {
-        toast('Hãy chọn ít nhất 1 cột để nhập dữ liệu.', 'error');
-        return;
-      }
-      if (importButton.disabled) return;
-      importButton.disabled = true;
-      importButton.textContent = 'Đang nhập…';
-      try {
-        const rowsToImport = parsed.rows.map((r) => {
-          const rowObj = {};
-          mappings.forEach((m) => {
-            const raw = r[m.fileIdx];
-            rowObj[m.dbCol] = raw;
-          });
-          return rowObj;
-        });
-        const res = await call(desktop.db.importRows({ database, table: targetTable, rows: rowsToImport }));
-        closeModal();
-        toast(`Đã nhập thành công ${res.inserted} bản ghi!`);
-        await loadData();
-      } catch (err) {
-        toast(err.message, 'error');
-        importButton.disabled = false;
-        importButton.textContent = 'Bắt đầu nhập';
-      }
-    });
-  } catch (err) {
-    toast(err.message, 'error');
-  }
-}
 
 function createDatabaseModal() {
   if (!app.connection) {
@@ -1218,7 +1722,7 @@ function createDatabaseModal() {
     $('#btnSubmitCreateDb').textContent = 'Đang tạo…';
     try {
       const sql = 'CREATE DATABASE `' + dbName.replace(/`/g, '``') + '` DEFAULT CHARACTER SET ' + charset + ' COLLATE ' + collate + ';';
-      await call(desktop.db.query({ sql, timeoutMs: 15000, confirmed: true }));
+      await call(desktop.db.query({ ...activeQueryTarget(), sql, timeoutMs: 15000, confirmed: true }));
       closeModal();
       toast('Đã tạo database ' + dbName + ' thành công!');
       await refreshDatabases();
@@ -1242,7 +1746,7 @@ async function dropDatabaseAction(dbName) {
   if (!confirmed) return;
   try {
     const sql = 'DROP DATABASE `' + targetDb.replace(/`/g, '``') + '`;';
-    await call(desktop.db.query({ sql, timeoutMs: 15000, confirmed: true }));
+    await call(desktop.db.query({ ...activeQueryTarget(), sql, timeoutMs: 15000, confirmed: true }));
     toast('Đã xóa database ' + targetDb + '.');
     if (app.database === targetDb) {
       app.database = null;
@@ -1373,7 +1877,7 @@ function createTableModal() {
       $('#btnSaveNewTable').disabled = true;
       $('#btnSaveNewTable').textContent = 'Đang tạo…';
       try {
-        await call(desktop.db.query({ sql: ddl, timeoutMs: 20000, confirmed: true }));
+        await call(desktop.db.query({ ...activeQueryTarget(), sql: ddl, timeoutMs: 20000, confirmed: true }));
         closeModal();
         toast('Đã tạo bảng ' + tableName + ' thành công!');
         await selectDatabase(app.database);
@@ -1428,7 +1932,7 @@ async function truncateTableAction(tableName) {
   if (!confirmed) return;
   try {
     const sql = `TRUNCATE TABLE ${quoteId(app.database)}.${quoteId(targetTable)};`;
-    await call(desktop.db.query({ sql, timeoutMs: 15000, confirmed: true }));
+    await call(desktop.db.query({ ...activeQueryTarget(), sql, timeoutMs: 15000, confirmed: true }));
     toast('Đã xóa sạch dữ liệu bảng ' + targetTable + '.');
     if (table === targetTable) await loadData();
   } catch (err) {
@@ -1445,15 +1949,28 @@ async function dropTableAction(tableName) {
     'Xóa Bảng'
   );
   if (!confirmed) return;
+  const database = app.database;
+  showTableDropProgress(database, targetTable);
+  setStatus(`Đang xóa bảng ${targetTable}…`);
   try {
-    const sql = `DROP TABLE ${quoteId(app.database)}.${quoteId(targetTable)};`;
-    await call(desktop.db.query({ sql, timeoutMs: 15000, confirmed: true }));
-    toast('Đã xóa bảng ' + targetTable + '.');
+    const sql = `DROP TABLE ${quoteId(database)}.${quoteId(targetTable)};`;
+    await call(desktop.db.query({ ...activeQueryTarget(), sql, timeoutMs: 300000, confirmed: true }));
     if (table === targetTable) table = null;
-    await selectDatabase(app.database);
-    if (!table) renderEmptyTable();
+    await selectDatabase(database);
+    setStatus(`Đã xóa bảng ${targetTable}`);
+    modal(`
+      <h2>Đã xóa bảng</h2>
+      <p>Bảng <strong>${esc(database)}.${esc(targetTable)}</strong> đã được xóa.</p>
+      <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
+    `);
   } catch (err) {
-    toast(err.message, 'error');
+    setStatus(`Xóa bảng ${targetTable} thất bại`);
+    modal(`
+      <h2>Xóa bảng thất bại</h2>
+      <p>${esc(database)}.${esc(targetTable)}</p>
+      <div class="errorbox">${esc(err.message)}</div>
+      <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
+    `);
   }
 }
 
@@ -1467,49 +1984,91 @@ async function showProcesslistModal() {
   modal(`
     <div class="modal-card processlist-card">
       <div class="modal-header">
-        <div style="display:flex; align-items:center; gap:10px;">
-          <h3>🖥️ Quản Lý Tiến Trình (Processlist)</h3>
-          <button class="primary" id="refreshProcesslistBtn" style="padding:3px 10px; font-size:0.85em;">↻ Làm mới</button>
+        <div class="modal-header-left">
+          <h3>🖥️ Quản Lý Tiến Trình <span class="modal-title-tag">Processlist</span></h3>
+          <button class="refresh-header-btn" id="refreshProcesslistBtn" title="Làm mới danh sách tiến trình">↻ Làm mới</button>
         </div>
-        <button class="close-btn" onclick="closeModal()">✕</button>
+        <button class="close-btn" onclick="closeModal()" title="Đóng (Esc)" aria-label="Đóng">✕</button>
       </div>
-      <div class="modal-body" style="padding:12px 16px;">
-        <div style="margin-bottom:10px; display:flex; gap:10px;">
-          <input type="search" id="processlistFilter" placeholder="🔍 Lọc theo user, db, câu lệnh..." style="flex:1; padding:6px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;">
-          <span id="processlistCount" style="align-self:center; color:#9ca3af; font-size:0.9em;">Đang tải...</span>
+      <div class="modal-body">
+        <div class="processlist-toolbar">
+          <div class="processlist-search-wrap">
+            <span class="processlist-search-icon">🔍</span>
+            <input type="search" id="processlistFilter" class="processlist-search-input" placeholder="Lọc theo ID, user, host, database, lệnh, câu lệnh SQL..." autocomplete="off">
+          </div>
+          <div class="processlist-metrics" id="processlistMetrics">
+            <button type="button" class="metric-chip active" data-filter="all">Tất cả <strong id="metricTotal">0</strong></button>
+            <button type="button" class="metric-chip chip-query" data-filter="query">Đang chạy <strong id="metricQuery">0</strong></button>
+            <button type="button" class="metric-chip chip-sleep" data-filter="sleep">Đang chờ <strong id="metricSleep">0</strong></button>
+            <button type="button" class="metric-chip chip-slow" data-filter="slow">Chậm (>5s) <strong id="metricSlow">0</strong></button>
+          </div>
         </div>
-        <div id="processlistContainer" style="max-height: 480px; overflow: auto; border:1px solid rgba(255,255,255,0.08); border-radius:4px;">
-          <div style="padding:20px; text-align:center; color:#9ca3af;">Đang truy vấn SHOW FULL PROCESSLIST...</div>
+        <div id="processlistContainer" class="processlist-table-container">
+          <div class="processlist-loading">Đang truy vấn SHOW FULL PROCESSLIST...</div>
         </div>
       </div>
-      <div class="modal-footer" style="text-align: right; margin-top: 12px;">
-        <button class="primary" onclick="closeModal()">Đóng (Esc)</button>
+      <div class="modal-footer">
+        <div class="modal-footer-hint">
+          <span>💡 <em>Nhấp vào câu lệnh SQL để sao chép nhanh vào bộ nhớ tạm.</em></span>
+        </div>
+        <button class="secondary" onclick="closeModal()">Đóng (Esc)</button>
       </div>
     </div>
   `);
 
+  let activeQuickFilter = 'all';
+
   async function loadProcesslist() {
     const container = $('#processlistContainer');
-    const countEl = $('#processlistCount');
     if (!container) return;
     try {
-      const res = await call(desktop.db.query({ sql: 'SHOW FULL PROCESSLIST' }));
+      const res = await call(desktop.db.query({ ...activeQueryTarget(), sql: 'SHOW FULL PROCESSLIST' }));
       if (container !== $('#processlistContainer')) return;
       const rows = res.rows || [];
       const filterVal = ($('#processlistFilter')?.value || '').toLowerCase().trim();
 
+      let queryCount = 0;
+      let sleepCount = 0;
+      let slowCount = 0;
+      for (const r of rows) {
+        const cmd = String(r[4] || '');
+        const timeSec = Number(r[5] || 0);
+        if (cmd === 'Query') queryCount++;
+        else if (cmd === 'Sleep') sleepCount++;
+        if (timeSec > 5 && cmd === 'Query') slowCount++;
+      }
+
+      const totalEl = $('#metricTotal');
+      const queryEl = $('#metricQuery');
+      const sleepEl = $('#metricSleep');
+      const slowEl = $('#metricSlow');
+      if (totalEl) totalEl.textContent = rows.length;
+      if (queryEl) queryEl.textContent = queryCount;
+      if (sleepEl) sleepEl.textContent = sleepCount;
+      if (slowEl) slowEl.textContent = slowCount;
+
       const filtered = rows.filter((r) => {
+        const cmd = String(r[4] || '');
+        const timeSec = Number(r[5] || 0);
+
+        if (activeQuickFilter === 'query' && cmd !== 'Query') return false;
+        if (activeQuickFilter === 'sleep' && cmd !== 'Sleep') return false;
+        if (activeQuickFilter === 'slow' && !(timeSec > 5 && cmd === 'Query')) return false;
+
         if (!filterVal) return true;
+        const id = String(r[0] || '').toLowerCase();
         const user = String(r[1] || '').toLowerCase();
+        const host = String(r[2] || '').toLowerCase();
         const db = String(r[3] || '').toLowerCase();
+        const state = String(r[6] || '').toLowerCase();
         const info = String(r[7] || '').toLowerCase();
-        return user.includes(filterVal) || db.includes(filterVal) || info.includes(filterVal);
+        return id.includes(filterVal) || user.includes(filterVal) || host.includes(filterVal) ||
+               db.includes(filterVal) || cmd.toLowerCase().includes(filterVal) ||
+               state.includes(filterVal) || info.includes(filterVal);
       });
 
-      if (countEl) countEl.textContent = `${filtered.length} / ${rows.length} tiến trình`;
-
       if (!filtered.length) {
-        container.innerHTML = '<div style="padding:20px; text-align:center; color:#9ca3af;">Không có tiến trình nào phù hợp.</div>';
+        container.innerHTML = '<div class="processlist-empty">Không có tiến trình nào phù hợp với bộ lọc.</div>';
         return;
       }
 
@@ -1517,15 +2076,15 @@ async function showProcesslistModal() {
         <table class="processlist-table">
           <thead>
             <tr>
-              <th style="width:60px;">ID</th>
-              <th style="width:100px;">User</th>
-              <th style="width:120px;">Host</th>
-              <th style="width:100px;">DB</th>
-              <th style="width:90px;">Command</th>
-              <th style="width:80px;">Thời gian</th>
-              <th style="width:100px;">State</th>
+              <th style="width:75px;">ID</th>
+              <th style="width:130px;">User</th>
+              <th style="width:130px;">Host</th>
+              <th style="width:120px;">Database</th>
+              <th style="width:90px;">Lệnh</th>
+              <th style="width:110px;">Thời gian</th>
+              <th style="width:120px;">Trạng thái</th>
               <th>Câu lệnh SQL</th>
-              <th style="width:70px; text-align:center;">Hành động</th>
+              <th style="width:80px; text-align:center;">Thao tác</th>
             </tr>
           </thead>
           <tbody>
@@ -1540,18 +2099,33 @@ async function showProcesslistModal() {
               const info = r[7] || '';
               const isSlow = timeSec > 5 && command === 'Query';
 
+              let timeFormatted = `${timeSec}s`;
+              if (timeSec >= 60) {
+                const mins = Math.floor(timeSec / 60);
+                const secs = timeSec % 60;
+                timeFormatted = `${timeSec}s (${mins}m ${secs}s)`;
+              }
+
+              const cmdClass = command === 'Query' ? 'active' : (command === 'Sleep' ? 'sleep' : '');
+
               return `
                 <tr class="${isSlow ? 'slow-process-row' : ''}">
-                  <td><strong>${esc(String(id))}</strong></td>
-                  <td>${esc(user)}</td>
-                  <td title="${esc(host)}">${esc(host.length > 18 ? host.slice(0, 18) + '…' : host)}</td>
-                  <td>${esc(dbName || '—')}</td>
-                  <td><span class="command-badge ${command === 'Query' ? 'active' : ''}">${esc(command)}</span></td>
-                  <td>${timeSec}s ${isSlow ? '⚠️' : ''}</td>
-                  <td><small>${esc(state || '—')}</small></td>
-                  <td title="${esc(info)}"><code class="process-sql">${esc(info ? (info.length > 90 ? info.slice(0, 90) + '…' : info) : '—')}</code></td>
+                  <td class="proc-id mono">#${esc(String(id))}</td>
+                  <td class="proc-user" title="${esc(user)}"><strong>${esc(user)}</strong></td>
+                  <td class="proc-host mono" title="${esc(host)}">${esc(host.length > 20 ? host.slice(0, 20) + '…' : host)}</td>
+                  <td class="proc-db" title="${esc(dbName || '—')}">${dbName ? `<span class="proc-db-badge">${esc(dbName)}</span>` : '<span class="muted">—</span>'}</td>
+                  <td><span class="command-badge ${cmdClass}">${esc(command)}</span></td>
+                  <td>
+                    <span class="time-badge ${isSlow ? 'time-warn' : ''}">
+                      ${isSlow ? '⚠️ ' : ''}${timeFormatted}
+                    </span>
+                  </td>
+                  <td class="proc-state" title="${esc(state || '—')}"><small>${esc(state || '—')}</small></td>
+                  <td class="proc-sql-cell" title="${esc(info ? `${info}\n\n(Nhấp chuột để sao chép SQL)` : 'Không có câu lệnh thực thi')}">
+                    ${info ? `<code class="process-sql" data-full-sql="${esc(info)}">${esc(info.length > 85 ? info.slice(0, 85) + '…' : info)}</code>` : '<span class="muted">—</span>'}
+                  </td>
                   <td style="text-align:center;">
-                    <button class="danger kill-btn" data-kill-id="${id}" style="padding:2px 8px; font-size:0.75em;" title="Hủy tiến trình #${id}">🛑 Kill</button>
+                    <button class="danger kill-btn" data-kill-id="${id}" title="Hủy tiến trình #${id}">✕ Kill</button>
                   </td>
                 </tr>
               `;
@@ -1560,6 +2134,19 @@ async function showProcesslistModal() {
         </table>
       `;
 
+      container.querySelectorAll('.process-sql').forEach((codeEl) => {
+        codeEl.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const sql = codeEl.dataset.fullSql;
+          if (sql) {
+            try {
+              await navigator.clipboard.writeText(sql);
+              toast('Đã sao chép câu lệnh SQL vào bộ nhớ tạm', 'success');
+            } catch {}
+          }
+        });
+      });
+
       container.querySelectorAll('.kill-btn').forEach((btn) => {
         btn.addEventListener('click', async () => {
           const killId = btn.dataset.killId;
@@ -1567,7 +2154,7 @@ async function showProcesslistModal() {
           const confirmed = await confirmAction(`Hủy tiến trình #${killId}?`, 'Kết nối hoặc truy vấn của tiến trình này sẽ bị dừng.', 'Hủy tiến trình');
           if (!confirmed) return;
           try {
-            await call(desktop.db.query({ sql: `KILL ${killId}`, confirmed: true }));
+            await call(desktop.db.query({ ...activeQueryTarget(), sql: `KILL ${killId}`, confirmed: true }));
             toast(`Đã hủy tiến trình #${killId}`, 'success');
             await showProcesslistModal();
           } catch (err) {
@@ -1576,13 +2163,21 @@ async function showProcesslistModal() {
         });
       });
     } catch (err) {
-      container.innerHTML = `<div style="padding:20px; color:#f87171;">Lỗi: ${esc(err.message)}</div>`;
+      container.innerHTML = `<div class="processlist-error">Lỗi: ${esc(err.message)}</div>`;
     }
   }
 
   loadProcesslist();
   $('#refreshProcesslistBtn')?.addEventListener('click', loadProcesslist);
   $('#processlistFilter')?.addEventListener('input', debounce(loadProcesslist, 300));
+  $('#processlistMetrics')?.addEventListener('click', (e) => {
+    const chip = e.target.closest('.metric-chip');
+    if (!chip) return;
+    $('#processlistMetrics').querySelectorAll('.metric-chip').forEach((c) => c.classList.remove('active'));
+    chip.classList.add('active');
+    activeQuickFilter = chip.dataset.filter || 'all';
+    loadProcesslist();
+  });
 }
 
 async function showServerVarsModal(defaultTab = 'variables') {
@@ -1601,19 +2196,22 @@ async function showServerVarsModal(defaultTab = 'variables') {
             <button class="vars-tab-btn ${defaultTab === 'status' ? 'active' : ''}" id="tabStatusBtn">Trạng thái máy chủ (STATUS)</button>
           </div>
         </div>
-        <button class="close-btn" onclick="closeModal()">✕</button>
+        <button class="close-btn" onclick="closeModal()" title="Đóng (Esc)" aria-label="Đóng">✕</button>
       </div>
-      <div class="modal-body" style="padding:12px 16px;">
-        <div style="margin-bottom:10px; display:flex; gap:10px;">
-          <input type="search" id="varsFilterInput" placeholder="🔍 Tìm biến (vd: max_connections, buffer, version...)" style="flex:1; padding:6px 10px; background:#111827; border:1px solid #374151; border-radius:4px; color:#fff;">
-          <span id="varsItemCount" style="align-self:center; color:#9ca3af; font-size:0.9em;">Đang nạp...</span>
+      <div class="modal-body">
+        <div style="margin-bottom:12px; display:flex; gap:10px;">
+          <input type="search" id="varsFilterInput" class="processlist-search-input" placeholder="🔍 Tìm biến (vd: max_connections, buffer, version...)" style="flex:1;">
+          <span id="varsItemCount" style="align-self:center; color:#9ca3af; font-size:0.85em;">Đang nạp...</span>
         </div>
-        <div id="varsTableContainer" style="max-height: 480px; overflow: auto; border:1px solid rgba(255,255,255,0.08); border-radius:4px;">
+        <div id="varsTableContainer" style="max-height: 480px; overflow: auto; border:1px solid #e2e8f0; border-radius:8px;">
           <div style="padding:20px; text-align:center; color:#9ca3af;">Đang tải dữ liệu cấu hình...</div>
         </div>
       </div>
-      <div class="modal-footer" style="text-align: right; margin-top: 12px;">
-        <button class="primary" onclick="closeModal()">Đóng (Esc)</button>
+      <div class="modal-footer">
+        <div style="font-size:11px; color:#64748b;">
+          <span>💡 <em>Chế độ xem thông tin cấu hình và trạng thái của server MySQL.</em></span>
+        </div>
+        <button class="secondary" onclick="closeModal()">Đóng (Esc)</button>
       </div>
     </div>
   `);
@@ -1630,7 +2228,7 @@ async function showServerVarsModal(defaultTab = 'variables') {
       if (!cachedData[currentMode]) {
         const querySql = currentMode === 'variables' ? 'SHOW VARIABLES' : 'SHOW STATUS';
         const modeToLoad = currentMode;
-        const res = await call(desktop.db.query({ sql: querySql }));
+        const res = await call(desktop.db.query({ ...activeQueryTarget(), sql: querySql }));
         cachedData[modeToLoad] = res.rows || [];
         if (currentMode !== modeToLoad || container !== $('#varsTableContainer')) return;
       }
@@ -1698,7 +2296,7 @@ async function runTableMaintenance(tableName, operation) {
   setStatus(`Đang thực thi ${opName} TABLE...`);
   try {
     if (!['OPTIMIZE', 'CHECK', 'ANALYZE', 'REPAIR'].includes(opName)) throw new Error('Thao tác bảo trì không hợp lệ.');
-    const res = await call(desktop.db.query({ sql: `${opName} TABLE ${quoteId(app.database)}.${quoteId(tableName)}`, confirmed: true }));
+    const res = await call(desktop.db.query({ ...activeQueryTarget(), sql: `${opName} TABLE ${quoteId(app.database)}.${quoteId(tableName)}`, confirmed: true }));
     const rows = res.rows || [];
 
     modal(`
@@ -1757,6 +2355,22 @@ function setupContextMenu() {
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeMenu();
+
+    const isInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
+    if (isInput) return;
+
+    const isCmdOrCtrl = e.ctrlKey || e.metaKey;
+    if (isCmdOrCtrl && e.key.toLowerCase() === 'c') {
+      if (app.selectedBackupId && (mode === 'backups' || document.activeElement?.closest('[data-restore-backup]'))) {
+        e.preventDefault();
+        copySelectedBackupToClipboard(app.selectedBackupId);
+      }
+    } else if (isCmdOrCtrl && e.key.toLowerCase() === 'v') {
+      if (app.copiedBackup) {
+        e.preventDefault();
+        pasteBackupModal();
+      }
+    }
   });
 
   document.addEventListener('contextmenu', (event) => {
@@ -1809,6 +2423,7 @@ function setupContextMenu() {
             for (const pk of app.primaryKey) keys[pk] = rowData[pk];
             try {
               await call(desktop.db.updateRow({
+                profileId: app.connection?.id || null,
                 database: app.database,
                 table,
                 keys,
@@ -1832,12 +2447,71 @@ function setupContextMenu() {
             const confirmed = await confirmAction('Xóa dòng này?', 'Bản ghi sẽ bị xóa khỏi database.', 'Xóa');
             if (!confirmed) return;
             try {
-              await call(desktop.db.deleteRows({ database, table: targetTable, keysList: [keys] }));
+              await call(desktop.db.deleteRows({
+                profileId: app.connection?.id || null,
+                database,
+                table: targetTable,
+                keysList: [keys]
+              }));
               toast('Đã xóa dòng thành công', 'success');
               await loadData({ keepScroll: true });
             } catch (err) {
               toast(err.message, 'error');
             }
+          }
+        });
+      });
+      return;
+    }
+
+    const queryTd = event.target.closest('#queryResult table tbody td');
+    if (queryTd && !queryTd.classList.contains('muted')) {
+      const tr = queryTd.closest('tr[data-query-row]');
+      if (!tr) return;
+      event.preventDefault();
+      const colIdx = Number(queryTd.dataset.colIdx);
+      const rowIdx = Number(tr.dataset.queryRow);
+      const result = typeof getActiveQueryResult === 'function' ? getActiveQueryResult() : null;
+      if (!result || !result.rows || !result.rows[rowIdx] || isNaN(colIdx)) return;
+
+      const rowData = result.rows[rowIdx];
+      const colMeta = result.columns[colIdx];
+      const cellVal = rowData[colIdx];
+      const colName = colMeta ? colMeta.name : '';
+
+      menu.innerHTML = `
+        <div class="context-menu-item" data-action="edit-query-cell"><span class="c-icon">✏️</span> Sửa ô (${esc(colName)})</div>
+        <div class="context-menu-item" data-action="copy-cell"><span class="c-icon">📋</span> Sao chép ô (${esc(colName)})</div>
+        <div class="context-menu-item" data-action="copy-query-row-json"><span class="c-icon">📑</span> Sao chép dòng dạng JSON</div>
+        <div class="context-menu-item" data-action="copy-query-row-insert"><span class="c-icon">📥</span> Sao chép dòng dạng INSERT SQL</div>
+      `;
+      positionMenu(event.clientX, event.clientY);
+
+      menu.querySelectorAll('.context-menu-item').forEach((item) => {
+        item.addEventListener('click', async () => {
+          const action = item.dataset.action;
+          closeMenu();
+          if (action === 'edit-query-cell') {
+            inlineEditQueryResultCell(queryTd);
+          } else if (action === 'copy-cell') {
+            await navigator.clipboard.writeText(cellVal === null || cellVal === undefined ? '' : String(cellVal));
+            toast('Đã sao chép giá trị ô', 'success');
+          } else if (action === 'copy-query-row-json') {
+            const obj = {};
+            result.columns.forEach((c, i) => { obj[c.name] = rowData[i]; });
+            await navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
+            toast('Đã sao chép dòng dạng JSON', 'success');
+          } else if (action === 'copy-query-row-insert') {
+            const tblName = colMeta?.orgTable || colMeta?.table || table || 'table_name';
+            const cols = result.columns.map((c) => quoteId(c.name)).join(', ');
+            const vals = rowData.map((v) => {
+              if (v === null || v === undefined) return 'NULL';
+              if (typeof v === 'number') return v;
+              return quoteSqlString(v);
+            }).join(', ');
+            const insertSql = `INSERT INTO ${quoteId(tblName)} (${cols}) VALUES (${vals});`;
+            await navigator.clipboard.writeText(insertSql);
+            toast('Đã sao chép câu lệnh INSERT', 'success');
           }
         });
       });
@@ -1849,6 +2523,25 @@ function setupContextMenu() {
   if (!sidebar) return;
 
   sidebar.addEventListener('contextmenu', (event) => {
+    const backupEntry = event.target.closest('[data-restore-backup]');
+    const backupGroup = event.target.closest('[data-tree-group="backups"]');
+    if (backupEntry || backupGroup) {
+      event.preventDefault();
+      app.selectedBackupId = backupEntry?.dataset.restoreBackup || null;
+      openTreeGroups.add('backups');
+      if (mode !== 'backups') view('backups');
+      else renderBackupsView();
+      renderSidebar();
+      menu.innerHTML = backupContextMenuHtml(Boolean(backupEntry));
+      positionMenu(event.clientX, event.clientY);
+      menu.querySelectorAll('[data-backup-menu]').forEach((item) => {
+        item.addEventListener('click', () => {
+          closeMenu();
+          runBackupManagerAction(item.dataset.backupMenu);
+        });
+      });
+      return;
+    }
     const tableItem = event.target.closest('.treeitem[data-table]');
     const dbItem = event.target.closest('.database.dbitem[data-db]');
     const dbsHeading = event.target.closest('.sideheading');
@@ -1893,11 +2586,15 @@ function setupContextMenu() {
     if (dbItem) {
       event.preventDefault();
       const dbName = dbItem.dataset.db;
+      const dbConnId = dbItem.closest('[data-connection-id]')?.dataset.connectionId || app.connection?.id;
+      const canPaste = Boolean(app.copiedBackup);
       menu.innerHTML = `
         <div class="context-menu-item" data-action="select-db"><span class="c-icon">▱</span> Chọn database này</div>
         <div class="context-menu-item" data-action="create-table"><span class="c-icon">＋</span> Tạo bảng mới</div>
         <div class="context-menu-item" data-action="backup-db"><span class="c-icon">⇩</span> Sao lưu database…</div>
         <div class="context-menu-item" data-action="restore-db"><span class="c-icon">⇧</span> Phục hồi database…</div>
+        ${canPaste ? `<div class="context-menu-item" data-action="paste-db"><span class="c-icon">📋</span> Dán bản sao lưu vào Database này (Ctrl+V)</div>` : ''}
+        <div class="context-menu-item" data-action="copy-db"><span class="c-icon">⧉</span> Sao chép sang Database khác…</div>
         <div class="context-menu-sep"></div>
         <div class="context-menu-item danger" data-action="drop-db"><span class="c-icon">🗑</span> Xóa database (Drop)</div>
       `;
@@ -1910,6 +2607,8 @@ function setupContextMenu() {
           else if (act === 'create-table') { selectDatabase(dbName).then(() => createTableModal()); }
           else if (act === 'backup-db') selectDatabase(dbName).then(() => { if (app.database === dbName) backupDatabase(); });
           else if (act === 'restore-db') selectDatabase(dbName).then(() => { if (app.database === dbName) restoreDatabase(); });
+          else if (act === 'paste-db') pasteBackupModal(dbName, dbConnId);
+          else if (act === 'copy-db') copyDatabaseAction(dbName, dbConnId);
           else if (act === 'drop-db') dropDatabaseAction(dbName);
         });
       });
@@ -1951,6 +2650,10 @@ function activateSidebarItem(event) {
 }
 
 function onConnectionClick(event) {
+  if (event.target.closest('.conn-children')) {
+    onTreeClick(event);
+    return;
+  }
   const menuButton = event.target.closest('[data-menu]');
   if (menuButton) {
     event.stopPropagation();
@@ -1958,10 +2661,102 @@ function onConnectionClick(event) {
     return;
   }
   const item = event.target.closest('[data-connection]');
-  if (item) connectTo(item.dataset.connection);
+  if (!item) return;
+
+  const connId = item.dataset.connection;
+  const isCurrent = Boolean(
+    app.connection && (
+      app.connection.id === connId ||
+      (!app.connections.some((c) => c.id === app.connection.id) && app.connections.length === 1)
+    )
+  );
+
+  if (isCurrent) {
+    if (collapsedConnections.has(connId)) {
+      collapsedConnections.delete(connId);
+    } else {
+      collapsedConnections.add(connId);
+    }
+    renderSidebar();
+    return;
+  }
+
+  collapsedConnections.delete(connId);
+  connectTo(connId);
 }
 
 function onTreeClick(event) {
+  const renameSaved = event.target.closest('[data-rename-saved-query]');
+  if (renameSaved) {
+    event.stopPropagation();
+    renameSavedQuery(renameSaved.dataset.renameSavedQuery);
+    return;
+  }
+  const deleteSaved = event.target.closest('[data-delete-saved-query]');
+  if (deleteSaved) {
+    event.stopPropagation();
+    deleteSavedQuery(deleteSaved.dataset.deleteSavedQuery);
+    return;
+  }
+  const savedQuery = event.target.closest('[data-saved-query]');
+  if (savedQuery) {
+    openSavedQuery(savedQuery.dataset.savedQuery);
+    return;
+  }
+  const group = event.target.closest('[data-tree-group]');
+  if (group) {
+    const id = group.dataset.treeGroup;
+    if (id === 'backups') {
+      openTreeGroups.add(id);
+      app.selectedBackupId = null;
+      view('backups');
+    } else if (id === 'routines' || id === 'events') {
+      const opening = !openTreeGroups.has(id);
+      if (opening) openTreeGroups.add(id);
+      else openTreeGroups.delete(id);
+      renderSidebar();
+      if (opening) loadObjectMetadata(id);
+      return;
+    } else if (openTreeGroups.has(id)) openTreeGroups.delete(id);
+    else openTreeGroups.add(id);
+    renderSidebar();
+    return;
+  }
+  if (event.target.closest('[data-refresh-routines]')) {
+    loadObjectMetadata('routines', { force: true });
+    return;
+  }
+  if (event.target.closest('[data-refresh-events]')) {
+    loadObjectMetadata('events', { force: true });
+    return;
+  }
+  const newRoutine = event.target.closest('[data-new-routine]');
+  if (newRoutine) {
+    newRoutineModal(newRoutine.dataset.newRoutine);
+    return;
+  }
+  if (event.target.closest('[data-new-event]')) {
+    newRoutineModal('event');
+    return;
+  }
+  const routine = event.target.closest('[data-routine]');
+  if (routine) {
+    openRoutineDetails(routine.dataset.routineKind === 'function' ? 'function' : 'procedure', routine.dataset.routine);
+    return;
+  }
+  const eventObject = event.target.closest('[data-event]');
+  if (eventObject) {
+    openRoutineDetails('event', eventObject.dataset.event);
+    return;
+  }
+  if (event.target.closest('[data-save-query]')) {
+    saveQuery();
+    return;
+  }
+  if (event.target.closest('[data-new-query]')) {
+    newQuery();
+    return;
+  }
   if (event.target.closest('#createDbBtn')) {
     createDatabaseModal();
     return;
@@ -1972,6 +2767,13 @@ function onTreeClick(event) {
   }
   if (event.target.closest('[data-backup-db]')) {
     backupDatabase();
+    return;
+  }
+  const savedBackup = event.target.closest('[data-restore-backup]');
+  if (savedBackup) {
+    app.selectedBackupId = savedBackup.dataset.restoreBackup;
+    view('backups');
+    renderSidebar();
     return;
   }
   if (event.target.closest('[data-restore-db]')) {
@@ -1992,9 +2794,21 @@ function onTreeClick(event) {
     view('data');
     return;
   }
+  const chevronToggle = event.target.closest('[data-toggle-db]');
   const databaseItem = event.target.closest('[data-db]');
   if (databaseItem) {
-    selectDatabase(databaseItem.dataset.db);
+    const dbName = databaseItem.dataset.db;
+    if (chevronToggle || dbName === app.database) {
+      if (collapsedDbs.has(dbName)) {
+        collapsedDbs.delete(dbName);
+      } else {
+        collapsedDbs.add(dbName);
+      }
+      renderSidebar();
+      return;
+    }
+    collapsedDbs.delete(dbName);
+    selectDatabase(dbName);
     return;
   }
   const tableItem = event.target.closest('[data-table]');
@@ -2004,16 +2818,67 @@ function onTreeClick(event) {
 async function refreshDatabases() {
   if (!desktop || !app.connection) return;
   try {
-    app.databases = await call(desktop.db.databases());
+    app.databases = await call(desktop.db.databases(app.connection?.id || null));
     renderSidebar();
   } catch (error) {
     toast(error.message, 'error');
   }
 }
 
+async function connectProfile(id) {
+  const profile = app.connections.find((connection) => connection.id === id);
+  try {
+    return await call(desktop.db.connect(id));
+  } catch (error) {
+    if (!profile || !profile.ssh?.enabled
+        || !['SSH_HOST_KEY_UNKNOWN', 'SSH_HOST_KEY_CHANGED'].includes(error.code)
+        || !error.fingerprint) {
+      throw error;
+    }
+    const changed = error.code === 'SSH_HOST_KEY_CHANGED';
+    const fingerprint = String(error.fingerprint);
+    const expected = error.expectedFingerprint ? String(error.expectedFingerprint) : '';
+    const accepted = await confirmAction(
+      changed ? 'SSH host key đã thay đổi' : 'Tin cậy SSH host key lần đầu?',
+      changed
+        ? `Không kết nối tới ${profile.ssh.host}:${profile.ssh.port} trước khi bạn xác minh.\n\nFingerprint trước: ${expected}\nFingerprint mới: ${fingerprint}\n\nChỉ tin cậy nếu khóa mới khớp với quản trị viên máy chủ.`
+        : `Chưa có SSH host key được tin cậy cho ${profile.ssh.host}:${profile.ssh.port}.\n\nFingerprint SHA-256: ${fingerprint}\n\nSo sánh với fingerprint do quản trị viên máy chủ cung cấp trước khi tin cậy.`,
+      changed ? 'Tin cậy khóa mới' : 'Tin cậy và kết nối'
+    );
+    if (!accepted) {
+      const rejected = new Error('Bạn đã từ chối SSH host key. Không có thông tin đăng nhập MySQL nào được gửi.');
+      rejected.code = 'SSH_HOST_KEY_REJECTED';
+      throw rejected;
+    }
+    return call(desktop.db.connect(id, {
+      sshHostKey: {
+        host: profile.ssh.host,
+        port: profile.ssh.port,
+        fingerprint
+      }
+    }));
+  }
+}
+
 async function connectTo(id, options = {}) {
+  if (connectionSwitching) return;
   const profile = app.connections.find((connection) => connection.id === id);
   if (!profile) return;
+  if (app.connection?.id && app.connection.id !== id && app.database) {
+    connectionLocations.set(app.connection.id, { database: app.database, table, mode });
+    connectionViews.set(app.connection.id, {
+      server: app.server, databases: app.databases, database: app.database,
+      tables: app.tables, backups: app.backups, selectedBackupId: app.selectedBackupId,
+      columns: app.columns, primaryKey: app.primaryKey, rows: app.rows,
+      total: app.total, page: app.page, search: app.search,
+      orderBy: app.orderBy, orderDir: app.orderDir,
+      indexes: app.indexes, relations: app.relations, table, mode
+    });
+  }
+  const remembered = connectionLocations.get(id) || {};
+  const savedView = openConnectionIds.has(id) ? connectionViews.get(id) : null;
+  let connectedData = null;
+  collapsedConnections.delete(id);
   if (profile.workspaceId && profile.workspaceId !== app.activeWorkspaceId) {
     app.activeWorkspaceId = profile.workspaceId;
     renderWorkspaceSwitcher();
@@ -2021,6 +2886,50 @@ async function connectTo(id, options = {}) {
   if (app.connection && app.connection.id === id && app.database && options.keepSession) {
     renderSidebar();
     return;
+  }
+  connectionSwitching = true;
+  if (savedView) {
+    try {
+      const data = await connectProfile(id);
+      connectedData = data;
+      openConnectionIds.clear();
+      for (const profileId of data.openProfiles || [id]) openConnectionIds.add(profileId);
+      if (data.reused && (!options.database || options.database === savedView.database)) {
+        resetObjectMetadata();
+        invalidateSqlAutocomplete();
+        app.connection = profile;
+        app.serverType = profile.type;
+        Object.assign(app, savedView);
+        app.server = data.server;
+        app.databases = data.databases;
+        table = savedView.table;
+        mode = savedView.mode;
+        setConnectionState('connected', 'Đã kết nối');
+        renderSidebar();
+        loadOpenObjectGroups();
+        updateChrome();
+        if (mode === 'data') {
+          if (table && app.columns.length) renderDataView();
+          else renderEmptyTable();
+        } else if (mode === 'backups') renderBackupsView();
+        else if (mode === 'query') renderQueryView();
+        else if (mode === 'history') renderHistoryView();
+        else if (mode === 'structure' && app.columns.length) renderStructureView();
+        else if (mode === 'indexes' && app.indexes) renderIndexesView();
+        else if (mode === 'relations' && app.relations) renderRelationsView();
+        else await view(mode);
+        setStatus(`Đã chuyển sang ${profile.name} • ${app.server}`);
+        persistState();
+        return;
+      }
+    } catch (error) {
+      openConnectionIds.delete(id);
+      connectionViews.delete(id);
+      toast(error.message, 'error');
+      return;
+    } finally {
+      connectionSwitching = false;
+    }
   }
   invalidateSqlAutocomplete();
   app.connection = profile;
@@ -2032,20 +2941,27 @@ async function connectTo(id, options = {}) {
   app.columns = [];
   app.rows = [];
   app.total = null;
+  resetObjectMetadata();
   table = null;
   setConnectionState('connecting');
+  setStatus(`Đang kết nối ${profile.name}…`);
   renderSidebar();
-  view('data');
+  mode = 'data';
+  updateChrome();
+  renderConnectionLoading(profile);
   try {
-    const data = await call(desktop.db.connect(id));
+    const data = connectedData || await connectProfile(id);
+    openConnectionIds.clear();
+    for (const profileId of data.openProfiles || [id]) openConnectionIds.add(profileId);
     app.server = data.server;
     app.databases = data.databases;
     setConnectionState('connected', 'Đã kết nối');
-    const preferred = options.database && app.databases.includes(options.database)
-      ? options.database
+    const preferredDatabase = options.database || remembered.database;
+    const preferred = preferredDatabase && app.databases.includes(preferredDatabase)
+      ? preferredDatabase
       : (profile.database && app.databases.includes(profile.database) ? profile.database : null);
     if (preferred) {
-      await selectDatabase(preferred, options);
+      await selectDatabase(preferred, { ...remembered, ...options });
     } else if (app.databases.length === 1) {
       await selectDatabase(app.databases[0], options);
     } else {
@@ -2056,6 +2972,7 @@ async function connectTo(id, options = {}) {
     if (!options.silent) toast(`Đã kết nối ${profile.name}`);
     persistState();
   } catch (error) {
+    openConnectionIds.delete(id);
     app.connection = null;
     app.server = '';
     app.databases = [];
@@ -2069,29 +2986,35 @@ async function connectTo(id, options = {}) {
     renderSidebar();
     await view('data');
     setConnectionState('error', error.message);
+  } finally {
+    connectionSwitching = false;
   }
 }
 
 async function selectDatabase(database, options = {}) {
   invalidateSqlAutocomplete();
   try {
-    await call(desktop.db.useDatabase(database));
+    await call(desktop.db.useDatabase(database, app.connection?.id || null));
   } catch (error) {
     toast(error.message, 'error');
     return;
   }
   app.database = database;
+  app.backups = [];
+  app.selectedBackupId = null;
+  resetObjectMetadata();
   table = null;
   app.tables = [];
   app.columns = [];
   app.rows = [];
   app.total = null;
   try {
-    app.tables = await call(desktop.db.tables(database));
+    app.tables = await call(desktop.db.tables(database, app.connection?.id || null));
   } catch (error) {
     toast(error.message, 'error');
     app.tables = [];
   }
+  await refreshBackupList(database);
   renderSidebar();
   setConnectionState('connected', 'Đã kết nối');
   const candidate = options.table && app.tables.find((entry) => entry.name === options.table)
@@ -2102,7 +3025,141 @@ async function selectDatabase(database, options = {}) {
   } else {
     view(options.mode || 'data');
   }
+  loadOpenObjectGroups();
   persistState();
+}
+
+async function refreshBackupList(database = app.database, connectionId = app.connection?.id) {
+  if (!desktop?.db?.listBackups || !database) return;
+  try {
+    const backups = await call(desktop.db.listBackups(database, connectionId));
+    if (app.database === database && app.connection?.id === connectionId) {
+      app.backups = backups;
+      if (app.selectedBackupId && !backups.some((entry) => entry.id === app.selectedBackupId)) app.selectedBackupId = null;
+      renderSidebar();
+      if (mode === 'backups') renderBackupsView();
+    }
+  } catch (error) {
+    toast(`Không đọc được danh sách backup: ${error.message}`, 'error');
+  }
+}
+
+function renderBackupsView() {
+  const selected = app.backups.find((entry) => entry.id === app.selectedBackupId);
+  const rows = app.backups.map((entry) => `
+    <tr class="backup-row ${entry.id === app.selectedBackupId ? 'selected' : ''}" data-backup-row="${esc(entry.id)}" tabindex="0" aria-selected="${entry.id === app.selectedBackupId}">
+      <td>◴ &nbsp; ${esc(entry.name)}</td>
+      <td>${esc(new Date(entry.createdAt).toLocaleString('vi-VN'))}</td>
+      <td>${formatBytes(entry.bytes)}</td>
+      <td>—</td>
+    </tr>`).join('');
+  $('#workspace').innerHTML = `
+    <section class="backup-manager" aria-label="Quản lý bản sao lưu">
+      <div class="backup-manager-toolbar">
+        <button data-backup-action="create" class="primary">＋ Tạo bản sao lưu</button>
+        <button data-backup-action="restore" ${selected ? '' : 'disabled'}>↶ Phục hồi</button>
+        <button data-backup-action="copy-backup" ${selected ? '' : 'disabled'}>⎘ Sao chép (Ctrl+C)</button>
+        <button data-backup-action="paste-backup" ${app.copiedBackup ? '' : 'disabled'}>📋 Dán (Ctrl+V)</button>
+        <button data-backup-action="copy-to-db" ${selected ? '' : 'disabled'}>⧉ Sao chép sang DB khác…</button>
+        <button data-backup-action="delete" class="danger" ${selected ? '' : 'disabled'}>⌫ Xóa bản sao lưu</button>
+        <button data-backup-action="export" ${selected ? '' : 'disabled'}>⇩ Xuất tệp SQL</button>
+        <button data-backup-action="refresh">↻ Làm mới</button>
+      </div>
+      <div class="backup-manager-table"><table><thead><tr><th>Tên</th><th>Ngày tạo</th><th>Dung lượng</th><th>Ghi chú</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="4" class="backup-manager-empty">Chưa có bản sao lưu. Bấm “Tạo bản sao lưu” để bắt đầu.</td></tr>'}</tbody>
+      </table></div>
+      <div class="backup-manager-footer">${app.backups.length} bản sao lưu · ${esc(app.database || '')}</div>
+    </section>`;
+}
+
+function backupContextMenuHtml(hasSelection) {
+  const item = (action, icon, label, disabled = false) => `<div class="context-menu-item ${disabled ? 'disabled' : ''}" ${disabled ? '' : `data-backup-menu="${action}"`}><span class="c-icon">${icon}</span>${label}</div>`;
+  const canPaste = Boolean(app.copiedBackup);
+  return `
+    ${item('restore', '↶', 'Phục hồi bản sao lưu', !hasSelection)}
+    ${item('copy-backup', '⎘', 'Sao chép bản sao lưu (Ctrl+C)', !hasSelection)}
+    ${item('paste-backup', '📋', 'Dán bản sao lưu vào đây (Ctrl+V)', !canPaste)}
+    ${item('copy-to-db', '⧉', 'Sao chép sang Database khác…', !hasSelection)}
+    ${item('create', '＋', 'Tạo bản sao lưu mới')}
+    ${item('delete', '⌫', 'Xóa bản sao lưu', !hasSelection)}
+    <div class="context-menu-sep"></div>
+    ${item('restore-file', '⇧', 'Phục hồi từ tệp SQL…')}
+    ${item('export', '⇩', 'Xuất tệp SQL…', !hasSelection)}
+    ${item('copy', '⧉', 'Sao chép tên', !hasSelection)}
+    <div class="context-menu-sep"></div>
+    ${item('folder', '▣', 'Mở thư mục chứa backup')}
+    ${item('refresh', '↻', 'Làm mới')}`;
+}
+
+async function runBackupManagerAction(action) {
+  if (action === 'create') return backupDatabase();
+  if (action === 'restore-file') return restoreDatabase();
+  if (action === 'restore' && app.selectedBackupId) return restoreDatabase(app.selectedBackupId);
+  if (action === 'copy-backup' && app.selectedBackupId) return copySelectedBackupToClipboard(app.selectedBackupId);
+  if (action === 'paste-backup' && app.copiedBackup) return pasteBackupModal();
+  if (action === 'copy-to-db' && app.selectedBackupId) return copyBackupToDatabaseModal(app.selectedBackupId);
+  if (action === 'refresh') return refreshBackupList();
+  if (action === 'copy' && app.selectedBackupId) {
+    try {
+      await navigator.clipboard.writeText(app.selectedBackupId);
+      toast('Đã sao chép tên bản backup.');
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  }
+  if (action === 'folder') {
+    try {
+      await call(desktop.db.showBackupFolder({
+        profileId: app.connection?.id || null,
+        database: app.database,
+        id: app.selectedBackupId
+      }));
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  }
+  if (action === 'export' && app.selectedBackupId) {
+    try {
+      const result = await call(desktop.db.exportBackup({
+        profileId: app.connection?.id || null,
+        database: app.database,
+        id: app.selectedBackupId
+      }));
+      if (!result.canceled) toast(`Đã xuất tệp SQL: ${result.filePath}`);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  }
+  if (action === 'delete' && app.selectedBackupId) {
+    const id = app.selectedBackupId;
+    const confirmed = await confirmAction('Xóa bản sao lưu?', `Tệp backup ${id} sẽ bị xóa khỏi máy.`, 'Xóa');
+    if (!confirmed) return;
+    try {
+      await call(desktop.db.deleteBackup({
+        profileId: app.connection?.id || null,
+        database: app.database,
+        id
+      }));
+      app.selectedBackupId = null;
+      await refreshBackupList();
+      toast('Đã xóa bản sao lưu.');
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  }
+}
+
+async function onBackupManagerClick(event) {
+  const row = event.target.closest('[data-backup-row]');
+  if (row) {
+    app.selectedBackupId = row.dataset.backupRow;
+    renderBackupsView();
+    renderSidebar();
+    return;
+  }
+  const action = event.target.closest('[data-backup-action]')?.dataset.backupAction;
+  if (!action) return;
+  await runBackupManagerAction(action);
 }
 
 async function selectTable(name, options = {}) {
@@ -2133,6 +3190,7 @@ async function loadData({ keepScroll = false } = {}) {
   updateChrome();
   try {
     const data = await call(desktop.db.tableData({
+      profileId: app.connection?.id || null,
       database,
       table: targetTable,
       page: app.page,
@@ -2172,11 +3230,14 @@ function syncActiveQuery() {
 function renderQueryTabs() {
   const host = $('#queryTabs');
   if (!host) return;
-  host.innerHTML = queryTabs.map((tab, index) => `
-    <button class="querytab${mode === 'query' && index === activeQuery ? ' selected' : ''}" data-query-tab="${index}" title="${esc(tab.title)}">
+  host.innerHTML = queryTabs.map((tab, index) => {
+    const target = queryTargetLabel(tab);
+    return `
+    <button class="querytab${mode === 'query' && index === activeQuery ? ' selected' : ''}" data-query-tab="${index}" title="${esc(`${tab.title} · ${target}`)}">
       ⌑ &nbsp; ${esc(tab.title)}${tab.running ? ' <span class="tabrunning">…</span>' : ''} &nbsp; <span class="tabclose" data-close-query="${index}" title="Đóng tab">×</span>
-    </button>
-  `).join('');
+      <span class="querytab-target">${esc(target)}</span>
+    </button>`;
+  }).join('');
 }
 
 function onTabClick(event) {
@@ -2191,8 +3252,18 @@ function onTabClick(event) {
   if (tab) selectQueryTab(Number(tab.dataset.queryTab));
 }
 
-function newQuery(sql = '') {
-  if (!desktop || !app.connection) {
+function newQuery(sql = '', target = null) {
+  const profileId = target && target.profileId !== undefined
+    ? target.profileId
+    : (app.connection ? app.connection.id : null);
+  const database = target && target.database !== undefined
+    ? target.database
+    : (app.database || null);
+  if (!desktop) {
+    toast('Ứng dụng desktop chưa sẵn sàng.', 'error');
+    return;
+  }
+  if (!profileId && !app.connection) {
     toast('Chọn kết nối trước khi mở truy vấn.', 'error');
     view('query');
     return;
@@ -2203,7 +3274,18 @@ function newQuery(sql = '') {
   }
   syncActiveQuery();
   queryId += 1;
-  const tab = { id: queryId, title: `Query ${queryId}`, sql: String(sql ?? ''), result: null, error: null, running: false };
+  const tab = {
+    id: queryId,
+    title: `Query ${queryId}`,
+    sql: String(sql ?? ''),
+    result: null,
+    error: null,
+    running: false,
+    profileId: profileId || null,
+    database: database || null,
+    taskId: null,
+    savedQueryId: null
+  };
   queryTabs.push(tab);
   activeQuery = queryTabs.length - 1;
   app.query = tab;
@@ -2243,7 +3325,17 @@ function closeQueryTab(index) {
   queryTabs.splice(index, 1);
   if (!queryTabs.length) {
     queryId += 1;
-    queryTabs.push({ id: queryId, title: `Query ${queryId}`, sql: '', result: null, error: null, running: false });
+    queryTabs.push({
+      id: queryId,
+      title: `Query ${queryId}`,
+      sql: '',
+      result: null,
+      error: null,
+      running: false,
+      profileId: app.connection ? app.connection.id : null,
+      database: app.database || null,
+      taskId: null
+    });
     activeQuery = 0;
   } else if (index < activeQuery) {
     activeQuery -= 1;
@@ -2262,28 +3354,29 @@ function closeQueryTab(index) {
 function updateChrome() {
   document.body.classList.toggle('query-mode', mode === 'query');
   const label = mode === 'query' ? 'QUERY' : mode === 'history' ? 'WORKSPACE' : mode === 'data' ? 'TABLE' : mode.toUpperCase();
-  const title = mode === 'query' ? 'SQL Editor' : mode === 'history' ? 'Lịch sử truy vấn' : (table || app.database || 'Workspace');
+  const title = mode === 'backups' ? 'Backups' : mode === 'query' ? 'SQL Editor' : mode === 'history' ? 'Lịch sử truy vấn' : (table || app.database || 'Workspace');
   $('#title').innerHTML = `${esc(title)} <span>${label}</span>`;
-  $('#eyebrow').textContent = `${(app.database || 'CHƯA CHỌN DATABASE').toUpperCase()} / ${mode === 'query' ? 'TRUY VẤN' : mode === 'history' ? 'LỊCH SỬ' : 'BẢNG'}`;
+  $('#eyebrow').textContent = `${(app.database || 'CHƯA CHỌN DATABASE').toUpperCase()} / ${mode === 'query' ? 'TRUY VẤN' : mode === 'history' ? 'LỊCH SỬ' : mode === 'backups' ? 'SAO LƯU' : 'BẢNG'}`;
   const subtitles = {
     data: table ? `Bảng ${table} trong ${app.database}.` : 'Chọn một bảng để xem dữ liệu thật.',
     structure: table ? `Cấu trúc cột của ${app.database}.${table}.` : 'Chọn một bảng để xem cấu trúc.',
     indexes: table ? `Indexes của ${app.database}.${table}.` : 'Chọn một bảng để xem indexes.',
     relations: table ? `Quan hệ khóa ngoại của ${app.database}.${table}.` : 'Chọn một bảng để xem quan hệ.',
     query: 'Soạn và chạy truy vấn thật trên kết nối đang mở.',
-    history: 'Các truy vấn đã chạy trong phiên làm việc.'
+    history: 'Các truy vấn đã chạy trong phiên làm việc.',
+    backups: `Các bản sao lưu của database ${app.database || ''}.`
   };
   $('#subtitle').textContent = subtitles[mode] || '';
   $('#crumbDb').textContent = app.database || '—';
   $('#crumbServer').textContent = app.connection ? `${app.serverType === 'mariadb' ? 'MARIADB' : 'MYSQL'}${app.server ? ` ${app.server}` : ''}` : 'CHƯA KẾT NỐI';
-  $('#tabName').textContent = table || '—';
+  $('#tabName').textContent = mode === 'backups' ? 'Backups' : (table || '—');
   $('#dataTab').classList.toggle('selected', mode !== 'query');
   renderQueryTabs();
-  $('#subnav').style.display = ['query', 'history'].includes(mode) ? 'none' : 'flex';
+  $('#subnav').style.display = ['query', 'history', 'backups'].includes(mode) ? 'none' : 'flex';
   [...$('#subnav').children].forEach((button, index) => {
     button.classList.toggle('current', ['data', 'structure', 'indexes', 'relations'][index] === mode);
   });
-  document.title = `${mode === 'query' ? 'SQL Editor' : mode === 'history' ? 'Lịch sử' : (table || 'Workspace')} — ${app.database || 'SqlPro'} — SqlPro`;
+  document.title = `${mode === 'query' ? 'SQL Editor' : mode === 'history' ? 'Lịch sử' : mode === 'backups' ? 'Backups' : (table || 'Workspace')} — ${app.database || 'SqlPro'} — SqlPro`;
 }
 
 async function view(nextMode) {
@@ -2304,6 +3397,11 @@ async function view(nextMode) {
     renderDatabasePicker();
     return;
   }
+  if (nextMode === 'backups') {
+    renderBackupsView();
+    refreshBackupList();
+    return;
+  }
   if (nextMode === 'data') {
     if (table) await loadData();
     else renderEmptyTable();
@@ -2316,7 +3414,7 @@ async function view(nextMode) {
     }
     workspaceLoading();
     try {
-      app.columns = await call(desktop.db.columns(app.database, table));
+      app.columns = await call(desktop.db.columns(app.database, table, app.connection?.id || null));
       renderStructureView();
     } catch (error) {
       renderError(error);
@@ -2328,7 +3426,7 @@ async function view(nextMode) {
     }
     workspaceLoading();
     try {
-      app.indexes = await call(desktop.db.indexes(app.database, table));
+      app.indexes = await call(desktop.db.indexes(app.database, table, app.connection?.id || null));
       renderIndexesView();
     } catch (error) {
       renderError(error);
@@ -2340,7 +3438,7 @@ async function view(nextMode) {
     }
     workspaceLoading();
     try {
-      app.relations = await call(desktop.db.relations(app.database, table));
+      app.relations = await call(desktop.db.relations(app.database, table, app.connection?.id || null));
       renderRelationsView();
     } catch (error) {
       renderError(error);
@@ -2351,6 +3449,16 @@ async function view(nextMode) {
 
 function workspaceLoading() {
   $('#workspace').innerHTML = '<div class="empty">Đang tải dữ liệu…</div>';
+}
+
+function renderConnectionLoading(profile) {
+  $('#workspace').innerHTML = `
+    <div class="connection-loading" role="status" aria-live="polite">
+      <span class="connection-loading-spinner" aria-hidden="true"></span>
+      <strong>Đang kết nối ${esc(profile.name)}…</strong>
+      <span>Đang xác thực và tải danh sách database</span>
+    </div>
+  `;
 }
 
 function renderWelcome() {
@@ -2476,6 +3584,7 @@ async function inlineEditCell(td) {
 
     try {
       await call(desktop.db.updateRow({
+        profileId: app.connection?.id || null,
         database,
         table: targetTable,
         keys,
@@ -2749,7 +3858,7 @@ function addColumnModal(targetTable) {
     }
 
     try {
-      await call(desktop.db.query({ sql, confirmed: true }));
+      await call(desktop.db.query({ ...activeQueryTarget(), sql, confirmed: true }));
       toast(`Đã thêm cột "${colName}" vào bảng ${currentTable}`, 'success');
       closeModal();
       view('structure');
@@ -2825,7 +3934,7 @@ function modifyColumnModal(targetTable, colName) {
     if (colMeta.comment) sql += ` COMMENT ${quoteSqlString(colMeta.comment)}`;
 
     try {
-      await call(desktop.db.query({ sql, confirmed: true }));
+      await call(desktop.db.query({ ...activeQueryTarget(), sql, confirmed: true }));
       toast(`Đã sửa thuộc tính cột "${colName}"`, 'success');
       closeModal();
       view('structure');
@@ -2864,7 +3973,7 @@ function renameColumnModal(targetTable, oldName) {
       return;
     }
     try {
-      await call(desktop.db.query({ sql: `ALTER TABLE ${quoteId(database)}.${quoteId(currentTable)} RENAME COLUMN ${quoteId(oldName)} TO ${quoteId(newName)}`, confirmed: true }));
+      await call(desktop.db.query({ ...activeQueryTarget(), sql: `ALTER TABLE ${quoteId(database)}.${quoteId(currentTable)} RENAME COLUMN ${quoteId(oldName)} TO ${quoteId(newName)}`, confirmed: true }));
       toast(`Đã đổi tên cột thành "${newName}"`, 'success');
       closeModal();
       view('structure');
@@ -2880,7 +3989,7 @@ async function dropColumnAction(targetTable, colName) {
   const confirmed = await confirmAction(`Xóa cột "${colName}" khỏi bảng "${currentTable}"?`, 'Dữ liệu trong cột này sẽ bị mất vĩnh viễn!', 'Xóa cột');
   if (!confirmed) return;
   try {
-    await call(desktop.db.query({ sql: `ALTER TABLE ${quoteId(database)}.${quoteId(currentTable)} DROP COLUMN ${quoteId(colName)}`, confirmed: true }));
+    await call(desktop.db.query({ ...activeQueryTarget(), sql: `ALTER TABLE ${quoteId(database)}.${quoteId(currentTable)} DROP COLUMN ${quoteId(colName)}`, confirmed: true }));
     toast(`Đã xóa cột "${colName}"`, 'success');
     await view('structure');
   } catch (err) {
@@ -2952,7 +4061,7 @@ function createIndexModal(targetTable) {
     const sql = `CREATE ${typePrefix}INDEX ${quoteId(idxName)} ON ${quoteId(database)}.${quoteId(currentTable)} (${selectedCols.map(quoteId).join(', ')})`;
 
     try {
-      await call(desktop.db.query({ sql, confirmed: true }));
+      await call(desktop.db.query({ ...activeQueryTarget(), sql, confirmed: true }));
       toast(`Đã tạo Index "${idxName}" thành công`, 'success');
       closeModal();
       view('indexes');
@@ -2968,7 +4077,7 @@ async function dropIndexAction(indexName) {
   const confirmed = await confirmAction(`Xóa Index "${indexName}"?`, 'Thao tác này có thể ảnh hưởng đến tốc độ truy vấn.', 'Xóa Index');
   if (!confirmed) return;
   try {
-    await call(desktop.db.query({ sql: `DROP INDEX ${quoteId(indexName)} ON ${target}`, confirmed: true }));
+    await call(desktop.db.query({ ...activeQueryTarget(), sql: `DROP INDEX ${quoteId(indexName)} ON ${target}`, confirmed: true }));
     toast(`Đã xóa Index "${indexName}"`, 'success');
     await view('indexes');
   } catch (err) {
@@ -2984,7 +4093,7 @@ async function createRelationModal(targetTable) {
   const cols = app.columns || [];
   let tablesList = [];
   try {
-    tablesList = await call(desktop.db.tables(database));
+    tablesList = await call(desktop.db.tables(database, app.connection?.id || null));
   } catch (err) {
     tablesList = [];
   }
@@ -3062,7 +4171,7 @@ async function createRelationModal(targetTable) {
     const sql = `ALTER TABLE ${quoteId(database)}.${quoteId(currentTable)} ADD CONSTRAINT ${quoteId(fkName)} FOREIGN KEY (${quoteId(localCol)}) REFERENCES ${quoteId(database)}.${quoteId(refTable)}(${quoteId(refCol)}) ON DELETE ${onDel} ON UPDATE ${onUpd}`;
 
     try {
-      await call(desktop.db.query({ sql, confirmed: true }));
+      await call(desktop.db.query({ ...activeQueryTarget(), sql, confirmed: true }));
       toast(`Đã tạo Khóa ngoại "${fkName}" thành công`, 'success');
       closeModal();
       view('relations');
@@ -3078,7 +4187,7 @@ async function dropRelationAction(constraintName) {
   const confirmed = await confirmAction(`Xóa Khóa ngoại "${constraintName}"?`, 'Bảng sẽ không còn kiểm tra ràng buộc tham chiếu này.', 'Xóa khóa ngoại');
   if (!confirmed) return;
   try {
-    await call(desktop.db.query({ sql: `ALTER TABLE ${target} DROP FOREIGN KEY ${quoteId(constraintName)}`, confirmed: true }));
+    await call(desktop.db.query({ ...activeQueryTarget(), sql: `ALTER TABLE ${target} DROP FOREIGN KEY ${quoteId(constraintName)}`, confirmed: true }));
     toast(`Đã xóa Khóa ngoại "${constraintName}"`, 'success');
     await view('relations');
   } catch (err) {
@@ -3343,8 +4452,8 @@ function formatCurrentSql() {
 }
 
 async function runExplainQuery() {
-  if (!desktop || !app.connection) {
-    toast('Chưa kết nối CSDL.', 'error');
+  if (!desktop) {
+    toast('Ứng dụng desktop chưa sẵn sàng.', 'error');
     return;
   }
   if (queryTabs.some((tab) => tab.running)) {
@@ -3352,6 +4461,8 @@ async function runExplainQuery() {
     return;
   }
   const tab = app.query;
+  const target = await ensureQueryTarget(tab);
+  if (!target) return;
   try {
     const editor = $('#sql');
     const rawSql = editor ? editor.value : (tab.sql || '');
@@ -3374,12 +4485,19 @@ async function runExplainQuery() {
     }
     const explainSql = ['EXPLAIN', 'DESCRIBE', 'DESC'].includes(firstWord) ? sqlToRun : 'EXPLAIN ' + sqlToRun;
     tab.running = true;
+    tab.taskId = newQueryTaskId();
     tab.error = null;
     closeSqlSuggestions();
     updateQueryButtons();
     renderQueryTabs();
     setStatus('Đang phân tích kế hoạch thực thi (EXPLAIN)...');
-    const result = await call(desktop.db.query({ sql: explainSql, timeoutMs: 30000 }));
+    const result = await call(desktop.db.query({
+      sql: explainSql,
+      timeoutMs: 30000,
+      profileId: target.profileId,
+      database: tab.database || null,
+      taskId: tab.taskId
+    }));
     result.isExplain = true;
     tab.result = result;
     tab.resultTab = null;
@@ -3413,6 +4531,7 @@ async function runExplainQuery() {
     setStatus('Lỗi EXPLAIN');
   } finally {
     tab.running = false;
+    tab.taskId = null;
     updateQueryButtons();
     renderQueryTabs();
     const output = $('#queryResult');
@@ -3510,8 +4629,9 @@ function renderQueryView() {
       <button id="formatSqlBtn" title="Định dạng SQL chuẩn đẹp (Ctrl+Shift+F)">🪄 Định dạng</button>
       <button id="saveQueryBtn">⌑ Lưu</button>
       <button class="danger" id="cancelQueryBtn" style="display:${app.query.running ? 'inline-block' : 'none'}">■ Hủy</button>
+      <button id="bindQueryTargetBtn" style="display:${queryTargetConnection(app.query) ? 'none' : 'inline-block'}">Gắn kết nối…</button>
       <span class="spacer"></span>
-      <span class="subtle">${esc(app.database || 'chưa chọn database')}${table ? ` · ${esc(table)}` : ''} &nbsp; · &nbsp; Ctrl+Enter / Ctrl+E</span>
+      <span class="subtle query-target-label" id="queryTargetLabel" title="Kết nối và database đích của tab này">${esc(queryTargetLabel(app.query))}${table ? ` · ${esc(table)}` : ''} &nbsp; · &nbsp; Ctrl+Enter / Ctrl+E</span>
     </div>
     <div class="sql-editor-wrap">
       <textarea class="editor" id="sql" spellcheck="false" autocomplete="off" aria-label="SQL editor" aria-autocomplete="list" aria-controls="sqlSuggestions"></textarea>
@@ -3602,6 +4722,7 @@ function renderQueryView() {
   $('#formatSqlBtn').addEventListener('click', formatCurrentSql);
   $('#saveQueryBtn').addEventListener('click', saveQuery);
   $('#cancelQueryBtn').addEventListener('click', cancelQuery);
+  $('#bindQueryTargetBtn').addEventListener('click', bindQueryTargetToActive);
   $('#queryResult').addEventListener('click', (event) => {
     const resultTab = event.target.closest('[data-result-tab]');
     if (resultTab) {
@@ -3642,11 +4763,13 @@ function renderQueryView() {
     }
     const td = event.target.closest('td');
     if (td && !td.classList.contains('muted') && event.detail === 2) {
-      const rawText = td.getAttribute('title') || td.textContent.trim();
-      if (rawText && rawText !== 'NULL') {
-        navigator.clipboard.writeText(rawText);
-        toast('Đã sao chép: ' + rawText.slice(0, 40) + (rawText.length > 40 ? '…' : ''));
-      }
+      inlineEditQueryResultCell(td);
+    }
+  });
+  $('#queryResult').addEventListener('dblclick', (event) => {
+    const td = event.target.closest('td[data-col-idx]');
+    if (td && !td.classList.contains('muted')) {
+      inlineEditQueryResultCell(td);
     }
   });
   $('#queryResult').addEventListener('keydown', (event) => {
@@ -3663,6 +4786,220 @@ function renderQueryView() {
     $(`#queryResult [data-result-tab="${tabs[next].key}"]`)?.click();
   });
   updateQueryButtons();
+}
+
+const queryTablePkCache = new Map();
+
+function getActiveQueryResult() {
+  const result = app.query.result;
+  if (!result) return null;
+  if (result.kind === 'rows') return result;
+  if (result.kind === 'batch') {
+    const tabs = queryBatchTabs(result);
+    const selected = tabs.find((item) => item.key === app.query.resultTab) || tabs.find((item) => item.entry) || tabs[0];
+    return selected?.entry?.result || null;
+  }
+  return null;
+}
+
+async function getQueryColumnPkInfo(result, colIdx) {
+  if (!result || !result.columns || !result.columns[colIdx]) return null;
+  const colMeta = result.columns[colIdx];
+  const targetTable = colMeta.orgTable || colMeta.table || table;
+  if (!targetTable) {
+    return { editable: false, reason: 'Cột này không thuộc bảng dữ liệu cụ thể nào.' };
+  }
+  const targetDb = colMeta.db || app.database;
+  if (!targetDb) {
+    return { editable: false, reason: 'Chưa xác định cơ sở dữ liệu.' };
+  }
+
+  if (/(virtual|stored) generated/i.test(colMeta.extra || '')) {
+    return { editable: false, reason: `Cột "${colMeta.name}" là cột tự động tính toán (generated), không thể sửa.` };
+  }
+
+  // 1. Check if PK flags are present directly in result.columns
+  let pkCols = result.columns
+    .map((c, i) => ({ col: c, index: i }))
+    .filter(({ col }) => ((col.flags & 2) || col.key === 'PRI') && (col.table === colMeta.table || !col.table));
+
+  // 2. If no PK flag found in columns, look up primary keys from table
+  if (!pkCols.length) {
+    let pks = (table === targetTable && app.primaryKey?.length) ? app.primaryKey : null;
+    if (!pks) {
+      const cacheKey = `${app.query?.profileId || ''}.${targetDb}.${targetTable}`;
+      if (queryTablePkCache.has(cacheKey)) {
+        pks = queryTablePkCache.get(cacheKey);
+      } else if (desktop?.db?.columns) {
+        try {
+          const cols = await call(desktop.db.columns(targetDb, targetTable, app.query?.profileId || null));
+          pks = (cols || []).filter((c) => c.key === 'PRI').map((c) => c.name);
+          queryTablePkCache.set(cacheKey, pks);
+        } catch {
+          pks = [];
+        }
+      }
+    }
+    if (pks && pks.length) {
+      pkCols = [];
+      for (const pkName of pks) {
+        const foundIdx = result.columns.findIndex((c) =>
+          (c.table === targetTable || !c.table) &&
+          (c.name.toLowerCase() === pkName.toLowerCase() || (c.orgName && c.orgName.toLowerCase() === pkName.toLowerCase()))
+        );
+        if (foundIdx === -1) {
+          return { editable: false, reason: `Kết quả truy vấn thiếu cột khóa chính "${pkName}" của bảng "${targetTable}".` };
+        }
+        pkCols.push({ col: result.columns[foundIdx], index: foundIdx });
+      }
+    }
+  }
+
+  if (!pkCols.length) {
+    return { editable: false, reason: `Bảng "${targetTable}" không có khóa chính nên không thể sửa trực tiếp.` };
+  }
+
+  return {
+    editable: true,
+    table: targetTable,
+    database: targetDb,
+    colName: colMeta.orgName || colMeta.name,
+    pkCols
+  };
+}
+
+async function inlineEditQueryResultCell(td) {
+  if (!td || td.classList.contains('editing-cell')) return;
+  const colIdx = Number(td.dataset.colIdx);
+  const tr = td.closest('tr[data-query-row]');
+  if (!tr || isNaN(colIdx)) return;
+  const rowIdx = Number(tr.dataset.queryRow);
+  const result = getActiveQueryResult();
+  if (!result || !result.rows || !result.rows[rowIdx]) return;
+
+  const rawText = td.getAttribute('title') || td.textContent.trim();
+  const info = await getQueryColumnPkInfo(result, colIdx);
+
+  if (!info || !info.editable) {
+    if (rawText && rawText !== 'NULL') {
+      try { await navigator.clipboard.writeText(rawText); } catch {}
+      const reasonMsg = info?.reason ? `${info.reason} ` : '';
+      toast(`${reasonMsg}(Đã sao chép giá trị vào bộ nhớ tạm)`);
+    } else if (info?.reason) {
+      toast(info.reason, 'info');
+    }
+    return;
+  }
+
+  const rowData = result.rows[rowIdx];
+  const keys = {};
+  for (const { col, index } of info.pkCols) {
+    const pkName = col.orgName || col.name;
+    keys[pkName] = rowData[index];
+  }
+
+  const colName = info.colName;
+  const originalVal = rowData[colIdx];
+  const originalDisplay = td.innerHTML;
+  td.classList.add('editing-cell');
+
+  const cellHeight = td.offsetHeight || 0;
+  const initialHeight = Math.max(cellHeight, 38);
+
+  const input = document.createElement('textarea');
+  input.className = 'inline-cell-editor';
+  input.value = originalVal === null || originalVal === undefined ? '' : String(originalVal);
+  input.style.minHeight = `${initialHeight}px`;
+  input.style.height = `${initialHeight}px`;
+  input.placeholder = 'Nhập giá trị (gõ NULL để gán null)...';
+  input.title = 'Enter: Lưu · Esc: Hủy · Shift+Enter: Xuống dòng';
+
+  const autoResize = () => {
+    input.style.height = 'auto';
+    const nextHeight = Math.min(Math.max(input.scrollHeight, initialHeight), 220);
+    input.style.height = `${nextHeight}px`;
+  };
+  input.addEventListener('input', autoResize);
+
+  td.innerHTML = '';
+  td.appendChild(input);
+  autoResize();
+  input.focus();
+  input.select();
+
+  let committed = false;
+  const cancel = () => {
+    if (committed) return;
+    committed = true;
+    td.classList.remove('editing-cell');
+    td.innerHTML = originalDisplay;
+  };
+
+  const commit = async () => {
+    if (committed) return;
+    committed = true;
+    const newVal = input.value;
+    const isOriginalNull = originalVal === null || originalVal === undefined;
+    const isUnchanged = (isOriginalNull && newVal === '') || (!isOriginalNull && String(originalVal) === newVal);
+
+    if (isUnchanged) {
+      td.classList.remove('editing-cell');
+      td.innerHTML = originalDisplay;
+      return;
+    }
+
+    let valToSave = newVal;
+    if (newVal.toUpperCase() === 'NULL') {
+      valToSave = null;
+    }
+
+    try {
+      await call(desktop.db.updateRow({
+        profileId: app.query?.profileId || null,
+        database: info.database,
+        table: info.table,
+        keys,
+        values: { [colName]: valToSave }
+      }));
+
+      rowData[colIdx] = valToSave;
+      td.classList.remove('editing-cell');
+      const isNull = valToSave === null || valToSave === undefined;
+      const text = isNull ? 'NULL' : String(valToSave);
+      const shown = text.length > 180 ? `${text.slice(0, 180)}…` : text;
+      td.className = `${isNull ? 'nullcell ' : ''}cell-flash-saved`;
+      td.title = text.slice(0, 500);
+      td.innerHTML = isNull ? '<span class="null-badge">NULL</span>' : esc(shown);
+      setTimeout(() => td.classList.remove('cell-flash-saved'), 1500);
+      toast(`Đã lưu "${colName}" vào bảng ${info.table}`, 'success');
+    } catch (err) {
+      td.classList.remove('editing-cell');
+      td.innerHTML = originalDisplay;
+      toast(err.message || 'Lỗi khi cập nhật dữ liệu', 'error');
+    }
+  };
+
+  input.addEventListener('keydown', (e) => {
+    if ((e.key === 'Enter' && !e.shiftKey) || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) {
+      e.preventDefault();
+      commit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancel();
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      commit().then(() => {
+        const targetCell = e.shiftKey ? td.previousElementSibling : td.nextElementSibling;
+        if (targetCell && targetCell.dataset && targetCell.dataset.colIdx !== undefined) {
+          inlineEditQueryResultCell(targetCell);
+        }
+      });
+    }
+  });
+
+  input.addEventListener('blur', () => {
+    commit();
+  });
 }
 
 function singleQueryResultHtml(result, compact = false) {
@@ -3687,46 +5024,68 @@ function singleQueryResultHtml(result, compact = false) {
     if (typeof left === 'number' && typeof right === 'number') return (left - right) * sortDir;
     return compareText(String(left), String(right)) * sortDir;
   }) : result.rows;
-  const body = rows.map((row, index) => `
-    <tr>
-      <td class="muted">${index + 1}</td>
-      ${row.map((value, colIdx) => {
-        const isNull = value === null || value === undefined;
-        const text = isNull ? 'NULL' : String(value);
-        const shown = text.length > 180 ? `${text.slice(0, 180)}…` : text;
-        let cellDisplay = isNull ? '<span class="null-badge">NULL</span>' : esc(shown);
-        const colMeta = result.columns[colIdx];
-        const colName = colMeta ? colMeta.name.toLowerCase() : '';
-        if (result.isExplain && colName === 'type' && !isNull) {
-          const uType = String(value).toUpperCase();
-          if (uType === 'ALL') cellDisplay = '<span class="explain-badge bad" title="Quét toàn bộ bảng - Cần đánh thêm Index!">ALL ⚠️</span>';
-          else if (uType === 'INDEX') cellDisplay = '<span class="explain-badge warn" title="Quét toàn bộ chỉ mục">index</span>';
-          else if (uType === 'RANGE') cellDisplay = '<span class="explain-badge info" title="Quét trong khoảng">range</span>';
-          else if (['CONST', 'EQ_REF', 'REF'].includes(uType)) cellDisplay = `<span class="explain-badge good">${esc(value)} ✓</span>`;
-        } else if (result.isExplain && colName === 'extra' && !isNull) {
-          cellDisplay = cellDisplay
-            .replace(/Using filesort/g, '<span class="explain-extra-warn">Using filesort</span>')
-            .replace(/Using temporary/g, '<span class="explain-extra-warn">Using temporary</span>');
-        }
-        return `<td class="${isNull ? 'nullcell' : ''}" title="${esc(text.slice(0, 500))}">${cellDisplay}</td>`;
-      }).join('')}
-    </tr>
-  `).join('') || `<tr><td colspan="${result.columns.length + 1}" class="empty">Không có dòng nào.</td></tr>`;
+
+  const hasPk = result.columns && result.columns.some((c) => (c.flags & 2) || c.key === 'PRI');
+  const hasTable = result.columns && result.columns.some((c) => c.table || c.orgTable);
+  const isEditable = !result.isExplain && (hasPk || (hasTable && Boolean(table) && app.primaryKey?.length));
+
+  const body = rows.map((row, index) => {
+    const origIndex = result.rows.indexOf(row);
+    return `
+      <tr data-query-row="${origIndex}">
+        <td class="muted">${index + 1}</td>
+        ${row.map((value, colIdx) => {
+          const isNull = value === null || value === undefined;
+          const text = isNull ? 'NULL' : String(value);
+          const shown = text.length > 180 ? `${text.slice(0, 180)}…` : text;
+          let cellDisplay = isNull ? '<span class="null-badge">NULL</span>' : esc(shown);
+          const colMeta = result.columns[colIdx];
+          const colName = colMeta ? colMeta.name.toLowerCase() : '';
+          if (result.isExplain && colName === 'type' && !isNull) {
+            const uType = String(value).toUpperCase();
+            if (uType === 'ALL') cellDisplay = '<span class="explain-badge bad" title="Quét toàn bộ bảng - Cần đánh thêm Index!">ALL ⚠️</span>';
+            else if (uType === 'INDEX') cellDisplay = '<span class="explain-badge warn" title="Quét toàn bộ chỉ mục">index</span>';
+            else if (uType === 'RANGE') cellDisplay = '<span class="explain-badge info" title="Quét trong khoảng">range</span>';
+            else if (['CONST', 'EQ_REF', 'REF'].includes(uType)) cellDisplay = `<span class="explain-badge good">${esc(value)} ✓</span>`;
+          } else if (result.isExplain && colName === 'extra' && !isNull) {
+            cellDisplay = cellDisplay
+              .replace(/Using filesort/g, '<span class="explain-extra-warn">Using filesort</span>')
+              .replace(/Using temporary/g, '<span class="explain-extra-warn">Using temporary</span>');
+          }
+          return `<td class="${isNull ? 'nullcell' : ''}" data-col="${esc(colMeta?.name || '')}" data-col-idx="${colIdx}" title="${esc(text.slice(0, 500))}">${cellDisplay}</td>`;
+        }).join('')}
+      </tr>
+    `;
+  }).join('') || `<tr><td colspan="${result.columns.length + 1}" class="empty">Không có dòng nào.</td></tr>`;
+
+  const badgeHtml = isEditable
+    ? '<span class="query-mode-badge editable" title="Kết quả có khóa chính — nhấp đúp vào ô để sửa trực tiếp và lưu vào CSDL">✎ Sửa trực tiếp: Bật</span>'
+    : '<span class="query-mode-badge readonly" title="Truy vấn chỉ đọc hoặc thiếu khóa chính (nhấp đúp để sao chép)">Chỉ đọc</span>';
+
   const exportToolbar = `
     <div class="query-grid-toolbar">
       <div class="actions-left">
         <span class="resulttitle">✓ ${result.rows.length} dòng · ${result.durationMs} ms${result.truncated ? ' · giới hạn 5000 dòng' : ''}</span>
+        ${badgeHtml}
       </div>
       <div class="actions-right">
         <button type="button" onclick="exportCurrentResult('csv')" title="Xuất kết quả truy vấn ra CSV">↧ Xuất CSV</button>
         <button type="button" onclick="exportCurrentResult('json')" title="Xuất kết quả truy vấn ra JSON">↧ Xuất JSON</button>
       </div>
     </div>`;
+
   return `
     ${compact ? '' : exportToolbar}
     <div class="tablebox"><table><thead>${header}</thead><tbody>${body}</tbody></table></div>
     ${compact ? `<div class="query-grid-status">${result.rows.length} dòng · ${result.durationMs} ms${result.truncated ? ' · đã giới hạn dữ liệu hiển thị' : ''}</div>` : ''}
     ${!compact && result.truncated ? '<div class="hint">Kết quả hiển thị đã đạt giới hạn dòng. Truy vấn vẫn chạy hết và kết nối vẫn được giữ.</div>' : ''}
+    ${!compact ? `
+      <div class="hint query-grid-hint">
+        ${isEditable
+          ? 'ⓘ <span><strong>Chỉnh sửa trực tiếp</strong> &nbsp; Nhấp đúp vào một ô để sửa giá trị và lưu ngay vào database. Hoặc chọn bảng bên trái để quản lý đầy đủ.</span>'
+          : 'ⓘ <span><strong>Chế độ chỉ đọc</strong> &nbsp; Nhấp đúp vào một ô để sao chép giá trị nhanh.</span>'}
+      </div>
+    ` : ''}
   `;
 }
 
@@ -3837,15 +5196,18 @@ function queryResultHtml() {
   `;
 }
 
-async function refreshQueryMetadata(result) {
+async function refreshQueryMetadata(result, tab = app.query) {
+  if (!tab) return;
   const entries = result.kind === 'batch'
     ? result.results.filter((entry) => entry.ok).map((entry) => entry.result)
     : [result];
   const changedDatabase = typeof result.activeDatabase === 'string'
-    && result.activeDatabase !== app.database;
+    && result.activeDatabase !== (tab.database || null);
+  if (changedDatabase) tab.database = result.activeDatabase;
   if (!changedDatabase && !entries.some((entry) => entry.kind === 'ok')) return;
   invalidateSqlAutocomplete();
-  if (changedDatabase) {
+  const isActiveTarget = Boolean(tab.profileId && app.connection && tab.profileId === app.connection.id);
+  if (changedDatabase && isActiveTarget) {
     app.database = result.activeDatabase;
     table = null;
     app.columns = [];
@@ -3853,10 +5215,14 @@ async function refreshQueryMetadata(result) {
     app.total = null;
     updateChrome();
   }
-  if (!app.connection || !app.database) return;
+  const database = tab.database || (isActiveTarget ? app.database : null);
+  if (!tab.profileId || !database) return;
   try {
-    app.tables = await call(desktop.db.tables(app.database));
-    renderSidebar();
+    const tables = await call(desktop.db.tables(database, tab.profileId));
+    if (isActiveTarget) {
+      app.tables = tables;
+      renderSidebar();
+    }
   } catch {
     // A successful query result must remain visible if metadata refresh fails.
   }
@@ -3872,17 +5238,13 @@ function updateQueryButtons() {
   if (cancel) cancel.style.display = running ? 'inline-block' : 'none';
 }
 
-function saveQuery() {
-  const editor = $('#sql');
-  if (editor) app.query.sql = editor.value;
-  sessionStorage.setItem('query', app.query.sql);
-  persistState();
-  toast('Đã lưu truy vấn trên máy');
-}
-
 async function runQuery() {
   const tab = app.query;
   if (!tab || tab.running) return;
+  if (!desktop) {
+    toast('Ứng dụng desktop chưa sẵn sàng.', 'error');
+    return;
+  }
   if (queryTabs.some((item) => item.running)) {
     toast('Một truy vấn khác đang chạy. Hãy chờ hoặc hủy trước.', 'error');
     return;
@@ -3893,6 +5255,8 @@ async function runQuery() {
     toast('Câu lệnh SQL đang trống.', 'error');
     return;
   }
+  const target = await ensureQueryTarget(tab);
+  if (!target) return;
   let sqlToRun = rawSql;
   let isSelection = false;
   if (editor && editor.selectionStart !== editor.selectionEnd) {
@@ -3903,6 +5267,7 @@ async function runQuery() {
     }
   }
   tab.sql = rawSql;
+  tab.taskId = newQueryTaskId();
   tab.running = true;
   tab.error = null;
   updateQueryButtons();
@@ -3912,8 +5277,15 @@ async function runQuery() {
   }
   try {
     let result;
+    const request = {
+      sql: sqlToRun,
+      timeoutMs: 30000,
+      profileId: target.profileId,
+      database: tab.database || null,
+      taskId: tab.taskId
+    };
     try {
-      result = await call(desktop.db.query({ sql: sqlToRun, timeoutMs: 30000 }));
+      result = await call(desktop.db.query(request));
     } catch (error) {
       if (error.code !== 'CONFIRM_REQUIRED') throw error;
       const confirmed = await confirmAction(
@@ -3925,7 +5297,7 @@ async function runQuery() {
         setStatus('Đã hủy chạy truy vấn');
         return;
       }
-      result = await call(desktop.db.query({ sql: sqlToRun, timeoutMs: 30000, confirmed: true }));
+      result = await call(desktop.db.query({ ...request, confirmed: true }));
     }
     tab.result = result;
     tab.error = null;
@@ -3935,7 +5307,8 @@ async function runQuery() {
     tab.resultView = 'data';
     tab.sortCol = null;
     tab.sortDir = 'ASC';
-    await refreshQueryMetadata(result);
+    await refreshQueryMetadata(result, tab);
+    maybeRefreshObjectMetadata(sqlToRun, tab);
     const batchFailed = result.kind === 'batch' && result.failedCount > 0;
     const historyMessage = result.kind === 'batch'
       ? `${result.succeededCount}/${result.statementCount} câu lệnh`
@@ -3945,7 +5318,9 @@ async function runQuery() {
       ok: !batchFailed,
       at: new Date().toISOString(),
       durationMs: result.durationMs,
-      message: historyMessage
+      message: historyMessage,
+      profileId: target.profileId,
+      database: tab.database || null
     });
     historyRows = historyRows.slice(0, 100);
     if (batchFailed) {
@@ -3965,7 +5340,9 @@ async function runQuery() {
       ok: false,
       at: new Date().toISOString(),
       durationMs: null,
-      message: error.message
+      message: error.message,
+      profileId: target.profileId,
+      database: tab.database || null
     });
     historyRows = historyRows.slice(0, 100);
     setStatus(error.message);
@@ -3976,6 +5353,7 @@ async function runQuery() {
     }
   } finally {
     tab.running = false;
+    tab.taskId = null;
     updateQueryButtons();
     renderQueryTabs();
     if (app.query === tab && $('#queryResult')) $('#queryResult').innerHTML = queryResultHtml();
@@ -3984,22 +5362,33 @@ async function runQuery() {
 }
 
 async function cancelQuery() {
+  const tab = app.query;
+  if (!tab || !tab.running) {
+    toast('Không có truy vấn nào đang chạy.');
+    return;
+  }
   try {
-    await desktop.db.cancelQuery();
-    toast('Đã yêu cầu hủy truy vấn');
+    const result = await call(desktop.db.cancelQuery(tab.profileId || null, tab.taskId || null));
+    if (result && result.canceled) toast('Đã yêu cầu hủy truy vấn');
+    else toast('Truy vấn đã dừng trước khi yêu cầu hủy được xử lý.');
   } catch (error) {
     toast(error.message, 'error');
   }
 }
 
 function renderHistoryView() {
+  const connectionName = (profileId) => {
+    if (!profileId) return 'không rõ connection';
+    const connection = app.connections.find((item) => item.id === profileId);
+    return connection ? connection.name : 'connection đã xóa';
+  };
   $('#workspace').innerHTML = `
     <div class="toolbar"><strong>${historyRows.length} truy vấn</strong><span class="spacer"></span><button id="clearHistory">⌫ Xóa lịch sử</button></div>
     ${historyRows.map((entry, index) => `
       <div class="historyrow" data-history="${index}">
         <span class="badge ${entry.ok ? '' : 'pending'}">${entry.ok ? 'OK' : 'Lỗi'}</span>
         <span class="mono history-sql">${esc(entry.sql.slice(0, 300))}</span>
-        <span class="muted">${entry.durationMs === null ? '' : `${entry.durationMs} ms`} ${entry.at ? esc(new Date(entry.at).toLocaleString('vi-VN')) : ''}</span>
+        <span class="muted">${esc(connectionName(entry.profileId))} · ${esc(entry.database || '—')} · ${entry.durationMs === null ? '' : `${entry.durationMs} ms`} ${entry.at ? esc(new Date(entry.at).toLocaleString('vi-VN')) : ''}</span>
       </div>
     `).join('') || '<div class="empty">Chưa có truy vấn. Mở SQL Editor để bắt đầu.</div>'}
   `;
@@ -4007,7 +5396,7 @@ function renderHistoryView() {
     row.addEventListener('click', () => {
       const entry = historyRows[Number(row.dataset.history)];
       if (!entry) return;
-      newQuery(entry.sql);
+      newQuery(entry.sql, { profileId: entry.profileId, database: entry.database });
     });
   });
   $('#clearHistory').addEventListener('click', () => {
@@ -4022,7 +5411,7 @@ async function editRow(index) {
   let columns = app.columns;
   if (!columns.length) {
     try {
-      columns = await call(desktop.db.columns(app.database, table));
+      columns = await call(desktop.db.columns(app.database, table, app.connection?.id || null));
       app.columns = columns;
       app.primaryKey = columns.filter((column) => column.key === 'PRI').map((column) => column.name);
     } catch (error) {
@@ -4094,10 +5483,21 @@ async function editRow(index) {
           if (app.primaryKey.includes(name)) continue;
           changes[name] = value;
         }
-        await call(desktop.db.updateRow({ database: app.database, table, keys, values: changes }));
+        await call(desktop.db.updateRow({
+          profileId: app.connection?.id || null,
+          database: app.database,
+          table,
+          keys,
+          values: changes
+        }));
         toast('Đã cập nhật bản ghi');
       } else {
-        await call(desktop.db.insertRow({ database: app.database, table, values }));
+        await call(desktop.db.insertRow({
+          profileId: app.connection?.id || null,
+          database: app.database,
+          table,
+          values
+        }));
         toast('Đã thêm bản ghi');
       }
       closeModal();
@@ -4126,7 +5526,12 @@ async function deleteSelectedRows() {
     return Object.fromEntries(app.primaryKey.map((name) => [name, row[name]]));
   });
   try {
-    const result = await call(desktop.db.deleteRows({ database: app.database, table, keysList }));
+    const result = await call(desktop.db.deleteRows({
+      profileId: app.connection?.id || null,
+      database: app.database,
+      table,
+      keysList
+    }));
     toast(`Đã xóa ${result.affectedRows} bản ghi`);
     await loadData();
   } catch (error) {
@@ -4660,15 +6065,17 @@ function connection(profile) {
       </div>
       <label class="checkline"><input type="checkbox" id="connSsl" ${p.ssl?.enabled ? 'checked' : ''}> Dùng SSL/TLS</label>
       <div id="sslFields" class="optionbox ${p.ssl?.enabled ? '' : 'hidden'}">
-        <label class="checkline"><input type="checkbox" id="connSslVerify" ${p.ssl?.verify ? 'checked' : ''}> Xác thực chứng chỉ (mặc định chấp nhận cert tự ký như Navicat)</label>
-        <label>CA cert (đường dẫn)</label><input id="connSslCa" value="${esc(p.ssl?.ca || '')}">
+        <label class="checkline"><input type="checkbox" id="connSslVerify" ${p.ssl?.verify ? 'checked' : ''}> Xác thực chứng chỉ máy chủ</label>
+        <label>CA cert (tùy chọn, nếu chứng chỉ máy chủ không được hệ thống tin cậy)</label><input id="connSslCa" value="${esc(p.ssl?.ca || '')}">
         <div class="formrow">
-          <div><label>Client cert (đường dẫn)</label><input id="connSslCert" value="${esc(p.ssl?.cert || '')}"></div>
-          <div><label>Client key (đường dẫn)</label><input id="connSslKey" value="${esc(p.ssl?.key || '')}"></div>
+          <div><label>Client cert (chỉ khi máy chủ yêu cầu)</label><input id="connSslCert" value="${esc(p.ssl?.cert || '')}"></div>
+          <div><label>Client key (chỉ khi máy chủ yêu cầu)</label><input id="connSslKey" value="${esc(p.ssl?.key || '')}"></div>
         </div>
         <label>Client key passphrase</label>
         <input id="connSslPassphrase" type="password" placeholder="${savedSslPassphrase ? 'Để trống = giữ passphrase đã lưu' : 'Passphrase (nếu có)'}">
       </div>
+      <label class="checkline"><input type="checkbox" id="connCleartextPassword" ${p.allowCleartextPassword ? 'checked' : ''}> Cho phép xác thực mysql_clear_password</label>
+      <div class="muted" style="font-size:11px;margin:0 0 12px 22px">Chỉ dùng khi máy chủ yêu cầu. Cần TLS đã xác thực hoặc SSH tunnel tới MySQL trên chính máy SSH (MySQL host localhost/127.0.0.1/::1).</div>
       <label class="checkline"><input type="checkbox" id="connSsh" ${p.ssh?.enabled ? 'checked' : ''}> Kết nối qua SSH tunnel</label>
       <div id="sshFields" class="optionbox ${p.ssh?.enabled ? '' : 'hidden'}">
         <div class="formrow">
@@ -4689,6 +6096,7 @@ function connection(profile) {
           <label>Private key (đường dẫn)</label><input id="sshKeyPath" value="${esc(p.ssh?.privateKeyPath || '')}" placeholder="/home/user/.ssh/id_rsa">
           <label>Passphrase</label><input id="sshPassphrase" type="password" placeholder="${savedPassphrase ? 'Để trống = giữ passphrase đã lưu' : 'Passphrase (nếu có)'}">
         </div>
+        <div class="muted" style="font-size:11px">MySQL host ở trên là đích nhìn từ máy SSH. SSH host là máy trung gian SqlPro kết nối tới. Host key SSH được xác minh SHA-256 ở lần kết nối đầu tiên; thay đổi khóa sẽ bị chặn cho tới khi bạn xác nhận.</div>
       </div>
       <div class="successbox hidden" id="connSuccess"></div>
       <div class="errorbox hidden" id="connError"></div>
@@ -4758,6 +6166,12 @@ function connection(profile) {
   $('#sshAuthMethod').addEventListener('change', toggleOptions);
 
   const readForm = () => {
+    const mysqlHost = $('#connHost').value.trim().toLowerCase();
+    const sshToLocalMysql = $('#connSsh').checked && ['localhost', '127.0.0.1', '::1'].includes(mysqlHost);
+    if ($('#connCleartextPassword').checked
+      && !(($('#connSsl').checked && $('#connSslVerify').checked) || sshToLocalMysql)) {
+      throw new Error('mysql_clear_password yêu cầu TLS đã xác thực hoặc SSH tunnel tới MySQL trên chính máy SSH (MySQL host localhost/127.0.0.1/::1).');
+    }
     const payload = {
       id: existing ? existing.id : undefined,
       workspaceId: $('#connWorkspace').value,
@@ -4767,6 +6181,7 @@ function connection(profile) {
       port: Number($('#connPort').value),
       user: $('#connUser').value,
       database: $('#connDatabase').value,
+      allowCleartextPassword: $('#connCleartextPassword').checked,
       ssl: {
         enabled: $('#connSsl').checked,
         verify: $('#connSslVerify').checked,
@@ -4823,8 +6238,9 @@ function connection(profile) {
     const originalText = submitButton.textContent;
     submitButton.textContent = 'Đang kiểm tra kết nối…';
 
-    const payload = readForm();
+    let payload;
     try {
+      payload = readForm();
       // 1. Kiểm tra kết nối trước khi lưu
       await call(desktop.connections.test(payload));
 
@@ -4836,7 +6252,7 @@ function connection(profile) {
       await refreshConnections();
       await connectTo(saved.id);
     } catch (error) {
-      showError(`Không thể kết nối đến cơ sở dữ liệu:\n${error.message}`, true, payload);
+      showError(`Không thể kết nối đến cơ sở dữ liệu:\n${error.message}`, Boolean(payload), payload);
     } finally {
       submitButton.disabled = false;
       testButton.disabled = false;
@@ -4915,6 +6331,7 @@ async function importNavicat() {
   try {
     const result = await call(desktop.connections.importNavicat(app.activeWorkspaceId));
     if (result.canceled) return;
+    if (result.sessionsClosed) await disconnect();
     await refreshWorkspaces();
     await refreshConnections();
     renderSidebar();
@@ -4932,9 +6349,13 @@ async function disconnect() {
   if (!desktop) return;
   invalidateSqlAutocomplete();
   try {
-    await call(desktop.db.disconnect());
+    await call(desktop.db.disconnect(app.connection?.id || null));
   } catch {
     // ignore
+  }
+  if (app.connection) {
+    openConnectionIds.delete(app.connection.id);
+    connectionViews.delete(app.connection.id);
   }
   app.connection = null;
   app.database = null;
@@ -4942,6 +6363,7 @@ async function disconnect() {
   app.tables = [];
   app.columns = [];
   app.rows = [];
+  resetObjectMetadata();
   table = null;
   setConnectionState('idle');
   renderSidebar();
@@ -4955,20 +6377,23 @@ function backupDatabase() {
     toast('Chọn một database trước khi sao lưu.', 'error');
     return;
   }
-  const objects = app.tables;
+  const profileId = app.connection.id;
+  const database = app.database;
+  const objects = app.tables || [];
   if (!objects.length) {
     toast('Database không có bảng hoặc view nào để sao lưu.', 'error');
     return;
   }
   modal(`
     <h2>Sao lưu database</h2>
-    <p><strong>${esc(app.database)}</strong> · ${objects.length} đối tượng</p>
-    <label class="checkline"><input type="checkbox" id="backupStructure" checked> Cấu trúc bảng và view (CREATE)</label>
+    <p><strong>${esc(database)}</strong> · ${objects.length} đối tượng</p>
+    <label class="checkline"><input type="checkbox" id="backupStructure" checked> Cấu trúc bảng, view, routine và event (CREATE)</label>
     <label class="checkline"><input type="checkbox" id="backupData" checked> Dữ liệu (INSERT)</label>
-    <label class="checkline"><input type="checkbox" id="backupDrop"> Thêm DROP TABLE/VIEW/TRIGGER IF EXISTS</label>
+    <label class="checkline"><input type="checkbox" id="backupDrop"> Thêm DROP TABLE/VIEW/TRIGGER/ROUTINE/EVENT IF EXISTS</label>
+    <label class="checkline"><input type="checkbox" id="backupStripDefiner"> Bỏ DEFINER khỏi view/routine/event để phục hồi bằng user hiện tại</label>
     <label>Đối tượng cần sao lưu</label>
     <div class="optionbox">
-      <label class="checkline"><input type="checkbox" id="backupAll" checked> Chọn tất cả</label>
+      <label class="checkline"><input type="checkbox" id="backupAll" checked> Chọn tất cả bảng và view</label>
       <div class="backup-tables">
         ${objects.map((entry) => `
           <label class="checkline">
@@ -4978,10 +6403,20 @@ function backupDatabase() {
         `).join('')}
       </div>
     </div>
-    <div class="hint">Tệp .sql có thể phục hồi bằng SqlPro, mysql client hoặc Navicat. Giới hạn 1 GB mỗi lần.</div>
+    <div class="optionbox">
+      <label class="checkline"><input type="checkbox" id="backupAllRoutines" checked disabled> Chọn tất cả routine và function</label>
+      <div class="backup-tables" id="backupRoutineList"><span class="subtle">Đang đọc routine và function…</span></div>
+      <div class="errorbox" id="backupRoutineError" hidden></div>
+    </div>
+    <div class="optionbox">
+      <label class="checkline"><input type="checkbox" id="backupAllEvents" checked disabled> Chọn tất cả event</label>
+      <div class="backup-tables" id="backupEventList"><span class="subtle">Đang đọc event…</span></div>
+      <div class="errorbox" id="backupEventError" hidden></div>
+    </div>
+    <div class="hint">SqlPro tự lưu tệp .sql vào thư mục backup của ứng dụng và hiển thị trong nhánh Backups. Dung lượng phụ thuộc vào ổ đĩa và máy chủ MySQL.</div>
     <div class="actions">
       <button onclick="closeModal()">Hủy</button>
-      <button class="primary" id="backupGo">Chọn nơi lưu…</button>
+      <button class="primary" id="backupGo">Tạo bản sao lưu</button>
     </div>
   `, true);
 
@@ -5000,10 +6435,58 @@ function backupDatabase() {
     $('#backupDrop').disabled = !$('#backupStructure').checked;
   });
 
+  let objectLoadPromise = Promise.resolve();
+  const loadGroup = (kind, listSelector, errorSelector, emptyLabel) => {
+    if (!$(listSelector)) return Promise.resolve();
+    const api = kind === 'routine' ? desktop.db.routines : desktop.db.events;
+    return call(api(database, profileId))
+      .then((entries) => {
+        if (!$(listSelector)) return;
+        if (!entries.length) {
+          $(listSelector).innerHTML = `<span class="subtle">${emptyLabel}</span>`;
+          return;
+        }
+        $(listSelector).innerHTML = entries.map((entry) => {
+          const value = kind === 'routine' ? `${entry.type}:${entry.name}` : entry.name;
+          const icon = kind === 'routine' ? (entry.type === 'function' ? 'ƒ' : '⚙') : '◷';
+          const suffix = kind === 'routine' ? (entry.type === 'function' ? 'function' : 'procedure') : 'event';
+          return `
+            <label class="checkline">
+              <input type="checkbox" class="backup-${kind}" value="${esc(value)}" checked>
+              <span>${icon} ${esc(entry.name)} <span class="tree-kind">${suffix}</span></span>
+            </label>`;
+        }).join('');
+        const allBox = $(kind === 'routine' ? '#backupAllRoutines' : '#backupAllEvents');
+        const groupBoxes = [...document.querySelectorAll(`.backup-${kind}`)];
+        const syncGroup = () => {
+          const checked = groupBoxes.filter((box) => box.checked).length;
+          allBox.checked = checked === groupBoxes.length;
+          allBox.indeterminate = checked > 0 && checked < groupBoxes.length;
+        };
+        allBox.disabled = false;
+        allBox.checked = true;
+        allBox.addEventListener('change', () => groupBoxes.forEach((box) => { box.checked = allBox.checked; }));
+        groupBoxes.forEach((box) => box.addEventListener('change', syncGroup));
+      })
+      .catch((error) => {
+        if (!$(errorSelector) || !$(listSelector)) return;
+        $(listSelector).innerHTML = '';
+        $(errorSelector).hidden = false;
+        $(errorSelector).textContent = `Không đọc được ${kind === 'routine' ? 'routine/function' : 'event'}: ${error.message}. Các đối tượng này sẽ không được sao lưu.`;
+      });
+  };
+  objectLoadPromise = Promise.all([
+    loadGroup('routine', '#backupRoutineList', '#backupRoutineError', 'Database không có routine hoặc function.'),
+    loadGroup('event', '#backupEventList', '#backupEventError', 'Database không có event.')
+  ]);
+
   $('#backupGo').addEventListener('click', async () => {
-    const selected = boxes.filter((box) => box.checked).map((box) => box.value);
-    if (!selected.length) {
-      toast('Chọn ít nhất một bảng hoặc view.', 'error');
+    await objectLoadPromise;
+    const selectedTables = boxes.filter((box) => box.checked).map((box) => box.value);
+    const selectedRoutines = [...document.querySelectorAll('.backup-routine:checked')].map((box) => box.value);
+    const selectedEvents = [...document.querySelectorAll('.backup-event:checked')].map((box) => box.value);
+    if (!selectedTables.length && !selectedRoutines.length && !selectedEvents.length) {
+      toast('Chọn ít nhất một bảng, view, routine hoặc event.', 'error');
       return;
     }
     const includeStructure = $('#backupStructure').checked;
@@ -5012,96 +6495,938 @@ function backupDatabase() {
       toast('Hãy chọn cấu trúc hoặc dữ liệu để sao lưu.', 'error');
       return;
     }
+    if (!includeStructure && (selectedRoutines.length || selectedEvents.length)) {
+      toast('Routine và event cần bật tùy chọn cấu trúc.', 'error');
+      return;
+    }
+    const taskId = newTransferTaskId('backup');
     const payload = {
-      database: app.database,
-      tables: selected,
+      profileId,
+      database,
+      taskId,
+      tables: selectedTables,
+      routines: selectedRoutines,
+      events: selectedEvents,
       includeStructure,
       includeData,
-      dropTables: includeStructure && $('#backupDrop').checked
+      dropTables: includeStructure && $('#backupDrop').checked,
+      stripDefiner: $('#backupStripDefiner').checked
     };
     closeModal();
+    showTransferProgress('backup', database, { taskId, profileId });
     setStatus('Đang sao lưu…');
     try {
       const result = await call(desktop.db.backup(payload));
+      activeTransfer = null;
       if (result.canceled) {
+        closeModal();
         setStatus('Đã hủy sao lưu');
+        modal(`
+          <h2>Đã hủy sao lưu</h2>
+          <p>Tệp tạm đã được xóa. Trước khi hủy, SqlPro đã đọc ${Number(result.rows || 0).toLocaleString()} dòng và ${Number(result.objects || 0).toLocaleString()} đối tượng (${formatBytes(result.bytes || 0)}).</p>
+          <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
+        `);
         return;
       }
-      const parts = [`${result.tables} bảng`, `${result.views} view`];
+      const parts = [];
+      if (result.tables) parts.push(`${result.tables} bảng`);
+      if (result.views) parts.push(`${result.views} view`);
       if (result.triggers) parts.push(`${result.triggers} trigger`);
-      toast(`Đã sao lưu ${parts.join(', ')} (${result.rows} dòng) · ${formatBytes(result.bytes)}`);
+      if (result.procedures) parts.push(`${result.procedures} procedure`);
+      if (result.functions) parts.push(`${result.functions} function`);
+      if (result.events) parts.push(`${result.events} event`);
+      await refreshBackupList(payload.database, profileId);
+      openTreeGroups.add('backups');
+      renderSidebar();
+      modal(`
+        <h2>Sao lưu hoàn tất</h2>
+        <p>Đã sao lưu ${parts.join(', ')} (${Number(result.rows || 0).toLocaleString()} dòng) · ${formatBytes(result.bytes)}.</p>
+        <label>Đường dẫn tệp đã lưu</label>
+        <input value="${esc(result.filePath)}" readonly aria-label="Đường dẫn tệp sao lưu">
+        <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
+      `);
       setStatus(`Sao lưu hoàn tất • ${formatBytes(result.bytes)}`);
     } catch (error) {
-      toast(error.message, 'error');
+      activeTransfer = null;
+      modal(`
+        <h2>Sao lưu thất bại</h2>
+        <div class="errorbox">${esc(error.message)}</div>
+        <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
+      `);
       setStatus('Sao lưu thất bại');
     }
   });
 }
 
-function restoreDatabase() {
+function restoreDatabase(backupId = null) {
   if (!desktop) return;
   if (!app.connection || !app.database) {
-    toast('Chọn database đích trước khi phục hồi.', 'error');
+    toast('Chọn database trước khi phục hồi.', 'error');
     return;
   }
+  const sourceDb = app.database;
+  const sourceProfileId = app.connection.id;
+  const dbOptions = (app.databases || []).map((db) => `
+    <option value="${esc(db)}" ${db === sourceDb ? 'selected' : ''}>${esc(db)}${db === sourceDb ? ' (Hiện tại)' : ''}</option>
+  `).join('');
+
   modal(`
     <h2>Phục hồi database</h2>
-    <p>Đích: <strong>${esc(app.database)}</strong></p>
-    <label class="checkline"><input type="checkbox" id="restoreDrop"> Xóa bảng/view/trigger trùng tên trước khi tạo lại</label>
+    <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; margin: 10px 0;">
+      <div>Nguồn: <strong>${esc(sourceDb)}</strong>${backupId ? ` · Bản sao lưu <code>${esc(backupId.slice(0, 14))}</code>` : ' · Tệp .sql bên ngoài'}</div>
+    </div>
+    <label for="restoreTargetDb" style="display:block; margin: 12px 0 4px; font-weight: 600;">Database đích:</label>
+    <select id="restoreTargetDb" style="width: 100%;">
+      ${dbOptions}
+      <option value="__NEW__">＋ Tạo database mới…</option>
+    </select>
+    <div id="restoreNewDbBox" style="display:none; margin-top: 8px;">
+      <input id="restoreNewDbName" placeholder="Tên database mới (ví dụ: ${esc(sourceDb)}_copy)" style="width: 100%;">
+    </div>
+    <div style="margin-top: 12px; display: flex; flex-direction: column; gap: 6px;">
+      <label class="checkline"><input type="checkbox" id="restoreDrop"> Xóa bảng/view/trigger/routine/event trùng tên trước khi tạo lại</label>
+      <label class="checkline" id="restoreCopyCatalogLine" style="display:none;">
+        <input type="checkbox" id="restoreCopyCatalog" checked> Lưu bản sao lưu này vào danh mục của Database đích
+      </label>
+    </div>
     <div class="hint">Tệp .sql được chạy tuần tự vào database đích. Các lệnh USE và CREATE/DROP DATABASE trong tệp sẽ bị bỏ qua; khóa ngoại tạm thời tắt trong lúc phục hồi.</div>
     <div class="hint"><strong>Chỉ phục hồi tệp bạn tin cậy</strong> — nội dung tệp có thể thay đổi dữ liệu.</div>
     <div class="actions">
       <button onclick="closeModal()">Hủy</button>
-      <button class="primary" id="restoreGo">Chọn tệp .sql…</button>
+      <button class="primary" id="restoreGo">${backupId ? 'Phục hồi bản này' : 'Chọn tệp .sql…'}</button>
     </div>
   `);
 
+  const targetSelect = $('#restoreTargetDb');
+  const newDbBox = $('#restoreNewDbBox');
+  const copyCatalogLine = $('#restoreCopyCatalogLine');
+  const restoreGoBtn = $('#restoreGo');
+
+  const updateTargetUi = () => {
+    const isNew = targetSelect.value === '__NEW__';
+    newDbBox.style.display = isNew ? 'block' : 'none';
+    const isDifferent = isNew || targetSelect.value !== sourceDb;
+    copyCatalogLine.style.display = (isDifferent && backupId) ? 'flex' : 'none';
+    if (isDifferent) {
+      restoreGoBtn.textContent = isNew ? 'Tạo mới & Phục hồi' : `Phục hồi sang ${targetSelect.value}`;
+    } else {
+      restoreGoBtn.textContent = backupId ? 'Phục hồi bản này' : 'Chọn tệp .sql…';
+    }
+  };
+  targetSelect.addEventListener('change', updateTargetUi);
+
   $('#restoreGo').addEventListener('click', async () => {
+    const isNew = targetSelect.value === '__NEW__';
+    const targetDb = isNew ? ($('#restoreNewDbName').value || '').trim() : targetSelect.value;
+    if (!targetDb) {
+      toast('Hãy chọn hoặc nhập tên database đích.', 'error');
+      return;
+    }
     const dropExisting = $('#restoreDrop').checked;
+    const shouldCopyCatalog = Boolean(backupId && targetDb !== sourceDb && $('#restoreCopyCatalog')?.checked);
+
     const confirmed = await confirmAction(
-      'Phục hồi database?',
-      `Tệp SQL sẽ được chạy vào "${app.database}"${dropExisting ? ', xóa các bảng/view/trigger trùng tên trước khi tạo lại' : ''}. Thao tác này có thể thay đổi dữ liệu hiện có.`,
+      `Phục hồi vào "${targetDb}"?`,
+      `Tệp SQL từ "${sourceDb}" sẽ được chạy vào "${targetDb}"${dropExisting ? ', xóa các bảng/view/trigger/routine/event trùng tên trước khi tạo lại' : ''}. Thao tác này có thể thay đổi dữ liệu hiện có.`,
       'Tiếp tục'
     );
     if (!confirmed) return;
+    const taskId = newTransferTaskId('restore');
     closeModal();
-    setStatus('Đang phục hồi…');
+    showTransferProgress('restore', targetDb, { taskId, profileId: sourceProfileId });
+    setStatus(`Đang phục hồi vào ${targetDb}…`);
     try {
-      const result = await call(desktop.db.restore({ database: app.database, dropExisting }));
+      const result = await call(desktop.db.restore({
+        profileId: sourceProfileId,
+        taskId,
+        sourceDatabase: sourceDb,
+        database: targetDb,
+        backupId,
+        dropExisting,
+        createDatabaseIfNotExists: isNew || !app.databases.includes(targetDb),
+        copyToTargetCatalog: shouldCopyCatalog
+      }));
+      activeTransfer = null;
       if (result.canceled) {
+        closeModal();
         setStatus('Đã hủy phục hồi');
+        modal(`
+          <h2>Đã hủy phục hồi</h2>
+          <p>Đã chạy ${Number(result.executed || 0).toLocaleString()} câu lệnh trước khi hủy. Các thay đổi đã áp dụng <strong>không được tự động hoàn tác</strong>.</p>
+          <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
+        `);
         return;
       }
+      closeModal();
       toast(`Đã phục hồi ${result.statements} câu lệnh${result.skipped ? `, bỏ qua ${result.skipped}` : ''}`);
       setStatus(`Phục hồi hoàn tất • ${result.statements} câu lệnh`);
-      const current = table;
-      try {
-        app.tables = await call(desktop.db.tables(app.database));
-      } catch {
-        // keep the previous list if metadata cannot be refreshed
-      }
-      renderSidebar();
-      if (current && app.tables.some((entry) => entry.name === current)) {
-        table = current;
-        await loadData();
-      } else {
-        table = null;
-        app.rows = [];
-        app.columns = [];
-        await view('data');
+      if (app.connection?.id === sourceProfileId) {
+        await refreshDatabases();
+        if (targetDb !== sourceDb) {
+          await selectDatabase(targetDb);
+        } else {
+          const current = table;
+          try {
+            app.tables = await call(desktop.db.tables(app.database, sourceProfileId));
+          } catch {
+            // keep the previous list if metadata cannot be refreshed
+          }
+          renderSidebar();
+          if (current && app.tables.some((entry) => entry.name === current)) {
+            table = current;
+            await loadData();
+          } else {
+            table = null;
+            app.rows = [];
+            app.columns = [];
+            await view('data');
+          }
+        }
       }
       persistState();
+      modal(`
+        <h2>Phục hồi hoàn tất</h2>
+        <p>Đã chạy ${result.statements} câu lệnh${result.skipped ? `, bỏ qua ${result.skipped}` : ''} vào <strong>${esc(targetDb)}</strong>.</p>
+        ${result.copiedBackup ? `<p class="subtle">Đã lưu bản sao lưu vào danh mục của <strong>${esc(targetDb)}</strong>.</p>` : ''}
+        <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
+      `);
     } catch (error) {
-      toast(error.message, 'error');
+      activeTransfer = null;
+      const partial = error.partial;
+      modal(`
+        <h2>Phục hồi thất bại</h2>
+        <div class="errorbox">${esc(error.message)}</div>
+        ${partial ? `<p class="hint">Đã chạy ${Number(partial.executed || 0).toLocaleString()} câu lệnh${partial.skipped ? `, bỏ qua ${partial.skipped}` : ''} trước khi lỗi. Các thay đổi đã áp dụng không được tự động hoàn tác.</p>` : '<div class="hint">Một số câu lệnh trước lỗi có thể đã được áp dụng. Kiểm tra database trước khi chạy lại tệp.</div>'}
+        <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
+      `);
       setStatus('Phục hồi thất bại');
-      try {
-        app.tables = await call(desktop.db.tables(app.database));
-        renderSidebar();
-      } catch {
-        // ignore refresh failure
+      if (app.connection?.id === sourceProfileId) {
+        try {
+          app.tables = await call(desktop.db.tables(app.database, sourceProfileId));
+          renderSidebar();
+        } catch {
+          // ignore refresh failure
+        }
       }
     }
   });
+}
+
+function copySelectedBackupToClipboard(backupId = app.selectedBackupId, sourceDb = app.database, sourceConn = app.connection) {
+  if (!backupId) {
+    toast('Chưa chọn bản sao lưu nào để sao chép.', 'error');
+    return;
+  }
+  const backup = (app.backups || []).find((b) => b.id === backupId);
+  const connObj = sourceConn || app.connection;
+  const connName = connObj?.name || connObj?.host || 'Kết nối hiện tại';
+  const connId = connObj?.id || null;
+  const dbName = sourceDb || app.database;
+
+  app.copiedBackup = {
+    id: backupId,
+    name: backup?.name || backupId.slice(0, 14),
+    bytes: backup?.bytes || 0,
+    createdAt: backup?.createdAt || new Date().toISOString(),
+    sourceConnectionId: connId,
+    sourceConnectionName: connName,
+    sourceDatabase: dbName
+  };
+
+  renderSidebar();
+  if (mode === 'backups') renderBackupsView();
+  toast(`Đã sao chép bản sao lưu "${app.copiedBackup.name}" (Ctrl+C). Chọn Database khác rồi nhấn Ctrl+V để dán.`);
+}
+
+async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
+  if (!desktop) return;
+  const copied = app.copiedBackup;
+  if (!copied) {
+    toast('Chưa có bản sao lưu nào được sao chép. Hãy chọn 1 bản sao lưu và nhấn Ctrl+C trước.', 'error');
+    return;
+  }
+
+  const allConnections = (app.connections && app.connections.length) ? app.connections : (app.connection ? [app.connection] : []);
+  let selectedConnId = targetConnectionId || app.connection?.id || (allConnections[0] ? allConnections[0].id : null);
+  let selectedDb = targetDb || (selectedConnId === app.connection?.id ? app.database : '') || '';
+
+  let targetDatabases = [];
+  try {
+    if (selectedConnId === app.connection?.id && app.databases && app.databases.length) {
+      targetDatabases = app.databases;
+    } else if (selectedConnId) {
+      targetDatabases = await call(desktop.db.databases(selectedConnId));
+    }
+  } catch {
+    targetDatabases = app.databases || [];
+  }
+
+  const renderDbOptions = (dbs, currDb) => {
+    const list = dbs.map((d) => `<option value="${esc(d)}" ${d === currDb ? 'selected' : ''}>${esc(d)}${d === copied.sourceDatabase && selectedConnId === copied.sourceConnectionId ? ' (Nguồn)' : ''}</option>`);
+    return [
+      `<option value="" ${!currDb ? 'selected' : ''} disabled>-- Chọn Database đích --</option>`,
+      ...list,
+      `<option value="__NEW__">＋ Tạo database mới…</option>`
+    ].join('');
+  };
+
+  const connOptions = allConnections.map((c) => `
+    <option value="${esc(c.id)}" ${c.id === selectedConnId ? 'selected' : ''}>
+      ${esc(c.name || c.host || 'Kết nối')} (${esc(c.host || 'localhost')}${c.port ? `:${c.port}` : ''})
+    </option>
+  `).join('');
+
+  modal(`
+    <h2>Dán bản sao lưu (Ctrl+V)</h2>
+    <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px; margin: 10px 0; font-size: 11.5px; line-height: 1.6;">
+      <div>Nguồn: <strong>${esc(copied.sourceConnectionName)}</strong> › <strong>${esc(copied.sourceDatabase)}</strong></div>
+      <div>Bản sao lưu: <code style="font-family: monospace; color: #087f72; font-weight: 600;">🕒 ${esc(copied.name)}</code> (${formatBytes(copied.bytes)})</div>
+    </div>
+
+    ${allConnections.length > 1 ? `
+    <label for="pasteTargetConnection" style="display:block; margin: 12px 0 4px; font-weight: 600;">Kết nối đích (Server / Connection):</label>
+    <select id="pasteTargetConnection" style="width: 100%;">
+      ${connOptions}
+    </select>
+    ` : ''}
+
+    <label for="pasteTargetDb" style="display:block; margin: 12px 0 4px; font-weight: 600;">Database đích:</label>
+    <select id="pasteTargetDb" style="width: 100%;">
+      ${renderDbOptions(targetDatabases, selectedDb)}
+    </select>
+    <div id="pasteNewDbBox" style="display:none; margin-top: 8px;">
+      <input id="pasteNewDbName" placeholder="Tên database mới (ví dụ: ${esc(copied.sourceDatabase)}_copy)" style="width: 100%;">
+    </div>
+
+    <div style="margin-top: 14px; display: flex; flex-direction: column; gap: 8px;">
+      <label class="checkline">
+        <input type="checkbox" id="pasteActionRestore" checked>
+        <span><strong>Khôi phục cấu trúc và dữ liệu vào Database đích</strong></span>
+      </label>
+      <label class="checkline" style="margin-left: 22px;">
+        <input type="checkbox" id="pasteActionDrop">
+        <span>Xóa bảng/view/trigger/routine/event trùng tên nếu đã tồn tại ở DB đích</span>
+      </label>
+      <label class="checkline">
+        <input type="checkbox" id="pasteActionCatalog" checked>
+        <span><strong>Lưu bản sao lưu vào danh mục của Database đích</strong> (Hiển thị trong Backups của DB đích)</span>
+      </label>
+    </div>
+
+    <div class="hint" style="margin-top: 12px;">Dữ liệu sẽ được sao chép trực tiếp từ bản backup của <strong>${esc(copied.sourceConnectionName)}</strong> sang máy chủ và database đích đã chọn.</div>
+
+    <div class="actions">
+      <button onclick="closeModal()">Hủy</button>
+      <button class="primary" id="pasteGoBtn">Dán ngay</button>
+    </div>
+  `);
+
+  const connSelect = $('#pasteTargetConnection');
+  const dbSelect = $('#pasteTargetDb');
+  const newDbBox = $('#pasteNewDbBox');
+  const actionRestore = $('#pasteActionRestore');
+  const actionDrop = $('#pasteActionDrop');
+
+  if (connSelect) {
+    connSelect.addEventListener('change', async () => {
+      selectedConnId = connSelect.value;
+      dbSelect.disabled = true;
+      dbSelect.innerHTML = '<option>Đang tải danh sách database…</option>';
+      try {
+        if (selectedConnId === app.connection?.id && app.databases && app.databases.length) {
+          targetDatabases = app.databases;
+        } else {
+          targetDatabases = await call(desktop.db.databases(selectedConnId));
+        }
+      } catch (err) {
+        targetDatabases = [];
+        toast(`Không đọc được database của kết nối: ${err.message}`, 'error');
+      }
+      dbSelect.disabled = false;
+      dbSelect.innerHTML = renderDbOptions(targetDatabases, '');
+      newDbBox.style.display = 'none';
+    });
+  }
+
+  dbSelect.addEventListener('change', () => {
+    newDbBox.style.display = dbSelect.value === '__NEW__' ? 'block' : 'none';
+  });
+
+  actionRestore.addEventListener('change', () => {
+    actionDrop.disabled = !actionRestore.checked;
+    if (!actionRestore.checked) actionDrop.checked = false;
+  });
+
+  $('#pasteGoBtn').addEventListener('click', async () => {
+    const targetConnId = connSelect ? connSelect.value : selectedConnId;
+    const isNew = dbSelect.value === '__NEW__';
+    const finalTargetDb = isNew ? ($('#pasteNewDbName').value || '').trim() : dbSelect.value;
+    if (!finalTargetDb) {
+      toast('Hãy chọn hoặc nhập tên Database đích.', 'error');
+      return;
+    }
+    const doRestore = actionRestore.checked;
+    const doCatalog = $('#pasteActionCatalog').checked;
+    const dropExisting = actionDrop.checked;
+
+    if (!doRestore && !doCatalog) {
+      toast('Hãy chọn ít nhất một thao tác (Khôi phục dữ liệu hoặc Lưu vào danh mục).', 'error');
+      return;
+    }
+
+    const targetConnObj = allConnections.find((c) => c.id === targetConnId);
+    const targetConnName = targetConnObj ? (targetConnObj.name || targetConnObj.host) : 'Kết nối đích';
+
+    const confirmed = await confirmAction(
+      `Dán bản sao lưu vào "${finalTargetDb}"?`,
+      `Dữ liệu từ bản sao lưu "${copied.name}" (${copied.sourceConnectionName} › ${copied.sourceDatabase}) sẽ được chuyển sang ${targetConnName} › "${finalTargetDb}".`,
+      'Tiếp tục dán'
+    );
+    if (!confirmed) return;
+
+    closeModal();
+    const taskId = newTransferTaskId('restore');
+    if (doRestore) {
+      showTransferProgress('restore', finalTargetDb, { taskId, profileId: targetConnId });
+      setStatus(`Đang dán và phục hồi vào ${finalTargetDb}…`);
+    } else {
+      setStatus(`Đang dán tệp sao lưu vào ${finalTargetDb}…`);
+    }
+
+    try {
+      let restoreResult = null;
+
+      if (doRestore) {
+        restoreResult = await call(desktop.db.restore({
+          profileId: targetConnId,
+          taskId,
+          sourceProfileId: copied.sourceConnectionId,
+          targetProfileId: targetConnId,
+          sourceDatabase: copied.sourceDatabase,
+          database: finalTargetDb,
+          backupId: copied.id,
+          dropExisting,
+          createDatabaseIfNotExists: true,
+          copyToTargetCatalog: doCatalog
+        }));
+        activeTransfer = null;
+        if (restoreResult.canceled) {
+          closeModal();
+          setStatus('Đã hủy dán bản sao lưu');
+          modal(`
+            <h2>Đã hủy dán bản sao lưu</h2>
+            <p>Đã chạy ${Number(restoreResult.executed || 0).toLocaleString()} câu lệnh trước khi hủy. Các thay đổi đã áp dụng <strong>không được tự động hoàn tác</strong>.</p>
+            <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
+          `);
+          return;
+        }
+      } else if (doCatalog) {
+        await call(desktop.db.copyBackup({
+          profileId: targetConnId,
+          sourceProfileId: copied.sourceConnectionId,
+          targetProfileId: targetConnId,
+          sourceDatabase: copied.sourceDatabase,
+          targetDatabase: finalTargetDb,
+          id: copied.id
+        }));
+      }
+
+      closeModal();
+      activeTransfer = null;
+      toast(`Đã dán bản sao lưu sang "${finalTargetDb}" thành công!`);
+      setStatus(`Dán hoàn tất sang ${finalTargetDb}`);
+
+      if (targetConnId === app.connection?.id) {
+        await refreshDatabases();
+        if (app.database === finalTargetDb) await refreshBackupList(finalTargetDb);
+      }
+
+      modal(`
+        <h2>Dán bản sao lưu thành công</h2>
+        <p>Đã dán thành công bản sao lưu từ <strong>${esc(copied.sourceConnectionName)} › ${esc(copied.sourceDatabase)}</strong> sang <strong>${esc(targetConnName)} › ${esc(finalTargetDb)}</strong>.</p>
+        ${restoreResult ? `<p>Đã chạy ${restoreResult.statements} câu lệnh${restoreResult.skipped ? `, bỏ qua ${restoreResult.skipped}` : ''}.</p>` : ''}
+        ${(doCatalog || restoreResult?.copiedBackup) ? `<p class="subtle">Bản sao lưu đã được lưu vào danh mục của <strong>${esc(finalTargetDb)}</strong>.</p>` : ''}
+        <div class="actions">
+          <button onclick="closeModal()">Đóng</button>
+          <button class="primary" id="btnSwitchToPastedDb">Mở Database "${esc(finalTargetDb)}"</button>
+        </div>
+      `);
+
+      $('#btnSwitchToPastedDb')?.addEventListener('click', async () => {
+        closeModal();
+        if (targetConnId !== app.connection?.id) {
+          await openProfileConnection(targetConnId);
+        }
+        await selectDatabase(finalTargetDb);
+      });
+    } catch (error) {
+      activeTransfer = null;
+      closeModal();
+      const partial = error.partial;
+      modal(`
+        <h2>Dán bản sao lưu thất bại</h2>
+        <div class="errorbox">${esc(error.message)}</div>
+        ${partial ? `<p class="hint">Đã chạy ${Number(partial.executed || 0).toLocaleString()} câu lệnh${partial.skipped ? `, bỏ qua ${partial.skipped}` : ''} trước khi lỗi. Các thay đổi đã áp dụng không được tự động hoàn tác.</p>` : ''}
+        <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
+      `);
+      setStatus('Dán bản sao lưu thất bại');
+    }
+  });
+}
+
+function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn = app.connection) {
+  if (!desktop) return;
+  if (!sourceDb) {
+    toast('Chưa chọn database nguồn.', 'error');
+    return;
+  }
+  const backup = (app.backups || []).find((b) => b.id === backupId);
+  const backupLabel = backup ? `${backup.name} (${formatBytes(backup.bytes)})` : (backupId ? backupId.slice(0, 14) : 'Bản sao lưu');
+  const allConnections = (app.connections && app.connections.length) ? app.connections : (app.connection ? [app.connection] : []);
+  let selectedConnId = sourceConn?.id || app.connection?.id || (allConnections[0] ? allConnections[0].id : null);
+  const sourceConnName = sourceConn?.name || sourceConn?.host || 'Kết nối nguồn';
+
+  let targetDatabases = (selectedConnId === app.connection?.id && app.databases) ? app.databases : [];
+
+  const renderDbOptions = (dbs, currDb) => {
+    const list = dbs.map((d) => `<option value="${esc(d)}" ${d === currDb ? 'selected' : ''}>${esc(d)}${d === sourceDb && selectedConnId === sourceConn?.id ? ' (Nguồn)' : ''}</option>`);
+    return [
+      `<option value="" ${!currDb ? 'selected' : ''} disabled>-- Chọn Database đích --</option>`,
+      ...list,
+      `<option value="__NEW__">＋ Tạo database mới…</option>`
+    ].join('');
+  };
+
+  const connOptions = allConnections.map((c) => `
+    <option value="${esc(c.id)}" ${c.id === selectedConnId ? 'selected' : ''}>
+      ${esc(c.name || c.host || 'Kết nối')} (${esc(c.host || 'localhost')}${c.port ? `:${c.port}` : ''})
+    </option>
+  `).join('');
+
+  modal(`
+    <h2>Sao chép sang Database khác</h2>
+    <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px; margin: 10px 0; font-size: 11.5px; line-height: 1.6;">
+      <div>Nguồn: <strong>${esc(sourceConnName)}</strong> › <strong>${esc(sourceDb)}</strong></div>
+      <div>Bản sao lưu: <code style="font-family: monospace; color: #087f72; font-weight: 600;">🕒 ${esc(backupLabel)}</code></div>
+    </div>
+
+    ${allConnections.length > 1 ? `
+    <label for="copyTargetConnection" style="display:block; margin: 12px 0 4px; font-weight: 600;">Kết nối đích (Server / Connection):</label>
+    <select id="copyTargetConnection" style="width: 100%;">
+      ${connOptions}
+    </select>
+    ` : ''}
+
+    <label for="copyTargetDb" style="display:block; margin: 12px 0 4px; font-weight: 600;">Database đích:</label>
+    <select id="copyTargetDb" style="width: 100%;">
+      ${renderDbOptions(targetDatabases, '')}
+    </select>
+    <div id="copyNewDbBox" style="display:none; margin-top: 8px;">
+      <input id="copyNewDbName" placeholder="Tên database mới (ví dụ: ${esc(sourceDb)}_copy)" style="width: 100%;">
+    </div>
+
+    <div style="margin-top: 14px; display: flex; flex-direction: column; gap: 8px;">
+      <label class="checkline">
+        <input type="checkbox" id="copyActionRestore" checked>
+        <span><strong>Khôi phục cấu trúc và dữ liệu vào Database đích</strong></span>
+      </label>
+      <label class="checkline" style="margin-left: 22px;">
+        <input type="checkbox" id="copyActionDrop">
+        <span>Xóa bảng/view/trigger/routine/event trùng tên nếu đã tồn tại ở DB đích</span>
+      </label>
+      <label class="checkline">
+        <input type="checkbox" id="copyActionCatalog" checked>
+        <span><strong>Lưu bản sao lưu vào danh mục của Database đích</strong> (Hiển thị trong Backups của DB đích)</span>
+      </label>
+    </div>
+
+    <div class="hint" style="margin-top: 12px;">Hệ thống sẽ sao chép toàn bộ bảng và dữ liệu từ bản backup này sang máy chủ và Database đích được chỉ định.</div>
+
+    <div class="actions">
+      <button onclick="closeModal()">Hủy</button>
+      <button class="primary" id="copyGoBtn">Bắt đầu sao chép</button>
+    </div>
+  `);
+
+  const connSelect = $('#copyTargetConnection');
+  const copyTargetSelect = $('#copyTargetDb');
+  const copyNewDbBox = $('#copyNewDbBox');
+  const copyActionRestore = $('#copyActionRestore');
+  const copyActionDrop = $('#copyActionDrop');
+
+  if (connSelect) {
+    connSelect.addEventListener('change', async () => {
+      selectedConnId = connSelect.value;
+      copyTargetSelect.disabled = true;
+      copyTargetSelect.innerHTML = '<option>Đang tải danh sách database…</option>';
+      try {
+        if (selectedConnId === app.connection?.id && app.databases && app.databases.length) {
+          targetDatabases = app.databases;
+        } else {
+          targetDatabases = await call(desktop.db.databases(selectedConnId));
+        }
+      } catch (err) {
+        targetDatabases = [];
+        toast(`Không đọc được database của kết nối: ${err.message}`, 'error');
+      }
+      copyTargetSelect.disabled = false;
+      copyTargetSelect.innerHTML = renderDbOptions(targetDatabases, '');
+      copyNewDbBox.style.display = 'none';
+    });
+  }
+
+  copyTargetSelect.addEventListener('change', () => {
+    copyNewDbBox.style.display = copyTargetSelect.value === '__NEW__' ? 'block' : 'none';
+  });
+
+  copyActionRestore.addEventListener('change', () => {
+    copyActionDrop.disabled = !copyActionRestore.checked;
+    if (!copyActionRestore.checked) copyActionDrop.checked = false;
+  });
+
+  $('#copyGoBtn').addEventListener('click', async () => {
+    const targetConnId = connSelect ? connSelect.value : selectedConnId;
+    const isNew = copyTargetSelect.value === '__NEW__';
+    const targetDb = isNew ? ($('#copyNewDbName').value || '').trim() : copyTargetSelect.value;
+    if (!targetDb) {
+      toast('Hãy chọn hoặc nhập tên Database đích.', 'error');
+      return;
+    }
+    if (targetDb === sourceDb && targetConnId === sourceConn?.id) {
+      toast('Database đích phải khác Database nguồn.', 'error');
+      return;
+    }
+    const doRestore = copyActionRestore.checked;
+    const doCatalog = $('#copyActionCatalog').checked;
+    const dropExisting = copyActionDrop.checked;
+
+    if (!doRestore && !doCatalog) {
+      toast('Hãy chọn ít nhất một thao tác (Khôi phục dữ liệu hoặc Lưu vào danh mục).', 'error');
+      return;
+    }
+
+    const targetConnObj = allConnections.find((c) => c.id === targetConnId);
+    const targetConnName = targetConnObj ? (targetConnObj.name || targetConnObj.host) : 'Kết nối đích';
+
+    const confirmed = await confirmAction(
+      `Sao chép sang "${targetDb}"?`,
+      `Thao tác sẽ thực hiện sao chép từ bản sao lưu "${sourceDb}" sang ${targetConnName} › database "${targetDb}".`,
+      'Tiếp tục'
+    );
+    if (!confirmed) return;
+
+    closeModal();
+    const taskId = newTransferTaskId('restore');
+    if (doRestore) {
+      showTransferProgress('restore', targetDb, { taskId, profileId: targetConnId });
+      setStatus(`Đang sao chép sang ${targetDb}…`);
+    } else {
+      setStatus(`Đang lưu bản backup sang ${targetDb}…`);
+    }
+
+    try {
+      let restoreResult = null;
+
+      if (doRestore) {
+        restoreResult = await call(desktop.db.restore({
+          profileId: targetConnId,
+          taskId,
+          sourceProfileId: sourceConn?.id,
+          targetProfileId: targetConnId,
+          sourceDatabase: sourceDb,
+          database: targetDb,
+          backupId,
+          dropExisting,
+          createDatabaseIfNotExists: true,
+          copyToTargetCatalog: doCatalog
+        }));
+        activeTransfer = null;
+        if (restoreResult.canceled) {
+          closeModal();
+          setStatus('Đã hủy sao chép');
+          modal(`
+            <h2>Đã hủy sao chép</h2>
+            <p>Đã chạy ${Number(restoreResult.executed || 0).toLocaleString()} câu lệnh trước khi hủy. Các thay đổi đã áp dụng <strong>không được tự động hoàn tác</strong>.</p>
+            <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
+          `);
+          return;
+        }
+      } else if (doCatalog) {
+        await call(desktop.db.copyBackup({
+          profileId: targetConnId,
+          sourceProfileId: sourceConn?.id,
+          targetProfileId: targetConnId,
+          sourceDatabase: sourceDb,
+          targetDatabase: targetDb,
+          id: backupId
+        }));
+      }
+
+      closeModal();
+      activeTransfer = null;
+      toast(`Đã sao chép sang database "${targetDb}" thành công!`);
+      setStatus(`Sao chép hoàn tất sang ${targetDb}`);
+      if (targetConnId === app.connection?.id) {
+        await refreshDatabases();
+      }
+
+      modal(`
+        <h2>Sao chép hoàn tất</h2>
+        <p>Đã sao chép thành công bản sao lưu từ <strong>${esc(sourceConnName)} › ${esc(sourceDb)}</strong> sang <strong>${esc(targetConnName)} › ${esc(targetDb)}</strong>.</p>
+        ${restoreResult ? `<p>Đã chạy ${restoreResult.statements} câu lệnh${restoreResult.skipped ? `, bỏ qua ${restoreResult.skipped}` : ''}.</p>` : ''}
+        ${(doCatalog || restoreResult?.copiedBackup) ? `<p class="subtle">Bản sao lưu đã được lưu vào danh mục của <strong>${esc(targetDb)}</strong>.</p>` : ''}
+        <div class="actions">
+          <button onclick="closeModal()">Đóng</button>
+          <button class="primary" id="btnSwitchToTargetDb">Mở Database "${esc(targetDb)}"</button>
+        </div>
+      `);
+
+      $('#btnSwitchToTargetDb')?.addEventListener('click', async () => {
+        closeModal();
+        if (targetConnId !== app.connection?.id) {
+          await openProfileConnection(targetConnId);
+        }
+        await selectDatabase(targetDb);
+      });
+    } catch (error) {
+      activeTransfer = null;
+      closeModal();
+      const partial = error.partial;
+      modal(`
+        <h2>Sao chép thất bại</h2>
+        <div class="errorbox">${esc(error.message)}</div>
+        ${partial ? `<p class="hint">Đã chạy ${Number(partial.executed || 0).toLocaleString()} câu lệnh${partial.skipped ? `, bỏ qua ${partial.skipped}` : ''} trước khi lỗi. Các thay đổi đã áp dụng không được tự động hoàn tác.</p>` : ''}
+        <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
+      `);
+      setStatus('Sao chép thất bại');
+    }
+  });
+}
+
+async function copyDatabaseAction(dbName, dbConnId = app.connection?.id) {
+  if (!app.connection) return;
+  if (dbConnId && dbConnId !== app.connection.id) {
+    await openProfileConnection(dbConnId);
+  }
+  await selectDatabase(dbName);
+  await refreshBackupList(dbName);
+  if (app.backups && app.backups.length > 0) {
+    copyBackupToDatabaseModal(app.selectedBackupId || app.backups[0].id, dbName);
+  } else {
+    const wantBackup = await confirmAction(
+      `Sao chép Database "${dbName}"`,
+      `Database "${dbName}" chưa có bản sao lưu nào. Bạn có muốn tạo một bản sao lưu ngay để sao chép sang database khác không?`,
+      'Tạo bản sao lưu ngay'
+    );
+    if (!wantBackup) return;
+    backupDatabase();
+  }
+}
+
+function previewImportCell(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function transferPartialText(partial) {
+  if (!partial) return '';
+  const parts = [];
+  if (partial.rows !== undefined) parts.push(`${Number(partial.rows || 0).toLocaleString()} dòng đã đọc`);
+  if (partial.committed !== undefined) parts.push(`${Number(partial.committed || 0).toLocaleString()} dòng đã ghi`);
+  else if (partial.written !== undefined) parts.push(`${Number(partial.written || 0).toLocaleString()} dòng đã xử lý`);
+  if (partial.bytes !== undefined) parts.push(formatBytes(partial.bytes));
+  return parts.length ? ` Đã xử lý: ${parts.join(' · ')}.` : '';
+}
+
+async function previewImportDialog(file, database, targetTable, options = {}) {
+  const format = options.format || (['csv', 'tsv', 'json'].includes(file.format) ? file.format : 'csv');
+  const delimiter = options.delimiter !== undefined
+    ? options.delimiter
+    : (format === 'tsv' ? '\t' : ',');
+  const hasHeader = options.hasHeader !== undefined ? options.hasHeader : format !== 'json';
+  const preview = await call(desktop.db.previewImport({
+    filePath: file.filePath,
+    format,
+    delimiter,
+    hasHeader,
+    limit: 20
+  }));
+  const targetCols = app.columns.filter((column) => !/(virtual|stored) generated/i.test(column.extra));
+  if (!targetCols.length) {
+    toast('Bảng đích không có cột nào có thể nhập.', 'error');
+    return;
+  }
+  const headers = Array.isArray(preview.headers) ? preview.headers : [];
+  const sourceLabel = (header, index) => (format !== 'json' && preview.hasHeader === false ? `Cột ${index + 1}` : String(header));
+  const headerIndex = new Map(headers.map((header, index) => [String(header).trim().toLowerCase(), index]));
+  const mappingHtml = targetCols.map((column, columnIndex) => {
+    let matched = headerIndex.has(column.name.toLowerCase()) ? headerIndex.get(column.name.toLowerCase()) : -1;
+    if (matched === -1 && format !== 'json' && preview.hasHeader === false && columnIndex < headers.length) matched = columnIndex;
+    const opts = [
+      '<option value="-1">-- Bỏ qua cột này --</option>',
+      ...headers.map((header, index) => `<option value="${index}" data-source="${esc(header)}" ${index === matched ? 'selected' : ''}>${esc(sourceLabel(header, index))}</option>`)
+    ].join('');
+    return `
+      <div class="csv-mapping-row">
+        <span><strong>${esc(column.name)}</strong> <small class="muted">${esc(column.type)}${column.nullable === 'NO' ? ' · bắt buộc' : ''}</small></span>
+        <span>→</span>
+        <select data-db-col="${esc(column.name)}">${opts}</select>
+      </div>
+    `;
+  }).join('');
+  const previewHeader = `<tr>${headers.map((header, index) => `<th>${esc(sourceLabel(header, index))}</th>`).join('')}</tr>`;
+  const previewBody = preview.rows.length
+    ? preview.rows.map((row) => `<tr>${headers.map((_header, index) => `<td>${esc(previewImportCell(row[index]))}</td>`).join('')}</tr>`).join('')
+    : '<tr><td colspan="1" class="muted">Không có dòng dữ liệu mẫu.</td></tr>';
+  const delimiterOptions = [['\t', 'Tab'], [',', 'Dấu phẩy'], [';', 'Dấu chấm phẩy'], ['|', 'Dấu gạch đứng']]
+    .map(([value, label]) => `<option value="${esc(value)}" ${value === delimiter ? 'selected' : ''}>${label}</option>`)
+    .join('');
+  const isStructured = format === 'json';
+  modal(`
+    <div class="dialog wide extra-wide">
+      <h2>Nhập dữ liệu vào ${esc(database)}.${esc(targetTable)}</h2>
+      <p><strong>${esc(file.name || file.filePath)}</strong> · ${formatBytes(file.size)} · ${esc(format.toUpperCase())}</p>
+      <div class="formrow">
+        <div>
+          <label>Định dạng</label>
+          <select id="importFormat">
+            <option value="csv" ${format === 'csv' ? 'selected' : ''}>CSV</option>
+            <option value="tsv" ${format === 'tsv' ? 'selected' : ''}>TSV</option>
+            <option value="json" ${format === 'json' ? 'selected' : ''}>JSON</option>
+          </select>
+        </div>
+        <div>
+          <label>Dấu phân cách</label>
+          <select id="importDelimiter" ${isStructured ? 'disabled' : ''}>${delimiterOptions}</select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <label class="check-row"><input type="checkbox" id="importHasHeader" ${hasHeader ? 'checked' : ''} ${isStructured ? 'disabled' : ''}> Dòng đầu là tiêu đề</label>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button type="button" id="importRefresh">Xem lại dữ liệu</button>
+        </div>
+      </div>
+      <div class="hint">Xem trước ${preview.rows.length.toLocaleString()} dòng${preview.truncated ? ' đầu tiên' : ''} · Tệp ${formatBytes(preview.totalBytes)}. Chạy theo luồng, không giới hạn 5.000 dòng.</div>
+      <label>Ánh xạ cột (Column Mapping)</label>
+      <div class="csv-mapping-grid">${mappingHtml}</div>
+      <label style="margin-top:14px">Xem trước dữ liệu</label>
+      <div class="csv-preview-table"><table><thead>${previewHeader}</thead><tbody>${previewBody}</tbody></table></div>
+      <div class="formrow" style="margin-top:14px">
+        <div>
+          <label>Khi trùng khóa</label>
+          <select id="importMode">
+            <option value="insert">Dừng và báo lỗi</option>
+            <option value="skip">Bỏ qua bản ghi trùng</option>
+            <option value="upsert">Cập nhật bản ghi trùng</option>
+          </select>
+        </div>
+        <div>
+          <label>Transaction</label>
+          <select id="importTransaction">
+            <option value="batch" selected>Mỗi lô một transaction (khuyến nghị)</option>
+            <option value="all">Toàn bộ trong một transaction</option>
+            <option value="none">Không dùng transaction</option>
+          </select>
+        </div>
+      </div>
+      <div class="hint">Không hỗ trợ tiếp tục sau khi hủy hoặc lỗi: chạy lại sẽ bắt đầu từ đầu tệp. “Toàn bộ” có thể giữ transaction lâu trên tệp lớn; “Không dùng transaction” có thể để lại dữ liệu đã ghi khi lỗi. Rollback chỉ được bảo đảm với bảng InnoDB; engine khác như MyISAM có thể giữ lại các dòng đã ghi.</div>
+      <div class="actions">
+        <button onclick="closeModal()">Hủy</button>
+        <button class="primary" id="doFileImportBtn">Bắt đầu nhập</button>
+      </div>
+    </div>
+  `, true);
+
+  $('#importRefresh').addEventListener('click', async () => {
+    const nextFormat = $('#importFormat').value;
+    const nextDelimiter = nextFormat === 'tsv' ? '\t' : ($('#importDelimiter').value || ',');
+    const nextHasHeader = nextFormat === 'json' ? true : $('#importHasHeader').checked;
+    try {
+      await previewImportDialog(file, database, targetTable, {
+        format: nextFormat,
+        delimiter: nextDelimiter,
+        hasHeader: nextHasHeader
+      });
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  });
+
+  $('#doFileImportBtn').addEventListener('click', async () => {
+    const chosenFormat = $('#importFormat').value;
+    const chosenDelimiter = chosenFormat === 'tsv' ? '\t' : ($('#importDelimiter').value || ',');
+    const chosenHasHeader = chosenFormat === 'json' ? true : $('#importHasHeader').checked;
+    const mapping = {};
+    document.querySelectorAll('.csv-mapping-row select').forEach((select) => {
+      const index = Number(select.value);
+      if (!Number.isInteger(index) || index < 0) return;
+      const source = select.selectedOptions[0]?.dataset.source;
+      if (source !== undefined) mapping[select.dataset.dbCol] = source;
+    });
+    if (!Object.keys(mapping).length) {
+      toast('Hãy chọn ít nhất một cột để nhập dữ liệu.', 'error');
+      return;
+    }
+    const mode = $('#importMode').value;
+    const transaction = $('#importTransaction').value;
+    const taskId = newTransferTaskId('import');
+    const profileId = app.connection?.id || null;
+    showTransferProgress('import', `${database}.${targetTable}`, { taskId, profileId });
+    try {
+      const result = await call(desktop.db.importFile({
+        profileId,
+        database,
+        table: targetTable,
+        filePath: file.filePath,
+        format: chosenFormat,
+        delimiter: chosenDelimiter,
+        hasHeader: chosenHasHeader,
+        mapping,
+        mode,
+        transaction,
+        taskId
+      }));
+      activeTransfer = null;
+      closeModal();
+      if (result.canceled) {
+        toast(`Đã hủy nhập dữ liệu.${transferPartialText(result)} Tệp chưa được nhập tiếp.`);
+        return;
+      }
+      if (app.database === database && table === targetTable) await loadData();
+      const duplicates = Number(result.duplicates || 0);
+      toast(`Đã nhập ${Number(result.committed ?? result.written ?? 0).toLocaleString()} dòng${duplicates ? `, xử lý ${duplicates.toLocaleString()} bản ghi trùng` : ''}.`);
+    } catch (error) {
+      activeTransfer = null;
+      closeModal();
+      const rowText = error && error.row ? ` Lỗi tại dòng dữ liệu ${error.row}.` : '';
+      toast(`${error.message}${rowText}${transferPartialText(error && error.partial)}`, 'error');
+    }
+  });
+}
+
+async function importFileModal() {
+  if (!app.database || !table) {
+    toast('Hãy chọn một bảng trước khi nhập.', 'error');
+    return;
+  }
+  const database = app.database;
+  const targetTable = table;
+  try {
+    const file = await call(desktop.db.pickImportFile({}));
+    if (file.canceled) return;
+    await previewImportDialog(file, database, targetTable);
+  } catch (error) {
+    toast(error.message, 'error');
+  }
 }
 
 async function transfer(type) {
@@ -5109,88 +7434,63 @@ async function transfer(type) {
     toast('Chọn một bảng trước.', 'error');
     return;
   }
+  const database = app.database;
+  const targetTable = table;
   if (type === 'export') {
+    const hasSearch = Boolean(String(app.search || '').trim());
     modal(`
       <h2>Xuất dữ liệu</h2>
-      <p>${esc(app.database)}.${esc(table)}</p>
+      <p>${esc(database)}.${esc(targetTable)}</p>
+      <p class="hint">Phạm vi: ${hasSearch ? `các dòng khớp bộ lọc “${esc(app.search)}” nếu chọn bên dưới, ngược lại toàn bộ bảng` : 'toàn bộ bảng'}${app.orderBy ? ` · sắp xếp theo ${esc(app.orderBy)} ${esc(app.orderDir || 'ASC')}` : ''}.</p>
       <label>Định dạng</label>
-      <select id="format"><option>JSON</option><option>CSV</option></select>
-      <div class="hint">Xuất tối đa 20000 dòng. Dùng hộp thoại của hệ điều hành để chọn nơi lưu.</div>
+      <select id="exportFormat">
+        <option value="csv">CSV — UTF-8, có dòng tiêu đề</option>
+        <option value="tsv">TSV — phân tách bằng tab</option>
+        <option value="json">JSON — mảng đối tượng</option>
+      </select>
+      <label class="check-row" style="margin-top:12px">
+        <input type="checkbox" id="exportFiltered" ${hasSearch ? '' : 'disabled'}>
+        Chỉ xuất các dòng khớp bộ lọc hiện tại${hasSearch ? ` (“${esc(app.search)}”)` : ''}
+      </label>
+      <div class="hint">Tác vụ chạy theo luồng, không giới hạn 20.000 dòng và có thể hủy giữa chừng. CSV/TSV dùng <code>\\N</code> cho NULL và <code>0x…</code> cho dữ liệu nhị phân; JSON giữ nguyên <code>null</code>.</div>
       <div class="actions">
         <button onclick="closeModal()">Hủy</button>
         <button class="primary" id="exportGo">Chọn nơi lưu…</button>
       </div>
     `);
     $('#exportGo').addEventListener('click', async () => {
-      const format = $('#format').value;
-      $('#exportGo').disabled = true;
-      $('#exportGo').textContent = 'Đang xuất…';
+      const format = $('#exportFormat').value;
+      const useFilter = $('#exportFiltered')?.checked === true;
+      const taskId = newTransferTaskId('export');
+      const profileId = app.connection?.id || null;
+      showTransferProgress('export', `${database}.${targetTable}`, { taskId, profileId });
       try {
-        const data = await call(desktop.db.exportTable({ database: app.database, table }));
-        const contents = format === 'CSV' ? toCsv(data.columns, data.rows) : JSON.stringify(data.rows, null, 2);
-        const result = await desktop.saveTextFile({
-          suggestedName: `${table}.${format === 'CSV' ? 'csv' : 'json'}`,
-          contents,
-          filters: format === 'CSV'
-            ? [{ name: 'CSV', extensions: ['csv'] }]
-            : [{ name: 'JSON', extensions: ['json'] }]
-        });
+        const result = await call(desktop.db.exportFile({
+          profileId,
+          database,
+          table: targetTable,
+          format,
+          taskId,
+          search: useFilter ? app.search : '',
+          orderBy: app.orderBy ? { column: app.orderBy, direction: app.orderDir } : null
+        }));
+        activeTransfer = null;
         closeModal();
-        if (!result.canceled) toast(`Đã xuất ${data.rows.length} bản ghi${data.truncated ? ' (giới hạn 20000 dòng)' : ''}`);
+        if (result.canceled) {
+          if (result.dialog) return;
+          toast(`Đã hủy xuất dữ liệu.${transferPartialText(result)} Tệp tạm đã được dọn.`);
+          return;
+        }
+        toast(`Đã xuất ${Number(result.rows || 0).toLocaleString()} dòng (${formatBytes(result.bytes)}) tới ${result.filePath}.`);
       } catch (error) {
-        toast(error.message, 'error');
-        $('#exportGo').disabled = false;
-        $('#exportGo').textContent = 'Chọn nơi lưu…';
+        activeTransfer = null;
+        closeModal();
+        toast(`${error.message}${transferPartialText(error && error.partial)}`, 'error');
       }
     });
     return;
   }
-
-  modal(`
-    <h2>Nhập dữ liệu vào bảng</h2>
-    <p>${esc(app.database)}.${esc(table)}</p>
-    <label>Chọn định dạng tệp</label>
-    <select id="importFormatSelect">
-      <option value="csv">CSV / TSV (Tự động map cột & Xem trước dữ liệu)</option>
-      <option value="json">JSON (Mảng đối tượng, tối đa 5000 dòng)</option>
-    </select>
-    <div class="hint">Tệp CSV cho phép xem trước 5 dòng dữ liệu mẫu và ghép từng cột vào bảng MySQL tương ứng.</div>
-    <div class="actions">
-      <button onclick="closeModal()">Hủy</button>
-      <button class="primary" id="importGo">Tiếp tục chọn tệp…</button>
-    </div>
-  `);
-  $('#importGo').addEventListener('click', async () => {
-    const fmt = $('#importFormatSelect')?.value || 'csv';
-    if (fmt === 'csv') {
-      closeModal();
-      importCsvModal();
-      return;
-    }
-    try {
-      const file = await desktop.openJsonFile();
-      if (file.canceled) return;
-      const rows = JSON.parse(file.contents);
-      if (!Array.isArray(rows) || !rows.every((row) => row && typeof row === 'object' && !Array.isArray(row))) {
-        throw new Error('Tệp phải là mảng JSON các đối tượng.');
-      }
-      if (!rows.length) throw new Error('Tệp không có bản ghi nào.');
-      if (rows.length > 5000) throw new Error('Chỉ nhập tối đa 5000 bản ghi mỗi lần.');
-      const confirmed = await confirmAction(`Nhập ${rows.length} bản ghi?`, 'Dữ liệu sẽ được ghi trực tiếp vào bảng đích.', 'Nhập');
-      if (!confirmed) return;
-      const result = await call(desktop.db.importRows({ database: app.database, table, rows }));
-      closeModal();
-      toast(`Đã nhập ${result.inserted} bản ghi`);
-      await loadData();
-    } catch (error) {
-      toast(error.message, 'error');
-    }
-  });
-}
-
-function toCsv(columns, rows) {
-  const escapeCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
-  return `﻿${[columns.map(escapeCell).join(','), ...rows.map((row) => columns.map((column) => escapeCell(row[column])).join(','))].join('\r\n')}`;
+  await importFileModal();
 }
 
 window.addEventListener('DOMContentLoaded', init);

@@ -361,15 +361,38 @@ function namedIdentifier(raw) {
 function createTarget(statement) {
   const text = String(statement || '').trimStart();
   const identifier = '(?:`(?:[^`]|``)+`|[^\\s.(]+)(?:\\s*\\.\\s*(?:`(?:[^`]|``)+`|[^\\s.(]+))?';
-  const table = new RegExp(`^CREATE\\s+(?:TEMPORARY\\s+)?TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${identifier})`, 'i').exec(text);
+  const definer = 'DEFINER\\s*=\\s*(?:`(?:[^`]|``)*`|\'(?:[^\'\\\\]|\\\\.|\'\')*\'|"(?:[^"\\\\]|\\\\.|"")*"|\\S+)';
+  const createPrefix = '^CREATE\\s+';
+  const table = new RegExp(
+    `${createPrefix}(?:OR\\s+REPLACE\\s+)?(?:TEMPORARY\\s+)?TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${identifier})`,
+    'i'
+  ).exec(text);
   if (table) return { type: 'table', name: namedIdentifier(table[1]) };
   const view = new RegExp(
-    `^CREATE\\s+(?:(?:OR\\s+REPLACE|ALGORITHM\\s*=\\s*\\w+|DEFINER\\s*=\\s*\\S+|SQL\\s+SECURITY\\s+(?:DEFINER|INVOKER))\\s+)*VIEW\\s+(${identifier})`,
+    `${createPrefix}(?:(?:OR\\s+REPLACE|ALGORITHM\\s*=\\s*\\w+|SQL\\s+SECURITY\\s+(?:DEFINER|INVOKER)|${definer})\\s+)*VIEW\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${identifier})`,
     'i'
   ).exec(text);
   if (view) return { type: 'view', name: namedIdentifier(view[1]) };
-  const trigger = new RegExp(`^CREATE\\s+(?:DEFINER\\s*=\\s*\\S+\\s+)?TRIGGER\\s+(${identifier})`, 'i').exec(text);
+  const trigger = new RegExp(
+    `${createPrefix}(?:(?:OR\\s+REPLACE|${definer})\\s+)*TRIGGER\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${identifier})`,
+    'i'
+  ).exec(text);
   if (trigger) return { type: 'trigger', name: namedIdentifier(trigger[1]) };
+  const procedure = new RegExp(
+    `${createPrefix}(?:(?:OR\\s+REPLACE|${definer})\\s+)*PROCEDURE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${identifier})`,
+    'i'
+  ).exec(text);
+  if (procedure) return { type: 'procedure', name: namedIdentifier(procedure[1]) };
+  const fn = new RegExp(
+    `${createPrefix}(?:(?:OR\\s+REPLACE|AGGREGATE|${definer})\\s+)*FUNCTION\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${identifier})`,
+    'i'
+  ).exec(text);
+  if (fn) return { type: 'function', name: namedIdentifier(fn[1]) };
+  const event = new RegExp(
+    `${createPrefix}(?:(?:OR\\s+REPLACE|${definer})\\s+)*EVENT\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${identifier})`,
+    'i'
+  ).exec(text);
+  if (event) return { type: 'event', name: namedIdentifier(event[1]) };
   return null;
 }
 

@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { splitSqlStatements, stripLeadingComments } = require('../electron/sql-script.cjs');
+const { splitSqlStatements, stripLeadingComments, createTarget } = require('../electron/sql-script.cjs');
 
 test('tách nhiều statement theo dấu chấm phẩy', () => {
   assert.deepEqual(
@@ -50,5 +50,32 @@ test('hỗ trợ escape và quote kép liền nhau', () => {
 test('từ chối script có quote hoặc block comment chưa đóng', () => {
   assert.throws(() => splitSqlStatements("SELECT 'missing;"), /chưa được đóng/);
   assert.throws(() => splitSqlStatements('SELECT 1 /* missing;'), /chưa được đóng/);
+});
+
+test('nhận diện đúng loại đối tượng khi CREATE có DEFINER và ALGORITHM', () => {
+  assert.deepEqual(
+    createTarget('CREATE DEFINER=`root`@`localhost` PROCEDURE `p1`() BEGIN SELECT 1; END'),
+    { type: 'procedure', name: 'p1' }
+  );
+  assert.deepEqual(
+    createTarget('CREATE OR REPLACE DEFINER="root"@"%" FUNCTION `f1`(x INT) RETURNS INT RETURN 1'),
+    { type: 'function', name: 'f1' }
+  );
+  assert.deepEqual(
+    createTarget("CREATE DEFINER='root'@'localhost' EVENT `e1` ON SCHEDULE EVERY 1 DAY DO SELECT 1"),
+    { type: 'event', name: 'e1' }
+  );
+  assert.deepEqual(
+    createTarget('CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `v1` AS SELECT 1'),
+    { type: 'view', name: 'v1' }
+  );
+  assert.deepEqual(
+    createTarget('CREATE TRIGGER `tr1` BEFORE INSERT ON `t1` FOR EACH ROW SET @x = 1'),
+    { type: 'trigger', name: 'tr1' }
+  );
+  assert.deepEqual(
+    createTarget('CREATE TEMPORARY TABLE IF NOT EXISTS `db`.`t1` (`id` int)'),
+    { type: 'table', name: 't1' }
+  );
 });
 

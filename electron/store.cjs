@@ -144,7 +144,15 @@ function normalizeSsl(input) {
   };
 }
 
-function normalizeSsh(input) {
+function normalizeKnownSshHostKey(input) {
+  if (!input || typeof input !== 'object') return null;
+  const host = text(input.host, 255).toLowerCase();
+  const fingerprint = text(input.fingerprint, 256);
+  if (!host || !fingerprint) return null;
+  return { host, port: port(input.port, 22), fingerprint };
+}
+
+function normalizeSsh(input, existing) {
   const ssh = input && typeof input === 'object' ? input : {};
   return {
     enabled: Boolean(ssh.enabled),
@@ -152,7 +160,10 @@ function normalizeSsh(input) {
     port: port(ssh.port, 22),
     user: text(ssh.user, 128),
     authMethod: ssh.authMethod === 'key' ? 'key' : 'password',
-    privateKeyPath: text(ssh.privateKeyPath, 1024)
+    privateKeyPath: text(ssh.privateKeyPath, 1024),
+    knownHostKey: ssh.knownHostKey === undefined
+      ? normalizeKnownSshHostKey(existing && existing.knownHostKey)
+      : normalizeKnownSshHostKey(ssh.knownHostKey)
   };
 }
 
@@ -164,10 +175,15 @@ function normalizeProfile(input, existing, store) {
   if (!input || typeof input !== 'object') throw new Error('Thông tin kết nối không hợp lệ.');
   const host = text(input.host, 255);
   if (!host) throw new Error('Host không được để trống.');
-  const ssh = normalizeSsh(input.ssh);
+  const ssh = normalizeSsh(input.ssh, existing && existing.ssh);
   if (ssh.enabled && !ssh.host) throw new Error('SSH host không được để trống.');
   const type = input.type === 'mariadb' ? 'mariadb' : 'mysql';
   const ssl = normalizeSsl(input.ssl);
+  const allowCleartextPassword = input.allowCleartextPassword === true;
+  const sshToLocalMysql = ssh.enabled && ['localhost', '127.0.0.1', '::1'].includes(host.toLowerCase());
+  if (allowCleartextPassword && !(ssl.enabled && ssl.verify) && !sshToLocalMysql) {
+    throw new Error('mysql_clear_password yêu cầu TLS đã xác thực hoặc SSH tunnel tới MySQL trên chính máy SSH (host localhost/127.0.0.1/::1).');
+  }
   ssl.passphrase = input.ssl && input.ssl.passphrase !== undefined
     ? seal(input.ssl.passphrase)
     : (existing && existing.ssl ? existing.ssl.passphrase : null);
@@ -195,6 +211,7 @@ function normalizeProfile(input, existing, store) {
     port: port(input.port, 3306),
     user: text(input.user, 128),
     database: text(input.database, 128),
+    allowCleartextPassword,
     ssl,
     ssh,
     password,
@@ -219,6 +236,7 @@ function sanitize(profile) {
     port: profile.port,
     user: profile.user,
     database: profile.database,
+    allowCleartextPassword: profile.allowCleartextPassword === true,
     ssl: { enabled: profile.ssl.enabled, verify: profile.ssl.verify, ca: profile.ssl.ca, cert: profile.ssl.cert, key: profile.ssl.key },
     ssh: {
       enabled: profile.ssh.enabled,
@@ -226,7 +244,8 @@ function sanitize(profile) {
       port: profile.ssh.port,
       user: profile.ssh.user,
       authMethod: profile.ssh.authMethod,
-      privateKeyPath: profile.ssh.privateKeyPath
+      privateKeyPath: profile.ssh.privateKeyPath,
+      knownHostKey: profile.ssh.knownHostKey || null
     },
     hasPassword: Boolean(profile.password),
     hasSslPassphrase: Boolean(profile.ssl.passphrase),
@@ -287,6 +306,22 @@ function save(input) {
   } else {
     store.connections.push(profile);
   }
+  writeStore(store);
+  return sanitize(profile);
+}
+
+function trustSshHostKey(id, knownHostKey) {
+  const store = readStore();
+  const profile = store.connections.find((entry) => entry.id === id);
+  if (!profile) throw new Error('Không tìm thấy kết nối.');
+  const normalized = normalizeKnownSshHostKey(knownHostKey);
+  if (!normalized) throw new Error('SSH host key không hợp lệ.');
+  if (normalized.host !== String(profile.ssh.host || '').trim().toLowerCase()
+    || normalized.port !== Number(profile.ssh.port || 22)) {
+    throw new Error('SSH host key không khớp host/port hiện tại của kết nối.');
+  }
+  profile.ssh.knownHostKey = normalized;
+  profile.updatedAt = new Date().toISOString();
   writeStore(store);
   return sanitize(profile);
 }
@@ -479,6 +514,7 @@ module.exports = {
   STORE_VERSION,
   list,
   save,
+  trustSshHostKey,
   remove,
   getWithSecrets,
   importMany,

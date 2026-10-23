@@ -13,7 +13,6 @@ app.setPath('userData', fs.mkdtempSync(path.join(os.tmpdir(), 'sqlpro-smoke-')))
 app.commandLine.appendSwitch('disable-gpu');
 const calls = [];
 const errors = [];
-let csv = '';
 let win;
 let checks = 0;
 const columns = [
@@ -32,6 +31,7 @@ handle('state:load', () => ({}));
 handle('state:save', () => ({}));
 handle('workspaces:list', () => ok([{ id: 'ws-personal', name: 'Personal' }]));
 handle('connections:list', () => ok([]));
+handle('db:open-profiles', () => ok([]));
 handle('account:status', () => ok({ loggedIn: false }));
 handle('db:use-database', () => ok({}));
 handle('db:databases', () => ok(['test']));
@@ -42,8 +42,74 @@ handle('db:relations', () => ok({ outbound: [{ table: 'users', column: 'id', ref
 handle('db:table-data', () => ok({ columns, primaryKey: ['id'], rows: [{ id: 1, name: 'Alice' }], total: 1, page: 1, pageSize: 100 }));
 handle('db:delete-rows', () => ok({ affectedRows: 1 }));
 handle('db:update-row', () => ok({ affectedRows: 1, changedRows: 1 }));
-handle('db:import-rows', (payload) => ok({ inserted: payload.rows.length }));
-handle('file:open-text', () => ({ canceled: false, contents: csv }));
+handle('db:import-file', (payload) => ok({
+  database: payload.database,
+  table: payload.table,
+  format: payload.format,
+  mode: payload.mode,
+  transaction: payload.transaction,
+  rows: 2,
+  written: 2,
+  committed: 2,
+  affectedRows: 2,
+  duplicates: 0,
+  batches: 1,
+  bytes: 18,
+  durationMs: 1,
+  resumable: false
+}));
+handle('db:export-file', (payload) => ok({
+  database: payload.database,
+  table: payload.table,
+  format: payload.format,
+  rows: 2,
+  bytes: 64,
+  columns: ['id', 'name'],
+  filePath: `/tmp/${payload.database}.${payload.table}.${payload.format}`,
+  durationMs: 1
+}));
+handle('db:pick-import-file', () => ok({
+  canceled: false,
+  filePath: '/tmp/sqlpro-smoke-import.csv',
+  name: 'sqlpro-smoke-import.csv',
+  size: 18,
+  format: 'csv'
+}));
+handle('db:preview-import', () => ok({
+  format: 'csv',
+  delimiter: ',',
+  hasHeader: true,
+  headers: ['name'],
+  rows: [['Alice'], ['Binh']],
+  sampledBytes: 18,
+  totalBytes: 18,
+  truncated: false
+}));
+const routines = [
+  { name: 'p_one', type: 'procedure', returnType: null, deterministic: false, security: 'DEFINER', definer: 'root@%', comment: '', createdAt: null, updatedAt: null },
+  { name: 'f_one', type: 'function', returnType: 'int', deterministic: true, security: 'INVOKER', definer: 'root@%', comment: '', createdAt: null, updatedAt: null }
+];
+const routineEvents = [
+  { name: 'e_one', status: 'ENABLED', type: 'RECURRING', onCompletion: 'NOT PRESERVE', intervalValue: '1', intervalField: 'DAY', starts: null, ends: null, lastExecuted: null, definer: 'root@%', comment: '' }
+];
+const backupCalls = [];
+handle('db:routines', () => ok(routines));
+handle('db:events', () => ok(routineEvents));
+handle('db:show-create', (payload) => ok({
+  kind: payload.kind,
+  database: payload.database,
+  name: payload.name,
+  sql: `CREATE ${payload.kind.toUpperCase()} \`${payload.name}\`() BEGIN SELECT 1; END`,
+  meta: { Database: payload.database }
+}));
+handle('db:backup', (payload) => {
+  backupCalls.push(payload);
+  return ok({
+    canceled: false, id: '20261023120000-smoke.sql', filePath: '/tmp/20261023120000-smoke.sql',
+    tables: 1, views: 0, triggers: 0, procedures: 1, functions: 1, events: 1, rows: 1, bytes: 128
+  });
+});
+handle('db:list-backups', () => ok([]));
 handle('file:save-text', () => ({ canceled: false }));
 handle('db:query', (payload) => {
   if (!payload || typeof payload.sql !== 'string') return { ok: false, error: { message: 'Invalid query payload' } };
@@ -65,6 +131,13 @@ async function until(code) {
   const deadline = Date.now() + 5000;
   while (!await evaluate(code)) {
     if (Date.now() > deadline) throw new Error(`Timed out: ${code}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+async function untilNode(predicate) {
+  const deadline = Date.now() + 5000;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('Timed out waiting for Node-side condition');
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
@@ -167,19 +240,57 @@ app.whenReady().then(async () => {
     await until("!$('#grid td[data-col=\"name\"]').classList.contains('editing-cell')");
     assert.equal(calls.filter((call) => call.name === 'db:update-row').at(-1).args[0].values.name, '');
   });
-  await check('CSV rejects over-limit input before importing', async () => {
-    csv = 'name\n' + Array.from({ length: 5001 }, () => 'Alice').join('\n');
-    const count = calls.filter((call) => call.name === 'db:import-rows').length;
-    await evaluate('importCsvModal()');
-    assert.equal(calls.filter((call) => call.name === 'db:import-rows').length, count);
-    assert.match(await evaluate("$('#toast').textContent"), /5000/);
-  });
-  await check('CSV preserves quoted whitespace and empty values through IPC', async () => {
-    csv = 'name\n"  Alice  "\n""';
-    await evaluate('importCsvModal()');
-    await evaluate("$('#doCsvImportBtn').click()");
+  await check('file import previews mapping and sends a streaming payload', async () => {
+    const before = calls.filter((call) => call.name === 'db:import-file').length;
+    await evaluate('importFileModal()');
+    await until("Boolean($('#doFileImportBtn'))");
+    const preview = calls.filter((call) => call.name === 'db:preview-import').at(-1).args[0];
+    assert.deepEqual(preview, {
+      filePath: '/tmp/sqlpro-smoke-import.csv',
+      format: 'csv',
+      delimiter: ',',
+      hasHeader: true,
+      limit: 20
+    });
+    assert.match(await evaluate("$('#modal').textContent"), /không giới hạn 5\.000 dòng/);
+    assert.equal(
+      await evaluate("document.querySelector('.csv-mapping-row select[data-db-col=\"name\"]').selectedOptions[0].dataset.source"),
+      'name'
+    );
+    await evaluate("$('#importMode').value='upsert'; $('#importTransaction').value='all'; $('#doFileImportBtn').click()");
     await until("!$('#modal').open");
-    assert.deepEqual(calls.filter((call) => call.name === 'db:import-rows').at(-1).args[0].rows, [{ name: '  Alice  ' }, { name: '' }]);
+    await untilNode(() => calls.filter((call) => call.name === 'db:import-file').length > before);
+    const payload = calls.filter((call) => call.name === 'db:import-file').at(-1).args[0];
+    assert.equal(payload.profileId, 'test');
+    assert.equal(payload.database, 'test');
+    assert.equal(payload.table, 'users');
+    assert.equal(payload.filePath, '/tmp/sqlpro-smoke-import.csv');
+    assert.equal(payload.format, 'csv');
+    assert.equal(payload.hasHeader, true);
+    assert.equal(payload.mode, 'upsert');
+    assert.equal(payload.transaction, 'all');
+    assert.deepEqual(payload.mapping, { name: 'name' });
+    assert.match(payload.taskId, /^import-/);
+    assert.match(await evaluate("$('#toast').textContent"), /Đã nhập 2 dòng/);
+  });
+  await check('file export sends task, filter and order and reports the result', async () => {
+    await evaluate("app.search='Alice'; app.orderBy='name'; app.orderDir='DESC'; transfer('export')");
+    await until("Boolean($('#exportGo'))");
+    assert.match(await evaluate("$('#modal').textContent"), /không giới hạn 20\.000 dòng/);
+    assert.match(await evaluate("$('#modal').textContent"), /bộ lọc “Alice”/);
+    assert.match(await evaluate("$('#modal').textContent"), /sắp xếp theo name DESC/);
+    await evaluate("$('#exportFormat').value='json'; $('#exportFiltered').checked=true; $('#exportGo').click()");
+    await untilNode(() => calls.some((call) => call.name === 'db:export-file'));
+    const payload = calls.filter((call) => call.name === 'db:export-file').at(-1).args[0];
+    assert.equal(payload.profileId, 'test');
+    assert.equal(payload.database, 'test');
+    assert.equal(payload.table, 'users');
+    assert.equal(payload.format, 'json');
+    assert.equal(payload.search, 'Alice');
+    assert.deepEqual(payload.orderBy, { column: 'name', direction: 'DESC' });
+    assert.match(payload.taskId, /^export-/);
+    await until("!$('#modal').open");
+    assert.match(await evaluate("$('#toast').textContent"), /Đã xuất 2 dòng/);
   });
   await check('server variables and processlist load; kill confirms then refreshes', async () => {
     await evaluate('showServerVarsModal()');
@@ -232,6 +343,85 @@ app.whenReady().then(async () => {
     assert.equal(result.tableFocusable, true);
     assert.equal(result.selected, 'users');
     assert.equal(result.toastRole, 'alert');
+  });
+  await check('routines and events load lazily and render in the sidebar', async () => {
+    await evaluate("loadObjectMetadata('routines')");
+    await until('app.routineState.loaded && !app.routineState.loading');
+    assert.equal(await evaluate('app.routineState.data.length'), 2);
+    await evaluate("loadObjectMetadata('events')");
+    await until('app.eventState.loaded && !app.eventState.loading');
+    assert.equal(await evaluate('app.eventState.data.length'), 1);
+    const html = await evaluate(`(() => {
+      const previousConnections = app.connections;
+      app.connections = [{id:'test',name:'Mock',host:'localhost',port:3306,user:'root',ssh:{enabled:false},workspaceId:app.activeWorkspaceId}];
+      openTreeGroups.add('routines');
+      openTreeGroups.add('events');
+      renderSidebar();
+      const result = document.querySelector('#connectionList').innerHTML;
+      app.connections = previousConnections;
+      return result;
+    })()`);
+    assert.match(html, /p_one/);
+    assert.match(html, /f_one/);
+    assert.match(html, /e_one/);
+  });
+  await check('routine details use SHOW CREATE and drop against the captured target', async () => {
+    await evaluate("openRoutineDetails('procedure','p_one')");
+    await until("$('#modal').open && Boolean($('#routineDrop'))");
+    assert.match(await evaluate("$('#modal').textContent"), /CREATE PROCEDURE `p_one`/);
+    await evaluate("$('#routineDrop').click()");
+    await until("$('#modal').open && Boolean($('#confirmOk'))");
+    await evaluate("$('#confirmOk').click()");
+    await until("!$('#modal').open");
+    const query = calls.filter((call) => call.name === 'db:query').at(-1).args[0];
+    assert.equal(query.profileId, 'test');
+    assert.equal(query.database, 'test');
+    assert.equal(query.confirmed, true);
+    assert.match(query.sql, /DROP PROCEDURE IF EXISTS `test`\.`p_one`/);
+  });
+  await check('saved queries save, reopen, rename and delete locally', async () => {
+    await evaluate("app.query.sql='SELECT 42 AS answer'; app.query.profileId='test'; app.query.database='test'; app.query.savedQueryId=null; saveQuery()");
+    await until("Boolean($('#savedQueryGo'))");
+    await evaluate("$('#savedQueryName').value='Truy vấn kiểm tra'; $('#savedQueryGo').click()");
+    await until('savedQueries.length === 1');
+    assert.equal(await evaluate('savedQueries[0].sql'), 'SELECT 42 AS answer');
+    assert.equal(await evaluate('savedQueries[0].profileId'), 'test');
+    assert.equal(await evaluate('savedQueries[0].database'), 'test');
+    const id = await evaluate('savedQueries[0].id');
+    await evaluate(`openSavedQuery(${JSON.stringify(id)})`);
+    assert.equal(await evaluate('app.query.sql'), 'SELECT 42 AS answer');
+    assert.equal(await evaluate('app.query.savedQueryId'), id);
+    await evaluate(`renameSavedQuery(${JSON.stringify(id)})`);
+    await until("Boolean($('#renameSavedQueryGo'))");
+    await evaluate("$('#renameSavedQueryName').value='Truy vấn đổi tên'; $('#renameSavedQueryGo').click()");
+    assert.equal(await evaluate('savedQueries[0].name'), 'Truy vấn đổi tên');
+    await evaluate(`void deleteSavedQuery(${JSON.stringify(id)})`);
+    await until("Boolean($('#confirmOk'))");
+    await evaluate("$('#confirmOk').click()");
+    await until('savedQueries.length === 0');
+  });
+  await check('backup includes routines, events and the strip-DEFINER option', async () => {
+    const before = calls.filter((call) => call.name === 'db:backup').length;
+    await evaluate('backupDatabase()');
+    await until("Boolean(document.querySelector('#backupRoutineList .backup-routine'))");
+    await until("Boolean(document.querySelector('#backupEventList .backup-event'))");
+    assert.equal(await evaluate("document.querySelectorAll('#backupRoutineList .backup-routine').length"), 2);
+    assert.equal(await evaluate("document.querySelectorAll('#backupEventList .backup-event').length"), 1);
+    await evaluate("$('#backupStripDefiner').checked=true; $('#backupGo').click()");
+    await untilNode(() => calls.filter((call) => call.name === 'db:backup').length > before);
+    const payload = calls.filter((call) => call.name === 'db:backup').at(-1).args[0];
+    assert.equal(payload.profileId, 'test');
+    assert.equal(payload.database, 'test');
+    assert.ok(payload.tables.includes('users'));
+    assert.equal(payload.tables.length, tables.length);
+    assert.deepEqual([...payload.routines].sort(), ['function:f_one', 'procedure:p_one']);
+    assert.deepEqual(payload.events, ['e_one']);
+    assert.equal(payload.stripDefiner, true);
+    assert.equal(payload.includeStructure, true);
+    assert.equal(payload.includeData, true);
+    assert.match(payload.taskId, /^backup-/);
+    await until("$('#modal').textContent.includes('Sao lưu hoàn tất')");
+    assert.match(await evaluate("$('#modal').textContent"), /1 procedure, 1 function, 1 event/);
   });
   await check('no renderer exceptions or unhandled rejections', async () => {
     await evaluate('new Promise(resolve => setTimeout(resolve, 200))');

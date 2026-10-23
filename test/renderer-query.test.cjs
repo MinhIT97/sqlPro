@@ -12,7 +12,7 @@ function setup(query = async () => ({ ok: true, data: rowResult() })) {
     requests.push(structuredClone(payload));
     return query(payload);
   } } }, elements: new Map([['#sql', editor], ['#queryResult', { innerHTML: '' }], ['#status', { textContent: '' }]]) });
-  renderer.evaluate("app.connection={id:'test', name:'Mock'}; app.database='test'; mode='query'; renderQueryTabs=()=>{};");
+  renderer.evaluate("app.connections=[{id:'test', name:'Mock'}]; app.connection={id:'test', name:'Mock'}; app.database='test'; mode='query'; renderQueryTabs=()=>{};");
   return { ...renderer, requests, editor };
 }
 
@@ -41,6 +41,7 @@ test('query: switching away while executing preserves results without touching a
   let complete;
   const r = setup(() => new Promise((resolve) => { complete = resolve; }));
   const pending = r.evaluate('runQuery()');
+  await new Promise((resolve) => setImmediate(resolve));
   r.elements.delete('#sql');
   r.elements.delete('#queryResult');
   r.evaluate("mode='structure'");
@@ -92,4 +93,63 @@ test('data grid: an older sort response cannot replace the latest data', async (
   pending[0](data('stale'));
   await first;
   assert.equal(r.evaluate('app.rows[0].name'), 'latest');
+});
+
+test('query results: renders row/col metadata and editable badge when PK is present', async () => {
+  const r = setup();
+  const html = r.evaluate(`
+    singleQueryResultHtml({
+      kind: 'rows',
+      columns: [
+        { name: 'id', table: 'users', type: 'INT', flags: 2 },
+        { name: 'username', table: 'users', type: 'VARCHAR', flags: 0 }
+      ],
+      rows: [[1, 'john_doe']],
+      durationMs: 5
+    });
+  `);
+  assert.match(html, /data-query-row="0"/);
+  assert.match(html, /data-col="username"/);
+  assert.match(html, /data-col-idx="1"/);
+  assert.match(html, /Sửa trực tiếp: Bật/);
+});
+
+test('query results: getQueryColumnPkInfo recognizes primary key and allows update', async () => {
+  const updateCalls = [];
+  const r = loadRenderer({
+    desktop: {
+      db: {
+        updateRow: async (payload) => {
+          updateCalls.push(payload);
+          return { affectedRows: 1 };
+        }
+      }
+    },
+    elements: new Map([
+      ['#status', { textContent: '' }],
+      ['#toast', { textContent: '', style: {}, setAttribute() {} }]
+    ])
+  });
+
+  r.evaluate(`
+    app.connection = { id: 'test', name: 'Mock' };
+    app.database = 'testdb';
+    app.query = {
+      result: {
+        kind: 'rows',
+        columns: [
+          { name: 'id', orgName: 'id', table: 'users', type: 'INT', flags: 2 },
+          { name: 'username', orgName: 'username', table: 'users', type: 'VARCHAR', flags: 0 }
+        ],
+        rows: [[2887, 'paul.brigham']]
+      }
+    };
+  `);
+
+  const info = await r.evaluate(`getQueryColumnPkInfo(app.query.result, 1)`);
+  assert.equal(info.editable, true);
+  assert.equal(info.table, 'users');
+  assert.equal(info.colName, 'username');
+  assert.equal(info.pkCols.length, 1);
+  assert.equal(info.pkCols[0].index, 0);
 });

@@ -71,11 +71,12 @@ function debounce(fn, delay = 250) {
 
 function toast(message, type = 'info') {
   const element = $('#toast');
+  element.setAttribute('role', type === 'error' ? 'alert' : 'status');
   element.textContent = message;
   element.className = type === 'error' ? 'toast-error' : '';
   element.style.display = 'block';
   clearTimeout(window.__sqlproToast);
-  window.__sqlproToast = setTimeout(() => { element.style.display = 'none'; }, 4000);
+  window.__sqlproToast = setTimeout(() => { element.style.display = 'none'; }, type === 'error' ? 8000 : 4000);
 }
 
 function formatBytes(value) {
@@ -682,6 +683,7 @@ async function init() {
   $('#workspaceSelect').addEventListener('change', (event) => switchWorkspace(event.target.value));
   $('#connectionList').addEventListener('click', onConnectionClick);
   $('#databaseTree').addEventListener('click', onTreeClick);
+  $('#databaseTree').addEventListener('keydown', activateSidebarItem);
   $('#tabs').addEventListener('click', onTabClick);
 
   if (!desktop) {
@@ -872,10 +874,12 @@ function renderSidebar() {
     return `
       <div class="connitem ${active ? 'active' : ''}" data-connection="${esc(connection.id)}">
         <div class="connhead">
-          <i class="dot" style="background:${active ? '#24a68b' : '#c9d3db'}"></i>
-          <span class="name">${esc(connection.name)}</span>
-          <span class="badge type">${typeLabel}</span>
-          <button class="more" data-menu="${esc(connection.id)}" title="Tùy chọn">···</button>
+          <button class="conn-open" data-connection="${esc(connection.id)}" aria-label="Kết nối ${esc(connection.name)}"${active ? ' aria-current="true"' : ''}>
+            <i class="dot" style="background:${active ? '#24a68b' : '#c9d3db'}"></i>
+            <span class="name">${esc(connection.name)}</span>
+            <span class="badge type">${typeLabel}</span>
+          </button>
+          <button class="more" data-menu="${esc(connection.id)}" title="Tùy chọn" aria-label="Tùy chọn kết nối ${esc(connection.name)}">···</button>
         </div>
         <div class="connmeta">${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port}${connection.ssh.enabled ? ' · SSH' : ''}</div>
       </div>
@@ -898,14 +902,14 @@ function renderSidebar() {
   if (!app.database) {
     const databases = app.databases.filter((name) => !term || name.toLowerCase().includes(term));
     tree.innerHTML = `
-      <div class="sideheading sub">DATABASES
+      <div class="sideheading sub" data-databases-heading="1">DATABASE
         <span class="headingactions">
           <button id="createDbBtn" title="Tạo database mới">＋</button>
           <button data-refresh-dbs="1" title="Làm mới">↻</button>
         </span>
       </div>
       ${databases.length
-        ? databases.map((name) => `<div class="database dbitem" data-db="${esc(name)}">▱ &nbsp; ${esc(name)}</div>`).join('')
+        ? databases.map((name) => `<div class="database dbitem" data-db="${esc(name)}" role="button" tabindex="0" aria-label="Mở database ${esc(name)}">▱ &nbsp; ${esc(name)}</div>`).join('')
         : '<div class="empty small">Không có database phù hợp.</div>'}
     `;
     return;
@@ -914,26 +918,26 @@ function renderSidebar() {
   const tables = app.tables.filter((entry) => entry.type === 'table' && (!term || entry.name.toLowerCase().includes(term)));
   const views = app.tables.filter((entry) => entry.type === 'view' && (!term || entry.name.toLowerCase().includes(term)));
   tree.innerHTML = `
-    <div class="database" data-db-list="1" title="Chọn database khác">⌄ &nbsp;▱ &nbsp; ${esc(app.database)} <span>${app.tables.length}</span></div>
+    <div class="database" data-db-list="1" role="button" tabindex="0" title="Chọn database khác" aria-label="Chọn database khác, hiện tại ${esc(app.database)}">⌄ &nbsp;▱ &nbsp; ${esc(app.database)} <span>${app.tables.length}</span></div>
     <div class="dbactions">
       <button data-backup-db="1" title="Sao lưu database ra tệp .sql">⇩ Sao lưu</button>
       <button data-restore-db="1" title="Phục hồi database từ tệp .sql">⇧ Phục hồi</button>
     </div>
-    <div class="sideheading sub">TABLES <span>${tables.length}</span>
+    <div class="sideheading sub">BẢNG <span>${tables.length}</span>
       <span class="headingactions">
         <button id="createTableBtn" title="Tạo bảng mới">＋</button>
       </span>
     </div>
     <div id="tree">
       ${tables.map((entry) => `
-        <div class="treeitem ${entry.name === table ? 'selected' : ''}" data-table="${esc(entry.name)}">
+        <div class="treeitem ${entry.name === table ? 'selected' : ''}" data-table="${esc(entry.name)}" role="button" tabindex="0" aria-label="Mở bảng ${esc(entry.name)}"${entry.name === table ? ' aria-current="true"' : ''}>
           <span>▦</span>${esc(entry.name)}${entry.rowEstimate !== null ? `<span class="rowcount">${entry.rowEstimate}</span>` : ''}
         </div>
       `).join('') || '<div class="empty small">Không có bảng.</div>'}
     </div>
-    <div class="sideheading sub">VIEWS <span>${views.length}</span></div>
+    <div class="sideheading sub">VIEW <span>${views.length}</span></div>
     ${views.map((entry) => `
-      <div class="treeitem ${entry.name === table ? 'selected' : ''}" data-table="${esc(entry.name)}">
+      <div class="treeitem ${entry.name === table ? 'selected' : ''}" data-table="${esc(entry.name)}" role="button" tabindex="0" aria-label="Mở view ${esc(entry.name)}"${entry.name === table ? ' aria-current="true"' : ''}>
         <span>◫</span>${esc(entry.name)}
       </div>
     `).join('') || '<div class="empty small">Không có view.</div>'}
@@ -1912,7 +1916,7 @@ function setupContextMenu() {
       return;
     }
 
-    if (dbsHeading && dbsHeading.textContent.includes('DATABASES')) {
+    if (dbsHeading?.matches('[data-databases-heading]')) {
       event.preventDefault();
       menu.innerHTML = `
         <div class="context-menu-item" data-action="create-db"><span class="c-icon">＋</span> Tạo Database mới…</div>
@@ -1938,6 +1942,13 @@ function setupContextMenu() {
   }
 }
 
+
+function activateSidebarItem(event) {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  if (!event.target.matches('[role="button"][data-db], [role="button"][data-db-list], [role="button"][data-table]')) return;
+  event.preventDefault();
+  event.target.click();
+}
 
 function onConnectionClick(event) {
   const menuButton = event.target.closest('[data-menu]');
@@ -2253,7 +2264,7 @@ function updateChrome() {
   const label = mode === 'query' ? 'QUERY' : mode === 'history' ? 'WORKSPACE' : mode === 'data' ? 'TABLE' : mode.toUpperCase();
   const title = mode === 'query' ? 'SQL Editor' : mode === 'history' ? 'Lịch sử truy vấn' : (table || app.database || 'Workspace');
   $('#title').innerHTML = `${esc(title)} <span>${label}</span>`;
-  $('#eyebrow').textContent = `${(app.database || 'NO DATABASE').toUpperCase()} / ${mode === 'query' ? 'QUERY' : mode === 'history' ? 'WORKSPACE' : 'TABLES'}`;
+  $('#eyebrow').textContent = `${(app.database || 'CHƯA CHỌN DATABASE').toUpperCase()} / ${mode === 'query' ? 'TRUY VẤN' : mode === 'history' ? 'LỊCH SỬ' : 'BẢNG'}`;
   const subtitles = {
     data: table ? `Bảng ${table} trong ${app.database}.` : 'Chọn một bảng để xem dữ liệu thật.',
     structure: table ? `Cấu trúc cột của ${app.database}.${table}.` : 'Chọn một bảng để xem cấu trúc.',
@@ -2264,7 +2275,7 @@ function updateChrome() {
   };
   $('#subtitle').textContent = subtitles[mode] || '';
   $('#crumbDb').textContent = app.database || '—';
-  $('#crumbServer').textContent = app.connection ? `${app.serverType === 'mariadb' ? 'MARIADB' : 'MYSQL'}${app.server ? ` ${app.server}` : ''}` : 'NO CONNECTION';
+  $('#crumbServer').textContent = app.connection ? `${app.serverType === 'mariadb' ? 'MARIADB' : 'MYSQL'}${app.server ? ` ${app.server}` : ''}` : 'CHƯA KẾT NỐI';
   $('#tabName').textContent = table || '—';
   $('#dataTab').classList.toggle('selected', mode !== 'query');
   renderQueryTabs();

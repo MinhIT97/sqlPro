@@ -207,6 +207,32 @@ app.whenReady().then(async () => {
   await check('theme initializes immediately from saved preference', async () => {
     assert.equal(await evaluate("localStorage.setItem('sqlpro-theme','light'); initTheme(); document.body.classList.contains('light-theme') && $('#themeToggleBtn').textContent.includes('Tối')"), true);
   });
+  await check('sidebar items support keyboard activation and clear labels', async () => {
+    const result = await evaluate(`(() => {
+      const previousConnections = app.connections;
+      const previousSelectTable = selectTable;
+      app.connections = [{id:'mock',name:'Mock',host:'localhost',port:3306,user:'root',ssh:{enabled:false},workspaceId:app.activeWorkspaceId}];
+      renderSidebar();
+      const connectionButton = document.querySelector('.conn-open[data-connection="mock"]');
+      const tableItem = document.querySelector('.treeitem[data-table="users"]');
+      selectTable = (name) => { window.selectedByKeyboard = name; };
+      tableItem.focus();
+      tableItem.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',bubbles:true}));
+      const result = {
+        connectionLabel: connectionButton?.getAttribute('aria-label'),
+        tableFocusable: tableItem?.tabIndex === 0,
+        selected: window.selectedByKeyboard,
+        toastRole: (toast('Lỗi kiểm tra', 'error'), document.querySelector('#toast').getAttribute('role'))
+      };
+      app.connections = previousConnections;
+      selectTable = previousSelectTable;
+      return result;
+    })()`);
+    assert.equal(result.connectionLabel, 'Kết nối Mock');
+    assert.equal(result.tableFocusable, true);
+    assert.equal(result.selected, 'users');
+    assert.equal(result.toastRole, 'alert');
+  });
   await check('no renderer exceptions or unhandled rejections', async () => {
     await evaluate('new Promise(resolve => setTimeout(resolve, 200))');
     errors.push(...await evaluate('window.rendererErrors'));

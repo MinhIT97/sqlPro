@@ -10,11 +10,11 @@
 <body>
   <aside class="rail">
     <div class="logo">S<span>↗</span></div>
-    <button title="Workspace" class="active" onclick="view('data')">▦</button>
-    <button title="Kết nối mới" onclick="connection()">⌘</button>
-    <button title="SQL Editor" onclick="view('query')">⌑</button>
-    <button title="Lịch sử" onclick="view('history')">◷</button>
-    <button class="railaccount" id="accountButton" title="Tài khoản và đồng bộ" onclick="accountModal()">
+    <button title="Workspace" aria-label="Workspace" class="active" onclick="view('data')">▦</button>
+    <button title="Kết nối mới" aria-label="Kết nối mới" onclick="connection()">⌘</button>
+    <button title="SQL Editor" aria-label="SQL Editor" onclick="view('query')">⌑</button>
+    <button title="Lịch sử" aria-label="Lịch sử truy vấn" onclick="view('history')">◷</button>
+    <button class="railaccount" id="accountButton" title="Tài khoản và đồng bộ" aria-label="Tài khoản và đồng bộ" onclick="accountModal()">
       <span id="accountInitials">SP</span>
       <i class="syncdot" id="syncDot"></i>
     </button>
@@ -23,23 +23,23 @@
   <aside class="sidebar">
     <div class="brand">SqlPro <span id="runtimeBadge">WORKSPACE</span></div>
     <div class="workspacebar">
-      <select id="workspaceSelect" title="Chọn workspace"></select>
-      <button title="Workspace mới" onclick="workspaceForm()">＋</button>
-      <button title="Quản lý workspace" onclick="workspaceManager()">⚙</button>
+      <select id="workspaceSelect" title="Chọn workspace" aria-label="Chọn workspace"></select>
+      <button title="Workspace mới" aria-label="Workspace mới" onclick="workspaceForm()">＋</button>
+      <button title="Quản lý workspace" aria-label="Quản lý workspace" onclick="workspaceManager()">⚙</button>
     </div>
-    <div class="sideheading">CONNECTIONS
+    <div class="sideheading">KẾT NỐI
       <span class="headingactions">
-        <button title="Nhập kết nối Navicat" onclick="importNavicat()">⇩</button>
-        <button title="Kết nối mới" onclick="connection()">＋</button>
+        <button title="Nhập kết nối Navicat" aria-label="Nhập kết nối Navicat" onclick="importNavicat()">⇩</button>
+        <button title="Kết nối mới" aria-label="Kết nối mới" onclick="connection()">＋</button>
       </span>
     </div>
-    <label class="search">⌕ <input id="treeSearch" placeholder="Tìm kết nối, bảng…"></label>
+    <label class="search">⌕ <input id="treeSearch" aria-label="Tìm kết nối và bảng" placeholder="Tìm kết nối, bảng…"></label>
     <div id="connectionList"></div>
     <div id="databaseTree"></div>
     <div class="sidefoot">
       <span class="dot" id="connDot"></span>
       <span id="connState">Chưa kết nối</span>
-      <button title="Ngắt kết nối" onclick="disconnect()">⏻</button>
+      <button title="Ngắt kết nối" aria-label="Ngắt kết nối" onclick="disconnect()">⏻</button>
     </div>
   </aside>
 
@@ -48,7 +48,7 @@
       <div>
         <span class="muted">Workspace</span>
         <span class="slash">/</span>
-        <span id="crumbServer">NO CONNECTION</span>
+        <span id="crumbServer">CHƯA KẾT NỐI</span>
         <span class="slash">/</span>
         <span id="crumbDb">—</span>
         <span class="env">LIVE</span>
@@ -66,12 +66,12 @@
     <div class="tabs" id="tabs">
       <button id="dataTab" class="selected" onclick="view('data')">▦ &nbsp; <span id="tabName">—</span> &nbsp; ×</button>
       <span id="queryTabs"></span>
-      <button id="newQueryTab" onclick="newQuery()" title="Truy vấn mới (Ctrl+T)">＋</button>
+      <button id="newQueryTab" onclick="newQuery()" title="Truy vấn mới (Ctrl+T)" aria-label="Truy vấn mới">＋</button>
     </div>
     <section class="content">
       <div class="titleline">
         <div>
-          <div class="eyebrow" id="eyebrow">NO DATABASE / TABLES</div>
+          <div class="eyebrow" id="eyebrow">CHƯA CHỌN DATABASE / BẢNG</div>
           <h1 id="title">Workspace <span>TABLE</span></h1>
           <p id="subtitle">Chọn một bảng để xem dữ liệu thật.</p>
         </div>
@@ -93,7 +93,7 @@
   </main>
 
   <dialog id="modal"></dialog>
-  <div id="toast"></div>
+  <div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
   <div id="contextMenu" class="context-menu hidden"></div>
   <script src="sql-autocomplete.js"></script>
   <script src="app.js"></script>

@@ -16,6 +16,8 @@ body{font-family:Inter,"Segoe UI",Roboto,Ubuntu,Arial,sans-serif;user-select:non
 .connitem:hover{background:#eef4f3}
 .connitem.active{background:#e0f0ec;color:#087f72}
 .connhead{display:flex;align-items:center;gap:8px;font-weight:600;font-size:12px;min-width:0}
+.conn-open{display:flex;align-items:center;gap:8px;flex:1;min-width:0;border:0;background:transparent;padding:0;color:inherit;text-align:left;font:inherit}
+.conn-open:hover{background:transparent;color:inherit}
 .connhead .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .connhead .dot{flex-shrink:0}
 .connhead .more{margin-left:auto;border:0;background:none;padding:0 4px;font-size:15px;line-height:1;color:#9aa5b1;flex-shrink:0;border-radius:4px}
@@ -769,4 +771,38 @@ body.light-theme .theme-btn {
   background: #f1f5f9;
   border-color: #cbd5e1;
   color: #1e293b;
+}
+
+/* Keyboard focus and reduced-motion support */
+#toast {
+  max-width: min(520px, calc(100vw - 32px));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+button:focus-visible,
+[role="button"]:focus-visible,
+a:focus-visible,
+select:focus-visible {
+  outline: 2px solid #0b8f80 !important;
+  outline-offset: 2px;
+}
+
+body.dark-theme button:focus-visible,
+body.dark-theme [role="button"]:focus-visible,
+body.dark-theme a:focus-visible,
+body.dark-theme select:focus-visible {
+  outline-color: #5eead4 !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

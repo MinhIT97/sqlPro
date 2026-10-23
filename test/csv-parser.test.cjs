@@ -35,6 +35,18 @@ test('CSV: streams rows split across chunks', () => {
   assert.deepEqual(parser.end(), [['1', '2']]);
 });
 
+test('CSV: handles escaped and closing quotes split across chunks', () => {
+  const escaped = new CsvStreamParser();
+  assert.deepEqual(
+    [...escaped.push('a,"b"'), ...escaped.push('"c"'), ...escaped.push('\n')],
+    [['a', 'b"c']]
+  );
+  const closing = new CsvStreamParser();
+  assert.deepEqual([...closing.push('a,"b"'), ...closing.push('\n')], [['a', 'b']]);
+  const atEnd = new CsvStreamParser();
+  assert.deepEqual([...atEnd.push('a,"b"'), ...atEnd.end()], [['a', 'b']]);
+});
+
 test('CSV: rejects malformed quotes', () => {
   for (const source of ['a,b\n"unterminated,2', 'a,b\n"x"oops,2', 'a,b\nx"y,2']) {
     const parser = new CsvStreamParser();

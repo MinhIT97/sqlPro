@@ -8,6 +8,7 @@ let activeTransfer = null;
 let transferTaskSeq = 0;
 
 const desktop = window.sqlProDesktop;
+const RowValues = window.SqlRowValues;
 
 const DEFAULT_WORKSPACE_ID = 'ws-personal';
 const openTreeGroups = new Set(['tables']);
@@ -3507,127 +3508,199 @@ function renderError(error) {
 }
 
 
-async function inlineEditCell(td) {
-  if (!td || td.classList.contains('editing-cell')) return;
-  const colName = td.dataset.col;
-  const rowIdx = Number(td.dataset.row);
-  if (!colName || isNaN(rowIdx) || !app.rows[rowIdx]) return;
+let rowValueEditorSequence = 0;
 
-  if (!app.primaryKey || !app.primaryKey.length) {
-    toast('Bảng không có khóa chính nên không thể sửa trực tiếp.', 'error');
-    return;
+function createRowValueEditor(column, originalValue, { inline = false, inserting = false, disabled = false } = {}) {
+  const spec = RowValues.describe(column, originalValue);
+  const readOnly = disabled || spec.readOnly;
+  const element = document.createElement('div');
+  element.className = `sql-value-editor${inline ? ' sql-value-inline' : ''}`;
+  const inputId = `sql-value-${++rowValueEditorSequence}`;
+  const rawValue = RowValues.displayValue(column, originalValue);
+  const modes = document.createElement('select');
+  modes.className = 'sql-value-mode';
+  modes.setAttribute('aria-label', `Chế độ giá trị cột ${column.name}`);
+  const modeOptions = [['value', 'Giá trị'], ...(spec.nullable ? [['null', 'NULL']] : []), ...(inserting ? [['default', 'DEFAULT']] : [])];
+  modeOptions.forEach(([value, label]) => {
+    const option = document.createElement('option'); option.value = value; option.textContent = label; modes.appendChild(option);
+  });
+  const hasDefault = column.defaultValue !== null && column.defaultValue !== undefined;
+  modes.value = inserting && (hasDefault || spec.nullable) ? 'default' : originalValue === null && spec.nullable ? 'null' : 'value';
+  if (modeOptions.length > 1) element.appendChild(modes);
+
+  let input;
+  if (spec.kind === 'enum' || spec.kind === 'set' || spec.kind === 'boolean' || (spec.kind === 'bit' && spec.width === 1)) {
+    input = document.createElement('select');
+    const choices = spec.kind === 'bit' ? ['0', '1'] : spec.choices;
+    const selected = spec.kind === 'set' ? (rawValue ? rawValue.split(',') : []) : [rawValue];
+    if (spec.kind === 'set') { input.multiple = true; input.size = Math.min(5, Math.max(2, choices.length)); }
+    if (spec.kind !== 'set' && !choices.includes(rawValue)) {
+      const current = document.createElement('option'); current.value = rawValue;
+      current.textContent = rawValue ? `${rawValue} (hiện tại)` : originalValue === '' ? "'' (hiện tại)" : 'Chọn giá trị…';
+      current.disabled = inserting || originalValue === null || originalValue === undefined;
+      input.appendChild(current);
+    }
+    const allChoices = [...choices, ...(spec.kind === 'set' ? selected.filter((value) => value && !choices.includes(value)) : [])];
+    [...new Set(allChoices)].forEach((value) => {
+      const option = document.createElement('option'); option.value = value;
+      option.textContent = value === '' ? "'' (chuỗi rỗng)" : value;
+      option.selected = selected.includes(value); input.appendChild(option);
+    });
+    if (!input.multiple) input.value = rawValue;
+  } else {
+    const multiline = spec.kind === 'json' || spec.kind === 'binary' || /text/.test(spec.base) || /[\r\n]/.test(rawValue) || (inline && spec.kind === 'text');
+    input = document.createElement(multiline ? 'textarea' : 'input');
+    if (!multiline) {
+      input.type = (spec.kind === 'integer' && spec.base !== 'bigint') || spec.kind === 'year' ? 'number' : 'text';
+      if (input.type === 'number') { input.step = '1'; if (spec.min) input.min = spec.min; if (spec.max) input.max = spec.max; }
+      if (spec.kind === 'year') { input.min = '0'; input.max = '2155'; }
+    } else input.rows = inline ? 1 : spec.kind === 'json' || spec.kind === 'binary' ? 4 : 2;
+    if (['integer', 'decimal', 'float', 'year', 'bit'].includes(spec.kind)) input.inputMode = spec.kind === 'integer' || spec.kind === 'year' || spec.kind === 'bit' ? 'numeric' : 'decimal';
+    input.value = rawValue;
   }
-
-  const colMeta = (app.columns || []).find((c) => c.name === colName);
-  if (colMeta && /(virtual|stored) generated/i.test(colMeta.extra)) {
-    toast(`Cột "${colName}" là cột tự động tính toán (generated), không thể sửa.`, 'error');
-    return;
+  input.id = inputId;
+  input.className = inline ? 'inline-cell-editor sql-value-input' : 'sql-value-input';
+  input.dataset.field = column.name;
+  input.setAttribute('aria-label', `${column.name} (${column.type})`);
+  input.spellcheck = false;
+  if (inline) input.title = 'Enter: Lưu · Esc: Hủy · Shift+Enter: Xuống dòng';
+  const control = document.createElement('div'); control.className = 'sql-value-control'; control.appendChild(input);
+  element.appendChild(control);
+  let picker = null;
+  if (['date', 'datetime', 'time'].includes(spec.kind)) {
+    picker = document.createElement('input');
+    picker.className = 'sql-value-picker';
+    picker.type = spec.kind === 'datetime' ? 'datetime-local' : spec.kind;
+    picker.step = spec.precision ? '0.001' : '1';
+    picker.title = spec.kind === 'date' ? 'Chọn ngày' : spec.kind === 'time' ? 'Chọn giờ trong ngày' : 'Chọn ngày và giờ';
+    picker.setAttribute('aria-label', `${picker.title} — ${column.name}`);
+    picker.value = RowValues.pickerValue(column, input.value);
+    input.placeholder = spec.kind === 'date' ? 'YYYY-MM-DD' : spec.kind === 'time' ? 'HH:mm:ss' : 'YYYY-MM-DD HH:mm:ss';
+    picker.addEventListener('click', () => { try { picker.showPicker?.(); } catch { /* Native keyboard editing remains available. */ } });
+    picker.addEventListener('change', () => {
+      input.value = RowValues.mergePickerValue(column, picker.value, input.value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    input.addEventListener('input', () => { picker.value = RowValues.pickerValue(column, input.value); });
+    control.appendChild(picker);
   }
+  if (!inline && (spec.hint || spec.kind === 'set')) {
+    const hint = document.createElement('small'); hint.className = 'sql-value-hint'; hint.id = `${inputId}-hint`;
+    hint.textContent = spec.hint || 'Chọn nhiều mục bằng Ctrl/Cmd hoặc Shift; bỏ chọn tất cả để lưu SET rỗng.';
+    element.appendChild(hint); input.setAttribute('aria-describedby', hint.id);
+  }
+  const error = document.createElement('div'); error.className = 'sql-value-error'; error.hidden = true; error.setAttribute('role', 'alert'); element.appendChild(error);
+  let busy = false;
+  const updateDisabled = () => {
+    modes.disabled = busy || readOnly;
+    input.disabled = busy || readOnly || modes.value !== 'value';
+    if (picker) picker.disabled = input.disabled;
+    element.classList.toggle('sql-value-readonly', readOnly);
+  };
+  const clearError = () => { error.hidden = true; input.removeAttribute('aria-invalid'); };
+  element.addEventListener('input', clearError);
+  modes.addEventListener('change', () => { clearError(); updateDisabled(); if (!input.disabled) input.focus(); });
+  updateDisabled();
+  const currentRaw = () => input.multiple ? Array.from(input.selectedOptions, (option) => option.value).join(',') : input.value;
+  const initialRaw = currentRaw();
+  const initialMode = modes.value;
+  return {
+    element, input, spec, modes,
+    setBusy(value) { busy = value; updateDisabled(); },
+    showError(message) { error.textContent = message; error.hidden = false; input.setAttribute('aria-invalid', 'true'); },
+    focus() { (input.disabled ? modes : input).focus(); if (input.tagName === 'TEXTAREA' || input.type === 'text') input.select(); },
+    read() {
+      if (readOnly) return { mode: 'readonly', value: originalValue, changed: false };
+      if (modes.value === 'default') return { mode: 'default', changed: false };
+      const raw = currentRaw();
+      if (!inserting && raw === initialRaw && modes.value === initialMode) return { mode: modes.value, value: originalValue, changed: false };
+      const value = RowValues.normalizeValue(column, modes.value === 'null' ? null : raw);
+      return { mode: modes.value, value, changed: value !== originalValue };
+    }
+  };
+}
 
-  const rowData = app.rows[rowIdx];
-  const database = app.database;
-  const targetTable = table;
-  const keys = Object.fromEntries(app.primaryKey.map((pk) => [pk, rowData[pk]]));
-  const originalVal = rowData[colName];
+function startInlineValueEdit({ td, column, value, save, onSaved, next }) {
   const originalDisplay = td.innerHTML;
+  const editor = createRowValueEditor(column, value, { inline: true });
+  if (editor.spec.readOnly) { toast(editor.spec.hint, 'error'); return; }
   td.classList.add('editing-cell');
-
-  const cellHeight = td.offsetHeight || 0;
-  const initialHeight = Math.max(cellHeight, 38);
-
-  const input = document.createElement('textarea');
-  input.className = 'inline-cell-editor';
-  input.value = originalVal === null || originalVal === undefined ? '' : String(originalVal);
-  input.style.minHeight = `${initialHeight}px`;
-  input.style.height = `${initialHeight}px`;
-  input.placeholder = (colMeta && colMeta.nullable === 'YES') ? 'Gõ NULL để gán null...' : 'Nhập giá trị...';
-  input.title = 'Enter: Lưu · Esc: Hủy · Shift+Enter: Xuống dòng';
-
-  const autoResize = () => {
-    input.style.height = 'auto';
-    const nextHeight = Math.min(Math.max(input.scrollHeight, initialHeight), 220);
-    input.style.height = `${nextHeight}px`;
-  };
-  input.addEventListener('input', autoResize);
-
-  td.innerHTML = '';
-  td.appendChild(input);
-  autoResize();
-  input.focus();
-  input.select();
-
-  let committed = false;
+  td.replaceChildren(editor.element);
+  const actions = document.createElement('div'); actions.className = 'sql-inline-actions';
+  const saveButton = document.createElement('button'); saveButton.type = 'button'; saveButton.textContent = 'Lưu';
+  const cancelButton = document.createElement('button'); cancelButton.type = 'button'; cancelButton.textContent = 'Hủy';
+  actions.append(saveButton, cancelButton); editor.element.appendChild(actions);
+  let finished = false;
+  let saving = false;
   const cancel = () => {
-    if (committed) return;
-    committed = true;
-    td.classList.remove('editing-cell');
-    td.innerHTML = originalDisplay;
+    if (finished || saving) return;
+    finished = true; td.classList.remove('editing-cell'); td.innerHTML = originalDisplay;
   };
-
   const commit = async () => {
-    if (committed) return;
-    committed = true;
-    const newVal = input.value;
-    const isOriginalNull = originalVal === null || originalVal === undefined;
-    const isUnchanged = (isOriginalNull && newVal === '') || (!isOriginalNull && String(originalVal) === newVal);
-
-    if (isUnchanged) {
-      td.classList.remove('editing-cell');
-      td.innerHTML = originalDisplay;
-      return;
-    }
-
-    let valToSave = newVal;
-    if (colMeta && colMeta.nullable === 'YES' && newVal.toUpperCase() === 'NULL') {
-      valToSave = null;
-    }
-
+    if (finished || saving) return false;
+    let change;
+    try { change = editor.read(); }
+    catch (error) { editor.showError(error.message); return false; }
+    if (!change.changed) { cancel(); return true; }
+    saving = true; editor.setBusy(true); saveButton.disabled = true; cancelButton.disabled = true;
     try {
-      await call(desktop.db.updateRow({
-        profileId: app.connection?.id || null,
-        database,
-        table: targetTable,
-        keys,
-        values: { [colName]: valToSave }
-      }));
-
-      rowData[colName] = valToSave;
+      await save(change.value);
+      finished = true;
+      onSaved(change.value);
       td.classList.remove('editing-cell');
-      const isNull = valToSave === null || valToSave === undefined;
-      const text = isNull ? 'NULL' : String(valToSave);
-      const shown = text.length > 180 ? `${text.slice(0, 180)}…` : text;
-      td.className = `${isNull ? 'nullcell ' : ''}cell-flash-saved`;
+      td.classList.toggle('nullcell', change.value === null);
+      const text = change.value === null ? 'NULL' : String(change.value);
       td.title = text.slice(0, 500);
-      td.innerHTML = isNull ? '<span class="null-badge">NULL</span>' : esc(shown);
-      setTimeout(() => td.classList.remove('cell-flash-saved'), 1500);
-      toast(`Đã lưu cột "${colName}"`, 'success');
-    } catch (err) {
-      td.classList.remove('editing-cell');
-      td.innerHTML = originalDisplay;
-      toast(err.message || 'Lỗi khi cập nhật dữ liệu', 'error');
-    }
+      td.innerHTML = change.value === null ? '<span class="null-badge">NULL</span>' : esc(text.length > 180 ? `${text.slice(0, 180)}…` : text);
+      td.classList.add('cell-flash-saved'); setTimeout(() => td.classList.remove('cell-flash-saved'), 1500);
+      toast(`Đã lưu cột "${column.name}"`, 'success');
+      return true;
+    } catch (error) {
+      editor.showError(error.message || 'Không lưu được dữ liệu.');
+      return false;
+    } finally { saving = false; editor.setBusy(false); saveButton.disabled = false; cancelButton.disabled = false; }
   };
-
-  input.addEventListener('keydown', (e) => {
-    if ((e.key === 'Enter' && !e.shiftKey) || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) {
-      e.preventDefault();
-      commit();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      cancel();
-    } else if (e.key === 'Tab') {
-      e.preventDefault();
-      commit().then(() => {
-        const targetCell = e.shiftKey ? td.previousElementSibling : td.nextElementSibling;
-        if (targetCell && targetCell.dataset && targetCell.dataset.col) {
-          inlineEditCell(targetCell);
-        }
-      });
+  saveButton.addEventListener('click', () => { void commit(); });
+  cancelButton.addEventListener('pointerdown', (event) => event.preventDefault());
+  cancelButton.addEventListener('click', cancel);
+  editor.element.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancel(); }
+    else if (event.key === 'Enter' && event.target.tagName !== 'BUTTON' && (!event.shiftKey || event.ctrlKey || event.metaKey)) { event.preventDefault(); void commit(); }
+    else if (event.key === 'Tab') {
+      const controls = Array.from(editor.element.querySelectorAll('input,textarea,select,button')).filter((control) => !control.disabled);
+      if (event.target === (event.shiftKey ? controls[0] : controls.at(-1))) {
+        event.preventDefault();
+        void commit().then((saved) => { if (saved) next?.(event.shiftKey); });
+      }
     }
   });
+  editor.element.addEventListener('focusout', () => {
+    setTimeout(() => { if (!editor.element.contains(document.activeElement)) void commit(); }, 0);
+  });
+  editor.focus();
+}
 
-  input.addEventListener('blur', () => {
-    commit();
+async function inlineEditCell(td) {
+  if (!td || td.classList.contains('editing-cell')) return;
+  const name = td.dataset.col;
+  const index = Number(td.dataset.row);
+  const row = app.rows[index];
+  if (!name || !row) return;
+  if (!app.primaryKey.length) { toast('Bảng không có khóa chính nên không thể sửa trực tiếp.', 'error'); return; }
+  const column = app.columns.find((entry) => entry.name === name);
+  if (!column) { toast('Không đọc được kiểu dữ liệu của cột. Hãy làm mới bảng.', 'error'); return; }
+  const profileId = app.connection?.id || null;
+  const database = app.database;
+  const targetTable = table;
+  const keys = Object.fromEntries(app.primaryKey.map((key) => [key, row[key]]));
+  startInlineValueEdit({
+    td, column, value: row[name],
+    save: (value) => call(desktop.db.updateRow({ profileId, database, table: targetTable, keys, values: { [name]: value } })),
+    onSaved: (value) => { row[name] = value; },
+    next: (previous) => {
+      const next = previous ? td.previousElementSibling : td.nextElementSibling;
+      if (next?.dataset.col) void inlineEditCell(next);
+    }
   });
 }
 
@@ -4802,7 +4875,7 @@ function getActiveQueryResult() {
   return null;
 }
 
-async function getQueryColumnPkInfo(result, colIdx) {
+async function getQueryColumnPkInfo(result, colIdx, profileId = app.query?.profileId || app.connection?.id || null) {
   if (!result || !result.columns || !result.columns[colIdx]) return null;
   const colMeta = result.columns[colIdx];
   const targetTable = colMeta.orgTable || colMeta.table || table;
@@ -4821,18 +4894,19 @@ async function getQueryColumnPkInfo(result, colIdx) {
   // 1. Check if PK flags are present directly in result.columns
   let pkCols = result.columns
     .map((c, i) => ({ col: c, index: i }))
-    .filter(({ col }) => ((col.flags & 2) || col.key === 'PRI') && (col.table === colMeta.table || !col.table));
+    .filter(({ col }) => ((col.flags & 2) || col.key === 'PRI')
+      && (col.orgTable || col.table || targetTable) === targetTable && (!col.db || col.db === targetDb));
 
   // 2. If no PK flag found in columns, look up primary keys from table
   if (!pkCols.length) {
-    let pks = (table === targetTable && app.primaryKey?.length) ? app.primaryKey : null;
+    let pks = (table === targetTable && app.database === targetDb && (app.connection?.id || null) === profileId && app.primaryKey?.length) ? app.primaryKey : null;
     if (!pks) {
-      const cacheKey = `${app.query?.profileId || ''}.${targetDb}.${targetTable}`;
+      const cacheKey = `${profileId || ''}.${targetDb}.${targetTable}`;
       if (queryTablePkCache.has(cacheKey)) {
         pks = queryTablePkCache.get(cacheKey);
       } else if (desktop?.db?.columns) {
         try {
-          const cols = await call(desktop.db.columns(targetDb, targetTable, app.query?.profileId || null));
+          const cols = await call(desktop.db.columns(targetDb, targetTable, profileId));
           pks = (cols || []).filter((c) => c.key === 'PRI').map((c) => c.name);
           queryTablePkCache.set(cacheKey, pks);
         } catch {
@@ -4844,7 +4918,7 @@ async function getQueryColumnPkInfo(result, colIdx) {
       pkCols = [];
       for (const pkName of pks) {
         const foundIdx = result.columns.findIndex((c) =>
-          (c.table === targetTable || !c.table) &&
+          (c.orgTable || c.table || targetTable) === targetTable && (!c.db || c.db === targetDb) &&
           (c.name.toLowerCase() === pkName.toLowerCase() || (c.orgName && c.orgName.toLowerCase() === pkName.toLowerCase()))
         );
         if (foundIdx === -1) {
@@ -4869,137 +4943,45 @@ async function getQueryColumnPkInfo(result, colIdx) {
 }
 
 async function inlineEditQueryResultCell(td) {
-  if (!td || td.classList.contains('editing-cell')) return;
+  if (!td || td.classList.contains('editing-cell') || td.dataset.editorLoading) return;
   const colIdx = Number(td.dataset.colIdx);
   const tr = td.closest('tr[data-query-row]');
-  if (!tr || isNaN(colIdx)) return;
-  const rowIdx = Number(tr.dataset.queryRow);
   const result = getActiveQueryResult();
-  if (!result || !result.rows || !result.rows[rowIdx]) return;
-
-  const rawText = td.getAttribute('title') || td.textContent.trim();
-  const info = await getQueryColumnPkInfo(result, colIdx);
-
-  if (!info || !info.editable) {
-    if (rawText && rawText !== 'NULL') {
-      try { await navigator.clipboard.writeText(rawText); } catch {}
-      const reasonMsg = info?.reason ? `${info.reason} ` : '';
-      toast(`${reasonMsg}(Đã sao chép giá trị vào bộ nhớ tạm)`);
-    } else if (info?.reason) {
-      toast(info.reason, 'info');
+  if (!tr || !Number.isInteger(colIdx) || !result?.rows) return;
+  const source = result.columns[colIdx];
+  if (!source || (!source.orgTable && !source.table)) { toast('Cột tính toán không có bảng gốc để chỉnh sửa.', 'error'); return; }
+  const row = result.rows[Number(tr.dataset.queryRow)];
+  if (!row) return;
+  const profileId = app.query?.profileId || app.connection?.id || null;
+  td.dataset.editorLoading = '1';
+  try {
+    const info = await getQueryColumnPkInfo(result, colIdx, profileId);
+    if (td.isConnected === false || getActiveQueryResult() !== result) return;
+    if (!info?.editable) { toast(info?.reason || 'Kết quả này chỉ đọc.', 'error'); return; }
+    const columns = await call(desktop.db.columns(info.database, info.table, profileId));
+    if (td.isConnected === false || getActiveQueryResult() !== result) return;
+    const column = columns.find((entry) => entry.name === info.colName);
+    if (!column) { toast('Không xác định được cột gốc để chỉnh sửa.', 'error'); return; }
+    const keys = {};
+    const primary = columns.filter((entry) => entry.key === 'PRI');
+    if (!primary.length) { toast('Bảng không có khóa chính nên không thể sửa trực tiếp.', 'error'); return; }
+    for (const key of primary) {
+      const index = result.columns.findIndex((entry) => (entry.orgName || entry.name) === key.name
+        && (entry.orgTable || entry.table) === info.table && (!entry.db || entry.db === info.database));
+      if (index === -1) { toast(`Kết quả thiếu khóa chính "${key.name}" của bảng "${info.table}".`, 'error'); return; }
+      keys[key.name] = row[index];
     }
-    return;
-  }
-
-  const rowData = result.rows[rowIdx];
-  const keys = {};
-  for (const { col, index } of info.pkCols) {
-    const pkName = col.orgName || col.name;
-    keys[pkName] = rowData[index];
-  }
-
-  const colName = info.colName;
-  const originalVal = rowData[colIdx];
-  const originalDisplay = td.innerHTML;
-  td.classList.add('editing-cell');
-
-  const cellHeight = td.offsetHeight || 0;
-  const initialHeight = Math.max(cellHeight, 38);
-
-  const input = document.createElement('textarea');
-  input.className = 'inline-cell-editor';
-  input.value = originalVal === null || originalVal === undefined ? '' : String(originalVal);
-  input.style.minHeight = `${initialHeight}px`;
-  input.style.height = `${initialHeight}px`;
-  input.placeholder = 'Nhập giá trị (gõ NULL để gán null)...';
-  input.title = 'Enter: Lưu · Esc: Hủy · Shift+Enter: Xuống dòng';
-
-  const autoResize = () => {
-    input.style.height = 'auto';
-    const nextHeight = Math.min(Math.max(input.scrollHeight, initialHeight), 220);
-    input.style.height = `${nextHeight}px`;
-  };
-  input.addEventListener('input', autoResize);
-
-  td.innerHTML = '';
-  td.appendChild(input);
-  autoResize();
-  input.focus();
-  input.select();
-
-  let committed = false;
-  const cancel = () => {
-    if (committed) return;
-    committed = true;
-    td.classList.remove('editing-cell');
-    td.innerHTML = originalDisplay;
-  };
-
-  const commit = async () => {
-    if (committed) return;
-    committed = true;
-    const newVal = input.value;
-    const isOriginalNull = originalVal === null || originalVal === undefined;
-    const isUnchanged = (isOriginalNull && newVal === '') || (!isOriginalNull && String(originalVal) === newVal);
-
-    if (isUnchanged) {
-      td.classList.remove('editing-cell');
-      td.innerHTML = originalDisplay;
-      return;
-    }
-
-    let valToSave = newVal;
-    if (newVal.toUpperCase() === 'NULL') {
-      valToSave = null;
-    }
-
-    try {
-      await call(desktop.db.updateRow({
-        profileId: app.query?.profileId || null,
-        database: info.database,
-        table: info.table,
-        keys,
-        values: { [colName]: valToSave }
-      }));
-
-      rowData[colIdx] = valToSave;
-      td.classList.remove('editing-cell');
-      const isNull = valToSave === null || valToSave === undefined;
-      const text = isNull ? 'NULL' : String(valToSave);
-      const shown = text.length > 180 ? `${text.slice(0, 180)}…` : text;
-      td.className = `${isNull ? 'nullcell ' : ''}cell-flash-saved`;
-      td.title = text.slice(0, 500);
-      td.innerHTML = isNull ? '<span class="null-badge">NULL</span>' : esc(shown);
-      setTimeout(() => td.classList.remove('cell-flash-saved'), 1500);
-      toast(`Đã lưu "${colName}" vào bảng ${info.table}`, 'success');
-    } catch (err) {
-      td.classList.remove('editing-cell');
-      td.innerHTML = originalDisplay;
-      toast(err.message || 'Lỗi khi cập nhật dữ liệu', 'error');
-    }
-  };
-
-  input.addEventListener('keydown', (e) => {
-    if ((e.key === 'Enter' && !e.shiftKey) || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) {
-      e.preventDefault();
-      commit();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      cancel();
-    } else if (e.key === 'Tab') {
-      e.preventDefault();
-      commit().then(() => {
-        const targetCell = e.shiftKey ? td.previousElementSibling : td.nextElementSibling;
-        if (targetCell && targetCell.dataset && targetCell.dataset.colIdx !== undefined) {
-          inlineEditQueryResultCell(targetCell);
-        }
-      });
-    }
-  });
-
-  input.addEventListener('blur', () => {
-    commit();
-  });
+    startInlineValueEdit({
+      td, column, value: row[colIdx],
+      save: (value) => call(desktop.db.updateRow({ profileId, database: info.database, table: info.table, keys, values: { [column.name]: value } })),
+      onSaved: (value) => { row[colIdx] = value; },
+      next: (previous) => {
+        const next = previous ? td.previousElementSibling : td.nextElementSibling;
+        if (next?.dataset.colIdx !== undefined) void inlineEditQueryResultCell(next);
+      }
+    });
+  } catch (error) { toast(error.message || 'Không tải được metadata của cột.', 'error'); }
+  finally { delete td.dataset.editorLoading; }
 }
 
 function singleQueryResultHtml(result, compact = false) {
@@ -5408,105 +5390,71 @@ function renderHistoryView() {
 
 async function editRow(index) {
   if (!desktop || !app.database || !table) return;
-  let columns = app.columns;
-  if (!columns.length) {
-    try {
-      columns = await call(desktop.db.columns(app.database, table, app.connection?.id || null));
-      app.columns = columns;
-      app.primaryKey = columns.filter((column) => column.key === 'PRI').map((column) => column.name);
-    } catch (error) {
-      toast(error.message, 'error');
-      return;
-    }
-  }
+  const profileId = app.connection?.id || null;
+  const database = app.database;
+  const targetTable = table;
   const editing = Number.isInteger(index) && index >= 0 && index < app.rows.length;
   const row = editing ? app.rows[index] : null;
-  if (editing && !app.primaryKey.length) {
-    toast('Bảng không có khóa chính nên không thể sửa trực tiếp.', 'error');
-    return;
+  let columns = app.columns;
+  if (!columns.length) {
+    try { columns = await call(desktop.db.columns(database, targetTable, profileId)); }
+    catch (error) { toast(error.message, 'error'); return; }
   }
-  const fields = columns.filter((column) => {
-    if (/(virtual|stored) generated/i.test(column.extra)) return false;
-    if (!editing && /auto_increment/i.test(column.extra)) return false;
-    return true;
-  });
-  const fieldsHtml = fields.map((column) => {
-    const isPrimary = column.key === 'PRI';
-    const value = row && row[column.name] !== null && row[column.name] !== undefined ? String(row[column.name]) : '';
-    const isNull = row ? row[column.name] === null || row[column.name] === undefined : false;
-    return `
-      <div class="field">
-        <label>${esc(column.name)} <small class="mono">${esc(column.type)}</small></label>
-        <div class="fieldinput">
-          <input data-field="${esc(column.name)}" value="${esc(value)}" ${isPrimary ? 'disabled' : ''} ${isNull ? 'disabled' : ''}>
-          ${column.nullable === 'YES' && !isPrimary ? `<label class="nulltoggle"><input type="checkbox" data-null="${esc(column.name)}" ${isNull ? 'checked' : ''}> NULL</label>` : ''}
-        </div>
-      </div>
-    `;
-  }).join('');
+  if ((app.connection?.id || null) !== profileId || app.database !== database || table !== targetTable) return;
+  const primary = columns.filter((column) => column.key === 'PRI').map((column) => column.name);
+  if (editing && !primary.length) { toast('Bảng không có khóa chính nên không thể sửa trực tiếp.', 'error'); return; }
+  const fields = columns.filter((column) => editing || !/auto_increment/i.test(column.extra || ''));
   modal(`
     <h2>${editing ? 'Sửa bản ghi' : 'Thêm bản ghi'}</h2>
-    <p>${esc(app.database)}.${esc(table)} — thay đổi ghi trực tiếp vào database.</p>
-    <form id="rowForm" class="fieldgrid">${fieldsHtml}</form>
-    <div class="errorbox hidden" id="rowError"></div>
-    <div class="actions">
-      <button type="button" id="rowCancel">Hủy</button>
-      <button type="button" class="primary" id="rowSave">${editing ? 'Lưu thay đổi' : 'Thêm bản ghi'}</button>
-    </div>
+    <p>${esc(database)}.${esc(targetTable)} — thay đổi ghi trực tiếp vào database.</p>
+    <form id="rowForm" class="fieldgrid row-value-form"></form>
+    <div class="errorbox hidden" id="rowError" role="alert"></div>
+    <div class="actions"><button type="button" id="rowCancel">Hủy</button><button type="button" class="primary" id="rowSave">${editing ? 'Lưu thay đổi' : 'Thêm bản ghi'}</button></div>
   `, true);
   const form = $('#rowForm');
-  form.querySelectorAll('[data-null]').forEach((checkbox) => {
-    checkbox.addEventListener('change', () => {
-      const input = form.querySelector(`[data-field="${CSS.escape(checkbox.dataset.null)}"]`);
-      if (input) input.disabled = checkbox.checked;
-    });
+  const errorBox = $('#rowError');
+  const saveButton = $('#rowSave');
+  const editors = new Map();
+  fields.forEach((column) => {
+    const editor = createRowValueEditor(column, row?.[column.name], { inserting: !editing, disabled: editing && primary.includes(column.name) });
+    const field = document.createElement('div'); field.className = 'field';
+    const label = document.createElement('label'); label.htmlFor = editor.input.id;
+    label.appendChild(document.createTextNode(`${column.name} `));
+    const type = document.createElement('small'); type.className = 'mono'; type.textContent = column.type; label.appendChild(type);
+    field.append(label, editor.element); form.appendChild(field); editors.set(column.name, editor);
   });
   $('#rowCancel').addEventListener('click', closeModal);
-  $('#rowSave').addEventListener('click', async () => {
+  const save = async () => {
+    if (saveButton.disabled) return;
+    errorBox.classList.add('hidden');
     const values = {};
-    form.querySelectorAll('[data-field]').forEach((input) => {
-      const name = input.dataset.field;
-      const nullToggle = form.querySelector(`[data-null="${CSS.escape(name)}"]`);
-      if (nullToggle && nullToggle.checked) {
-        values[name] = null;
-        return;
+    for (const [name, editor] of editors) {
+      try {
+        const change = editor.read();
+        if (change.mode === 'default' || change.mode === 'readonly' || (editing && !change.changed)) continue;
+        values[name] = change.value;
+      } catch (error) {
+        editor.showError(error.message); editor.focus();
+        errorBox.textContent = error.message; errorBox.classList.remove('hidden'); return;
       }
-      if (input.disabled && editing && app.primaryKey.includes(name)) return;
-      if (!editing && input.value === '') return;
-      values[name] = input.value;
-    });
+    }
+    if (editing && !Object.keys(values).length) { toast('Không có thay đổi để lưu.'); closeModal(); return; }
+    saveButton.disabled = true;
+    editors.forEach((editor) => editor.setBusy(true));
     try {
       if (editing) {
-        const keys = Object.fromEntries(app.primaryKey.map((name) => [name, row[name]]));
-        const changes = {};
-        for (const [name, value] of Object.entries(values)) {
-          if (app.primaryKey.includes(name)) continue;
-          changes[name] = value;
-        }
-        await call(desktop.db.updateRow({
-          profileId: app.connection?.id || null,
-          database: app.database,
-          table,
-          keys,
-          values: changes
-        }));
-        toast('Đã cập nhật bản ghi');
-      } else {
-        await call(desktop.db.insertRow({
-          profileId: app.connection?.id || null,
-          database: app.database,
-          table,
-          values
-        }));
-        toast('Đã thêm bản ghi');
-      }
-      closeModal();
-      await loadData();
-    } catch (error) {
-      $('#rowError').textContent = error.message;
-      $('#rowError').classList.remove('hidden');
-    }
-  });
+        const keys = Object.fromEntries(primary.map((name) => [name, row[name]]));
+        await call(desktop.db.updateRow({ profileId, database, table: targetTable, keys, values }));
+      } else await call(desktop.db.insertRow({ profileId, database, table: targetTable, values }));
+      toast(editing ? 'Đã cập nhật bản ghi' : 'Đã thêm bản ghi');
+      if (form.isConnected) closeModal();
+      if ((app.connection?.id || null) === profileId && app.database === database && table === targetTable) await loadData();
+    } catch (error) { errorBox.textContent = error.message; errorBox.classList.remove('hidden'); }
+    finally { saveButton.disabled = false; editors.forEach((editor) => editor.setBusy(false)); }
+  };
+  form.addEventListener('submit', (event) => { event.preventDefault(); void save(); });
+  form.addEventListener('keydown', (event) => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void save(); } });
+  saveButton.addEventListener('click', () => { void save(); });
 }
 
 async function deleteSelectedRows() {

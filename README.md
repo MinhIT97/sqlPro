@@ -12,6 +12,7 @@ SqlPro là ứng dụng desktop Electron quản trị MySQL/MariaDB trên Window
 - SQL Editor gợi ý từ khóa, hàm, bảng/view và cột theo kết nối hiện tại; hỗ trợ alias bảng.
 - Nhiều tab SQL Editor; mỗi tab giữ nội dung riêng khi chuyển qua lại.
 - Thêm, sửa, xóa bản ghi có khóa chính; tìm kiếm và phân trang.
+- Editor theo kiểu cột cho hộp thoại thêm/sửa dòng và sửa trực tiếp trong bảng/kết quả SQL: lịch DATE/DATETIME/TIMESTAMP, chọn TIME, số/YEAR, ENUM/SET, JSON và hex nhị phân. NULL/DEFAULT được chọn riêng; giữ số lớn, giây lẻ và giờ theo phiên database. Dữ liệu nhị phân chỉ có bản xem trước, cột generated và dữ liệu không gian được giữ ở chế độ chỉ đọc khi không thể sửa đầy đủ từ lưới.
 - Nhập CSV/TSV/JSON và xuất CSV/TSV/JSON theo luồng, có xem trước, ánh xạ cột và hủy giữa chừng.
 - Sao lưu database ra tệp `.sql` (cấu trúc bảng/view, trigger, procedure, function, event và dữ liệu) và phục hồi từ tệp `.sql`.
 - Lưu mật khẩu bằng Electron `safeStorage` (OS keychain); nếu không khả dụng thì mã hóa AES-256-GCM với khóa cục bộ quyền `0600`.

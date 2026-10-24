@@ -19,6 +19,8 @@ const columns = [
   { name: 'id', type: 'int', key: 'PRI', extra: 'auto_increment', nullable: 'NO', defaultValue: null },
   { name: 'name', type: 'varchar(255)', key: '', extra: '', nullable: 'YES', defaultValue: null }
 ];
+let rowEditorColumns = columns;
+let rowEditorFailure = false;
 const tables = Array.from({ length: 14 }, (_, i) => ({ name: i ? `table_${i}` : 'users', type: 'table' }));
 const ok = (data) => ({ ok: true, data });
 const rows = (names, data) => ({ kind: 'rows', columns: names.map((name) => ({ name, type: 'TEXT' })), rows: data, durationMs: 1 });
@@ -36,12 +38,13 @@ handle('account:status', () => ok({ loggedIn: false }));
 handle('db:use-database', () => ok({}));
 handle('db:databases', () => ok(['test']));
 handle('db:tables', () => ok(tables));
-handle('db:columns', () => ok(columns));
+handle('db:columns', () => ok(rowEditorColumns));
 handle('db:indexes', () => ok([]));
 handle('db:relations', () => ok({ outbound: [{ table: 'users', column: 'id', refTable: 'table_1', refColumn: 'id', refDatabase: 'test' }], inbound: [] }));
 handle('db:table-data', () => ok({ columns, primaryKey: ['id'], rows: [{ id: 1, name: 'Alice' }], total: 1, page: 1, pageSize: 100 }));
 handle('db:delete-rows', () => ok({ affectedRows: 1 }));
-handle('db:update-row', () => ok({ affectedRows: 1, changedRows: 1 }));
+handle('db:update-row', () => rowEditorFailure ? { ok: false, error: { message: 'Expected row save failure' } } : ok({ affectedRows: 1, changedRows: 1 }));
+handle('db:insert-row', () => ok({ affectedRows: 1, insertId: 2 }));
 handle('db:import-file', (payload) => ok({
   database: payload.database,
   table: payload.table,
@@ -455,6 +458,171 @@ app.whenReady().then(async () => {
     await until("$('#modal').textContent.includes('Sao lưu hoàn tất')");
     assert.match(await evaluate("$('#modal').textContent"), /1 procedure, 1 function, 1 event/);
   });
+  const typedColumns = [
+    { name: 'id', type: 'int', nullable: 'NO', key: 'PRI', extra: '' },
+    { name: 'name', type: 'varchar(50)', nullable: 'YES', extra: '' },
+    { name: 'due', type: 'date', nullable: 'YES', extra: '' },
+    { name: 'recorded_at', type: 'datetime(6)', nullable: 'NO', extra: '' },
+    { name: 'duration', type: 'time(6)', nullable: 'NO', extra: '' },
+    { name: 'year', type: 'year', nullable: 'YES', extra: '' },
+    { name: 'amount', type: 'decimal(30,6)', nullable: 'NO', extra: '' },
+    { name: 'count', type: 'bigint unsigned', nullable: 'NO', extra: '' },
+    { name: 'enabled', type: 'bit(1)', nullable: 'NO', extra: '' },
+    { name: 'status', type: "enum('new','active','done')", nullable: 'NO', extra: '' },
+    { name: 'roles', type: "set('read','write','admin')", nullable: 'NO', extra: '' },
+    { name: 'payload', type: 'json', nullable: 'YES', extra: '' },
+    { name: 'bytes', type: 'varbinary(8)', nullable: 'YES', extra: '' },
+    { name: 'preview', type: 'blob', nullable: 'YES', extra: '' },
+    { name: 'zero_date', type: 'date', nullable: 'NO', extra: '' },
+    { name: 'computed', type: 'int', nullable: 'NO', extra: 'STORED GENERATED' }
+  ];
+  const typedRow = {
+    id: 1, name: 'Alice', due: '2026-10-24', recorded_at: '2026-10-24 12:34:56.123456',
+    duration: '-125:04:03.123456', year: '2026', amount: '12345678901234567890.123456',
+    count: '18446744073709551614', enabled: '0x00', status: 'new', roles: 'read',
+    payload: '{"n":18446744073709551615}', bytes: '0x0012', preview: '0x1234… (100 bytes)', zero_date: '0000-00-00', computed: 42
+  };
+  const setupTypedRows = async () => {
+    rowEditorColumns = typedColumns;
+    await evaluate(`closeModal(); app.connection={id:'test',name:'Demo',ssh:{enabled:false}}; app.database='test'; table='users'; mode='data'; app.columns=${JSON.stringify(typedColumns)}; app.primaryKey=['id']; app.rows=[${JSON.stringify(typedRow)}]; app.total=1; app.page=1; app.pageSize=100; app.search=''; renderDataView();`);
+  };
+
+  await check('row form uses schema controls and saves only changed values without losing precision', async () => {
+    await setupTypedRows();
+    await evaluate('editRow(0)');
+    assert.deepEqual(await evaluate("[...document.querySelectorAll('#rowForm .sql-value-picker')].map(el=>el.type)"), ['date', 'datetime-local', 'time', 'date']);
+    assert.equal(await evaluate("document.querySelector('[data-field=status]').tagName"), 'SELECT');
+    assert.equal(await evaluate("document.querySelector('[data-field=roles]').multiple"), true);
+    assert.equal(await evaluate("document.querySelector('[data-field=count]').type"), 'text');
+    assert.equal(await evaluate("document.querySelector('[data-field=payload]').tagName"), 'TEXTAREA');
+    for (const name of ['id', 'preview', 'computed']) assert.equal(await evaluate(`document.querySelector('[data-field=${name}]').disabled`), true);
+    await evaluate(`
+      const due = document.querySelector('[data-field=due]').closest('.sql-value-editor').querySelector('.sql-value-picker');
+      due.value='2026-11-02'; due.dispatchEvent(new Event('change'));
+      const recorded = document.querySelector('[data-field=recorded_at]').closest('.sql-value-editor').querySelector('.sql-value-picker');
+      recorded.value='2026-11-03T21:45:56.123'; recorded.dispatchEvent(new Event('change'));
+      document.querySelector('[data-field=name]').value='NULL';
+      document.querySelector('[data-field=count]').value='18446744073709551615';
+      document.querySelector('[data-field=status]').value='done';
+      for (const option of document.querySelector('[data-field=roles]').options) option.selected=['read','write'].includes(option.value);
+      document.querySelector('[data-field=enabled]').value='1';
+      document.querySelector('[data-field=bytes]').value='0x00ff';
+    `);
+    if (process.env.SQLPRO_ROW_EDITOR_SCREENSHOT_DIR) {
+      fs.mkdirSync(process.env.SQLPRO_ROW_EDITOR_SCREENSHOT_DIR, { recursive: true });
+      win.setContentSize(1320, 900);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      fs.writeFileSync(path.join(process.env.SQLPRO_ROW_EDITOR_SCREENSHOT_DIR, 'row-form.png'), (await win.webContents.capturePage()).toPNG());
+    }
+    const before = calls.filter((call) => call.name === 'db:update-row').length;
+    await evaluate("$('#rowSave').click()");
+    await until("!$('#modal').open");
+    const updates = calls.filter((call) => call.name === 'db:update-row');
+    assert.equal(updates.length, before + 1);
+    assert.deepEqual(updates.at(-1).args[0].values, { name: 'NULL', due: '2026-11-02', recorded_at: '2026-11-03 21:45:56.123456', count: '18446744073709551615', enabled: '1', status: 'done', roles: 'read,write', bytes: '0x00ff' });
+    assert.deepEqual(updates.at(-1).args[0].keys, { id: 1 });
+  });
+
+  await check('row form rejects invalid dates and JSON, and untouched zero dates do not get rewritten', async () => {
+    await setupTypedRows();
+    await evaluate('editRow(0)');
+    const before = calls.filter((call) => call.name === 'db:update-row').length;
+    await evaluate("document.querySelector('[data-field=due]').value='2026-02-30'; $('#rowSave').click()");
+    assert.equal(calls.filter((call) => call.name === 'db:update-row').length, before);
+    assert.match(await evaluate("$('#rowError').textContent"), /ngày không hợp lệ/);
+    await evaluate("document.querySelector('[data-field=due]').value='2026-10-24'; document.querySelector('[data-field=payload]').value='{bad}'; $('#rowSave').click()");
+    assert.match(await evaluate("$('#rowError').textContent"), /JSON không hợp lệ/);
+    assert.equal(calls.filter((call) => call.name === 'db:update-row').length, before);
+    await evaluate("$('#rowCancel').click(); editRow(0); $('#rowSave').click()");
+    assert.equal(calls.filter((call) => call.name === 'db:update-row').length, before);
+  });
+
+  await check('inserting allows manual primary keys and distinguishes DEFAULT, NULL and empty strings', async () => {
+    rowEditorColumns = [
+      { name: 'id', type: 'int', key: 'PRI', nullable: 'NO', extra: '' },
+      { name: 'name', type: 'varchar(50)', nullable: 'NO', extra: '' },
+      { name: 'notes', type: 'text', nullable: 'YES', extra: '' },
+      { name: 'created', type: 'datetime', nullable: 'NO', extra: '', defaultValue: 'CURRENT_TIMESTAMP' }
+    ];
+    await evaluate(`app.columns=${JSON.stringify(rowEditorColumns)}; editRow(null)`);
+    assert.equal(await evaluate("document.querySelector('[data-field=id]').disabled"), false);
+    await evaluate("document.querySelector('[data-field=id]').value='2'; const notes=document.querySelector('[data-field=notes]').closest('.sql-value-editor').querySelector('.sql-value-mode'); notes.value='null'; notes.dispatchEvent(new Event('change')); $('#rowSave').click()");
+    await until("!$('#modal').open");
+    const payload = calls.filter((call) => call.name === 'db:insert-row').at(-1).args[0];
+    assert.deepEqual(payload.values, { id: '2', name: '', notes: null });
+  });
+
+  await check('inline date picker keeps focus transitions from saving prematurely and preserves calendar dates', async () => {
+    await setupTypedRows();
+    const before = calls.filter((call) => call.name === 'db:update-row').length;
+    await evaluate("inlineEditCell($('#grid td[data-col=due]')); document.querySelector('.sql-value-picker').focus()");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(calls.filter((call) => call.name === 'db:update-row').length, before);
+    await evaluate("document.querySelector('.sql-value-picker').value='2026-12-31'; document.querySelector('.sql-value-picker').dispatchEvent(new Event('change')); document.querySelector('.sql-inline-actions button').click()");
+    await until("!$('#grid td[data-col=due]').classList.contains('editing-cell')");
+    assert.equal(calls.filter((call) => call.name === 'db:update-row').at(-1).args[0].values.due, '2026-12-31');
+    await evaluate("inlineEditCell($('#grid td[data-col=preview]'))");
+    assert.equal(await evaluate("$('#grid td[data-col=preview]').classList.contains('editing-cell')"), false);
+  });
+
+  await check('inline NULL mode keeps SQL NULL, literal NULL and empty text distinct', async () => {
+    await setupTypedRows();
+    await evaluate("inlineEditCell($('#grid td[data-col=name]')); document.querySelector('.inline-cell-editor').value='NULL'; document.querySelector('.sql-inline-actions button').click()");
+    await until("!$('#grid td[data-col=name]').classList.contains('editing-cell')");
+    assert.equal(calls.filter((call) => call.name === 'db:update-row').at(-1).args[0].values.name, 'NULL');
+    await evaluate("inlineEditCell($('#grid td[data-col=name]')); document.querySelector('.sql-value-inline .sql-value-mode').value='null'; document.querySelector('.sql-value-inline .sql-value-mode').dispatchEvent(new Event('change')); document.querySelector('.sql-inline-actions button').click()");
+    await until("!$('#grid td[data-col=name]').classList.contains('editing-cell')");
+    assert.equal(calls.filter((call) => call.name === 'db:update-row').at(-1).args[0].values.name, null);
+    await evaluate("inlineEditCell($('#grid td[data-col=name]')); document.querySelector('.sql-value-inline .sql-value-mode').value='value'; document.querySelector('.sql-value-inline .sql-value-mode').dispatchEvent(new Event('change')); document.querySelector('.sql-inline-actions button').click()");
+    await until("!$('#grid td[data-col=name]').classList.contains('editing-cell')");
+    assert.equal(calls.filter((call) => call.name === 'db:update-row').at(-1).args[0].values.name, '');
+  });
+
+  await check('failed inline saves retain user input and Escape cancels without another write', async () => {
+    await setupTypedRows();
+    rowEditorFailure = true;
+    const before = calls.filter((call) => call.name === 'db:update-row').length;
+    await evaluate("inlineEditCell($('#grid td[data-col=name]')); document.querySelector('.inline-cell-editor').value='Retry me'; document.querySelector('.sql-inline-actions button').click()");
+    await until("!document.querySelector('.sql-value-error').hidden");
+    assert.equal(await evaluate("document.querySelector('.inline-cell-editor').value"), 'Retry me');
+    assert.equal(await evaluate('app.rows[0].name'), 'Alice');
+    await evaluate("document.querySelector('.inline-cell-editor').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(calls.filter((call) => call.name === 'db:update-row').length, before + 1);
+    rowEditorFailure = false;
+  });
+
+  await check('query-result editors use full schema metadata and keep the captured connection target', async () => {
+    await setupTypedRows();
+    await evaluate(`app.query.profileId='test'; app.query.database='test'; app.query.result={kind:'rows',columns:[{name:'id',orgName:'id',table:'u',orgTable:'users',db:'test',type:'LONG',flags:2},{name:'recorded',orgName:'recorded_at',table:'u',orgTable:'users',db:'test',type:'DATETIME',flags:0}],rows:[[1,'2026-10-24 12:34:56.123456']],durationMs:1}; mode='query'; renderQueryView();`);
+    await evaluate("inlineEditQueryResultCell(document.querySelector('td[data-col-idx=\"1\"]'))");
+    assert.equal(await evaluate("document.querySelector('.sql-value-picker').type"), 'datetime-local');
+    await evaluate("document.querySelector('.sql-value-picker').value='2026-11-04T23:00:56.123'; document.querySelector('.sql-value-picker').dispatchEvent(new Event('change')); app.query.profileId='other'; document.querySelector('.sql-inline-actions button').click()");
+    await until("!document.querySelector('td[data-col-idx=\"1\"]').classList.contains('editing-cell')");
+    const payload = calls.filter((call) => call.name === 'db:update-row').at(-1).args[0];
+    assert.equal(payload.profileId, 'test');
+    assert.deepEqual(payload.values, { recorded_at: '2026-11-04 23:00:56.123456' });
+    assert.deepEqual(payload.keys, { id: 1 });
+    rowEditorColumns = columns;
+  });
+
+  await check('typed row form remains usable in dark theme and a smaller window', async () => {
+    await setupTypedRows();
+    win.setContentSize(940, 700);
+    await evaluate("document.body.classList.add('dark-theme'); document.body.classList.remove('light-theme'); editRow(0)");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(await evaluate("document.querySelector('#rowForm').scrollWidth <= document.querySelector('#rowForm').clientWidth"), true);
+    assert.ok(await evaluate("document.querySelector('.sql-value-picker').getBoundingClientRect().width") >= 32);
+    assert.equal(await evaluate("getComputedStyle(document.querySelector('.sql-value-picker')).colorScheme"), 'dark');
+    assert.equal(await evaluate("getComputedStyle(document.querySelector('.sql-value-picker')).backgroundColor"), 'rgb(30, 41, 59)');
+    if (process.env.SQLPRO_ROW_EDITOR_SCREENSHOT_DIR) {
+      fs.writeFileSync(path.join(process.env.SQLPRO_ROW_EDITOR_SCREENSHOT_DIR, 'row-form-dark.png'), (await win.webContents.capturePage()).toPNG());
+    }
+    await evaluate("closeModal(); document.body.classList.remove('dark-theme'); document.body.classList.add('light-theme')");
+    win.setContentSize(1344, 835);
+    rowEditorColumns = columns;
+  });
+
   await check('no renderer exceptions or unhandled rejections', async () => {
     await evaluate('new Promise(resolve => setTimeout(resolve, 200))');
     errors.push(...await evaluate('window.rendererErrors'));

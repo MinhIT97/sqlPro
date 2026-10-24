@@ -15,6 +15,17 @@ const COLUMNS = [
   { name: 'raw', type: 'varbinary(10)', nullable: 'YES', key: '', extra: '' }
 ];
 
+test('JSON string transport preserves nested JSON export types and large numeric literals', async () => {
+  const columns = [{ name: 'payload', type: 'json' }, { name: 'text', type: 'varchar(100)' }];
+  const raw = '{"n":18446744073709551615,"enabled":true}';
+  const { session } = createSession(columns, [[raw, raw]]);
+  let output = '';
+  await session.exportTableFile({ database: 'demo', table: 'items', format: 'json' }, async (chunk) => { output += chunk; });
+  assert.ok(output.includes(`"payload":${raw}`));
+  assert.ok(output.includes(`"text":${JSON.stringify(raw)}`));
+  assert.equal(typeof JSON.parse(output)[0].payload, 'object');
+});
+
 function createSession(columns, rows = [], insertResult = () => ({ affectedRows: 1, info: 'Duplicates: 0' })) {
   const session = new DatabaseSession({});
   const calls = { inserts: [], queries: [], transactions: [], destroyed: 0 };

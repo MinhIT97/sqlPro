@@ -8,6 +8,7 @@ const { Client: SshClient } = require('ssh2');
 const { SqlScriptParser, splitSqlStatements, stripLeadingComments, createTarget, skipReason } = require('./sql-script.cjs');
 const { CsvStreamParser } = require('./csv-stream.cjs');
 const { JsonArrayStreamParser } = require('./json-array-stream.cjs');
+const RowValues = require('../row-values.js');
 
 const MAX_QUERY_ROWS = 5000;
 const MAX_QUERY_BATCH_ROWS = 10000;
@@ -93,11 +94,22 @@ function isDateType(type) {
 }
 
 function coerceValue(value, column) {
-  if (value === null || value === undefined) return null;
-  if (value === '' && column && column.nullable === 'YES' && (isNumericType(column.type) || isDateType(column.type))) {
-    return null;
+  const spec = RowValues.describe(column, value);
+  if (Buffer.isBuffer(value) && (spec.kind === 'binary' || spec.kind === 'bit')) return value;
+  let normalized;
+  try {
+    normalized = RowValues.normalizeValue(column, value);
+  } catch (error) {
+    throw fail(error.message, 'ROW_VALUE_INVALID');
   }
-  return value;
+  if (normalized === null) return null;
+  if (spec.kind === 'binary') return Buffer.from(normalized.slice(2), 'hex');
+  if (spec.kind === 'bit') {
+    let hex = BigInt(`0b${normalized}`).toString(16);
+    if (hex.length % 2) hex = `0${hex}`;
+    return Buffer.from(hex, 'hex');
+  }
+  return normalized;
 }
 
 function normalizeFileFormat(format, filePath) {
@@ -148,6 +160,15 @@ function exportJsonValue(value) {
   if (typeof value === 'bigint') return value.toString();
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
   return value;
+}
+
+function exportJsonField(value, column) {
+  // jsonStrings prevents numeric rounding in the driver. Keep JSON columns as
+  // JSON values in exports rather than encoding their source text a second time.
+  if (isJsonColumn(column.type) && typeof value === 'string') {
+    try { JSON.parse(value); return value; } catch { /* Handle non-JSON legacy values as text. */ }
+  }
+  return JSON.stringify(exportJsonValue(value));
 }
 
 function resolveFileColumns(columns, requested) {
@@ -793,6 +814,7 @@ class DatabaseSession {
       supportBigNumbers: true,
       bigNumberStrings: true,
       dateStrings: true,
+      jsonStrings: true,
       multipleStatements: false,
       enableKeepAlive: true,
       keepAliveInitialDelay: 10000
@@ -1412,7 +1434,12 @@ class DatabaseSession {
     const whereSql = pkColumns.map((name) => `${quoteId(name)} <=> ?`).join(' AND ');
     const params = [
       ...changes.map(([name, value]) => coerceValue(value, byName.get(name))),
-      ...pkColumns.map((name) => keys[name])
+      ...pkColumns.map((name) => {
+        const column = byName.get(name);
+        const kind = RowValues.describe(column).kind;
+        return kind === 'binary' || kind === 'bit'
+          ? coerceValue(Buffer.isBuffer(keys[name]) ? keys[name] : RowValues.displayValue(column, keys[name]), column) : keys[name];
+      })
     ];
     const { result } = await this.raw(
       `UPDATE ${tableRef(database, table)} SET ${setSql} WHERE ${whereSql} LIMIT 1`,
@@ -1523,11 +1550,8 @@ class DatabaseSession {
         for await (const row of query.stream()) {
           throwIfCanceled();
           if (format === 'json') {
-            const object = {};
-            selected.forEach((column, index) => {
-              object[column.name] = exportJsonValue(row[index]);
-            });
-            await emit(`${firstRow ? '' : ',\n'}${JSON.stringify(object)}`);
+            const fields = selected.map((column, index) => `${JSON.stringify(column.name)}:${exportJsonField(row[index], column)}`);
+            await emit(`${firstRow ? '' : ',\n'}{${fields.join(',')}}`);
             firstRow = false;
           } else {
             await emit(`${selected.map((_column, index) => csvField(exportTextValue(row[index]), delimiter)).join(delimiter)}\n`);

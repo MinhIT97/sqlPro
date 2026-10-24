@@ -1071,6 +1071,116 @@ textarea.inline-cell-editor:focus {
   color: #087f72;
 }
 
+/* Schema-aware editors shared by row forms, data grids and SQL result grids. */
+.sql-value-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  gap: 7px;
+  min-width: 0;
+  width: 100%;
+}
+.sql-value-control {
+  display: flex;
+  align-items: stretch;
+  flex: 1 1 160px;
+  min-width: 0;
+  gap: 5px;
+}
+.sql-value-editor .sql-value-input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  margin: 0;
+}
+.sql-value-editor textarea.sql-value-input {
+  min-height: 62px;
+  padding: 9px 10px;
+  border: 1px solid #dbe3ec;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #1e293b;
+  font-family: inherit;
+  font-size: 12px;
+  resize: vertical;
+  white-space: pre-wrap;
+}
+.sql-value-editor select.sql-value-mode {
+  flex: 0 0 90px;
+  width: 90px;
+  padding: 7px 5px;
+  font-size: 11px;
+}
+.sql-value-editor .sql-value-picker {
+  flex: 0 0 38px;
+  width: 38px;
+  min-width: 38px;
+  padding: 4px;
+  cursor: pointer;
+}
+.sql-value-picker::-webkit-datetime-edit {
+  display: none;
+}
+.sql-value-picker::-webkit-calendar-picker-indicator {
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  cursor: pointer;
+}
+.sql-value-hint,
+.sql-value-error {
+  flex-basis: 100%;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: normal;
+}
+.sql-value-hint { color: #64748b; }
+.sql-value-error { color: #c0392b; }
+.sql-value-error[hidden] { display: none; }
+.sql-value-readonly { opacity: 0.72; }
+.sql-value-inline {
+  min-width: 260px;
+  padding: 7px;
+  box-sizing: border-box;
+  border: 1px solid #087f72;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+.sql-value-inline .inline-cell-editor {
+  min-height: 34px;
+  height: auto;
+  padding: 7px 8px;
+  border-width: 1px !important;
+  box-shadow: none;
+}
+.sql-value-inline textarea.inline-cell-editor {
+  max-height: 220px;
+  resize: vertical !important;
+}
+.sql-inline-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-basis: 100%;
+  gap: 5px;
+}
+.sql-inline-actions button {
+  padding: 3px 10px;
+  font-size: 10px;
+}
+.sql-value-input[aria-invalid="true"] { border-color: #c0392b !important; }
+.row-value-form .field { min-width: 0; }
+.row-value-form .field > label { overflow-wrap: anywhere; }
+body.dark-theme .sql-value-inline { background: #1e293b; border-color: #2dd4bf; }
+body.dark-theme .sql-value-editor textarea.sql-value-input { background: #1e293b; color: #f1f5f9; border-color: #475569; }
+body.dark-theme .sql-value-hint { color: #94a3b8; }
+body.dark-theme .sql-value-error { color: #fca5a5; }
+body.dark-theme .sql-value-picker {
+  color-scheme: dark;
+  background: #1e293b;
+  color: #f1f5f9;
+  border-color: #475569;
+}
+
 /* Dark Theme support */
 body.dark-theme td.editing-cell {
   background: transparent !important;

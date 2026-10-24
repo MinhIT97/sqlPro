@@ -15,7 +15,7 @@ test('backup hiển thị màn tiến trình và số dòng đã ghi', () => {
   r.evaluate("showTransferProgress('backup', 'sample')");
   r.evaluate("updateTransferProgress({ operation: 'backup', rows: 1200, objects: 3, bytes: 4096 })");
   assert.match(dialog.innerHTML, /Đang sao lưu database/);
-  assert.match(detail.textContent, /1,200 dòng/);
+  assert.match(detail.textContent, /1[,.]200 dòng/);
   assert.match(size.textContent, /4\.0 KB/);
 });
 
@@ -48,7 +48,7 @@ test('export hiển thị số dòng và dung lượng đã ghi', () => {
   r.evaluate("showTransferProgress('export', 'sample.users')");
   r.evaluate("updateTransferProgress({ operation: 'export', rows: 1200, bytes: 4096, format: 'csv' })");
   assert.match(dialog.innerHTML, /Đang xuất dữ liệu/);
-  assert.match(detail.textContent, /1,200 dòng đã xuất/);
+  assert.match(detail.textContent, /1[,.]200 dòng đã xuất/);
   assert.equal(size.textContent, 'Đã ghi 4.0 KB');
   assert.equal(step.textContent, '● Đang ghi tệp');
 });

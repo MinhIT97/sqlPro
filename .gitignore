@@ -4,6 +4,7 @@ release/
 .DS_Store
 server/data/
 .env
+/docs/
 *.db
 *.db-wal
 *.db-shm

@@ -63,4 +63,15 @@ test('MySQL options keep JSON and dates as strings for precise editing', () => {
   assert.equal(options.jsonStrings, true);
   assert.equal(options.dateStrings, true);
   assert.equal(options.bigNumberStrings, true);
+  assert.deepEqual(options.flags, ['FOUND_ROWS']);
+});
+
+test('row update distinguishes missing rows from unchanged matched rows', async () => {
+  const { session } = setup([column('id', 'int', { key: 'PRI' }), column('label', 'varchar(30)')]);
+  const input = { database: 'demo', table: 'items', keys: { id: 1 }, values: { label: 'same' } };
+  session.raw = async () => ({ result: { affectedRows: 0, changedRows: 0 } });
+  await assert.rejects(session.updateRow(input), { code: 'ROW_NOT_FOUND' });
+  session.raw = async () => ({ result: { affectedRows: 1, changedRows: 0 } });
+  assert.deepEqual(await session.updateRow(input), { status: 'unchanged', matchedRows: 1, affectedRows: 1, changedRows: 0 });
+  await assert.rejects(session.updateRow({ ...input, values: { unknown: 'ignored' } }), { code: 'NO_ROW_CHANGES' });
 });

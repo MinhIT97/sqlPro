@@ -21,6 +21,7 @@ const columns = [
 ];
 let rowEditorColumns = columns;
 let rowEditorFailure = false;
+let rowEditorResult = { affectedRows: 1, changedRows: 1 };
 let sshTestResponses = [];
 let pendingQueryExport = null;
 const tables = Array.from({ length: 14 }, (_, i) => ({ name: i ? `table_${i}` : 'users', type: 'table' }));
@@ -38,6 +39,11 @@ handle('connections:list', () => ok([]));
 handle('connections:test', () => sshTestResponses.shift() || ok({ version: '8.4-test' }));
 handle('connections:save', (payload) => ok({ ...payload, id: payload.id || 'saved-test' }));
 handle('db:open-profiles', () => ok([]));
+handle('db:session-state', (profileId) => ok({ profileId, connected: true, inTransaction: false, autocommit: true }));
+handle('db:disconnect', () => ok({ disconnected: true, openProfiles: [] }));
+handle('account:list-recovery', () => ok([]));
+handle('account:resolve-conflicts', () => ok({ state: 'synced', conflicts: [], conflictCount: 0 }));
+handle('account:restore-recovery', (id) => ok({ restored: true, id }));
 handle('account:status', () => ok({ loggedIn: false }));
 handle('db:use-database', () => ok({}));
 handle('db:databases', () => ok(['test']));
@@ -48,7 +54,7 @@ handle('db:relations', () => ok({ outbound: [{ table: 'users', column: 'id', ref
 handle('db:table-data', () => ok({ columns, primaryKey: ['id'], rows: [{ id: 1, name: 'Alice' }], total: 1, page: 1, pageSize: 100 }));
 handle('db:table-count', () => ok({ total: 42 }));
 handle('db:delete-rows', () => ok({ affectedRows: 1 }));
-handle('db:update-row', () => rowEditorFailure ? { ok: false, error: { message: 'Expected row save failure' } } : ok({ affectedRows: 1, changedRows: 1 }));
+handle('db:update-row', () => rowEditorFailure ? { ok: false, error: { message: 'Expected row save failure' } } : ok(rowEditorResult));
 handle('db:insert-row', () => ok({ affectedRows: 1, insertId: 2 }));
 handle('db:import-file', (payload) => ok({
   database: payload.database,
@@ -688,6 +694,48 @@ app.whenReady().then(async () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(calls.filter((call) => call.name === 'db:update-row').length, before + 1);
     rowEditorFailure = false;
+  });
+
+  await check('zero-row inline saves retain input and never update the displayed row', async () => {
+    await setupTypedRows();
+    rowEditorResult = { affectedRows: 0, changedRows: 0 };
+    try {
+      await evaluate("inlineEditCell($('#grid td[data-col=name]')); document.querySelector('.inline-cell-editor').value='Keep this draft'; document.querySelector('.sql-inline-actions button').click()");
+      await until("!document.querySelector('.sql-value-error').hidden");
+      assert.equal(await evaluate("document.querySelector('.inline-cell-editor').value"), 'Keep this draft');
+      assert.equal(await evaluate('app.rows[0].name'), 'Alice');
+      assert.equal(await evaluate("$('#grid td[data-col=name]').classList.contains('editing-cell')"), true);
+      assert.match(await evaluate("document.querySelector('.sql-value-error').textContent"), /tải lại dữ liệu/);
+      await evaluate("document.querySelector('.inline-cell-editor').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
+    } finally { rowEditorResult = { affectedRows: 1, changedRows: 1 }; }
+  });
+
+  await check('zero-row form saves keep the draft and unchanged matched rows can be saved with the keyboard', async () => {
+    await setupTypedRows();
+    rowEditorResult = { affectedRows: 0, changedRows: 0 };
+    try {
+      await evaluate("editRow(0); document.querySelector('[data-field=name]').value='Keep form draft'; $('#rowSave').click()");
+      await until("!$('#rowError').classList.contains('hidden')");
+      assert.equal(await evaluate("$('#modal').open"), true);
+      assert.equal(await evaluate("document.querySelector('[data-field=name]').value"), 'Keep form draft');
+      assert.equal(await evaluate("$('#rowSave').disabled"), false);
+      rowEditorResult = { status: 'unchanged', matchedRows: 1, affectedRows: 1, changedRows: 0 };
+      await evaluate("document.querySelector('[data-field=name]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,bubbles:true}))");
+      await until("!$('#modal').open");
+    } finally { rowEditorResult = { affectedRows: 1, changedRows: 1 }; }
+  });
+
+  await check('table and SQL row editors send binary original hashes separately from visible previews', async () => {
+    await setupTypedRows();
+    const hash = { kind: 'sha256', value: 'ab'.repeat(32) };
+    await evaluate(`rowOriginalHashes.set(app.rows[0],{preview:${JSON.stringify(hash)}}); inlineEditCell($('#grid td[data-col=name]')); document.querySelector('.inline-cell-editor').value='with hash'; document.querySelector('.sql-inline-actions button').click()`);
+    await until("!$('#grid td[data-col=name]').classList.contains('editing-cell')");
+    assert.deepEqual(calls.filter((call) => call.name === 'db:update-row').at(-1).args[0].original.preview, hash);
+    await evaluate(`app.query.profileId='test'; app.query.database='test'; app.query.result={kind:'rows',columns:[{name:'id',orgName:'id',table:'u',orgTable:'users',db:'test',type:'LONG',flags:2},{name:'name',orgName:'name',table:'u',orgTable:'users',db:'test',type:'TEXT',flags:0},{name:'preview',orgName:'preview',table:'u',orgTable:'users',db:'test',type:'BLOB',flags:0}],rows:[[1,'before','0x0012… (100 bytes)']],originalHashes:[{'2':${JSON.stringify(hash)}}],durationMs:1}; mode='query'; renderQueryView();`);
+    await evaluate("inlineEditQueryResultCell(document.querySelector('td[data-col-idx=\"1\"]'))");
+    await evaluate("document.querySelector('.inline-cell-editor').value='query with hash'; document.querySelector('.sql-inline-actions button').click()");
+    await until("!document.querySelector('td[data-col-idx=\"1\"]').classList.contains('editing-cell')");
+    assert.deepEqual(calls.filter((call) => call.name === 'db:update-row').at(-1).args[0].original.preview, hash);
   });
 
   await check('query-result editors use full schema metadata and keep the captured connection target', async () => {

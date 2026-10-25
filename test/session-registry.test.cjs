@@ -49,3 +49,20 @@ test('concurrent different opens obey capacity and failed creation can be retrie
   fail = false;
   assert.equal((await registry.open('x')).profileId, 'x');
 });
+
+test('conditional cleanup cannot close a replacement and disconnect during retry disposal wins', async () => {
+  const { registry } = setup();
+  const old = await registry.open('a');
+  await registry.close('a');
+  const fresh = await registry.open('a');
+  assert.equal(await registry.close('a', old), false);
+  await assert.rejects(registry.reopen(old), { code: 'SESSION_OPEN_CANCELED' });
+  assert.equal(registry.entries.get('a'), fresh);
+  let finish;
+  fresh.session.close = () => new Promise((resolve) => { finish = resolve; });
+  const retry = registry.reopen(fresh);
+  await registry.close('a');
+  finish();
+  await assert.rejects(retry, { code: 'SESSION_OPEN_CANCELED' });
+  assert.equal(registry.entries.size, 0);
+});

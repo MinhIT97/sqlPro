@@ -9,7 +9,8 @@ const {
   STORE_VERSION,
   defaultWorkspace,
   normalizeStore,
-  normalizeVault
+  normalizeVault,
+  fingerprint
 } = require('./store-schema.cjs');
 
 function storePath() {
@@ -124,16 +125,48 @@ function safeStorageAvailable() {
   }
 }
 
-function localKey() {
+function secretError(code, message, cause) {
+  const error = new Error(message);
+  error.code = code;
+  if (cause && cause.code) error.causeCode = String(cause.code);
+  return error;
+}
+
+function hasLocalSecrets() {
+  const profiles = readStore().connections;
+  if (profiles.some((profile) => [profile.password, profile.sshPassword, profile.sshPassphrase, profile.ssl?.passphrase]
+    .some((secret) => secret?.alg === 'local'))) return true;
+  try {
+    const session = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'sync-session.json'), 'utf8'));
+    return [session.tokenSealed, session.vaultKeySealed].some((secret) => secret?.alg === 'local');
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw secretError('LOCAL_KEY_READ_FAILED', 'Không kiểm tra được dữ liệu mã hóa hiện có. Khóa và dữ liệu được giữ nguyên.', error);
+  }
+}
+
+function localKey(create = false) {
   try {
     const stored = fs.readFileSync(keyPath(), 'utf8').trim();
     if (/^[0-9a-f]{64}$/i.test(stored)) return Buffer.from(stored, 'hex');
-  } catch {
-    // generate below
+    throw secretError('LOCAL_KEY_INVALID', 'Khóa mã hóa local không hợp lệ. Hãy khôi phục .connections-key từ bản sao lưu; dữ liệu được giữ nguyên.');
+  } catch (error) {
+    if (error.code === 'LOCAL_KEY_INVALID') throw error;
+    if (error.code !== 'ENOENT') {
+      throw secretError('LOCAL_KEY_READ_FAILED', 'Không đọc được khóa mã hóa local. Hãy kiểm tra quyền truy cập và thử lại; dữ liệu được giữ nguyên.', error);
+    }
+    if (!create || hasLocalSecrets()) {
+      throw secretError('LOCAL_KEY_MISSING', 'Thiếu khóa mã hóa local. Hãy khôi phục .connections-key từ bản sao lưu trước khi dùng dữ liệu mã hóa.');
+    }
   }
   const key = crypto.randomBytes(32);
-  fs.mkdirSync(path.dirname(keyPath()), { recursive: true });
-  fs.writeFileSync(keyPath(), key.toString('hex'), { encoding: 'utf8', mode: 0o600 });
+  try {
+    fs.mkdirSync(path.dirname(keyPath()), { recursive: true });
+    fs.writeFileSync(keyPath(), key.toString('hex'), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  } catch (error) {
+    if (error.code === 'EEXIST') return localKey();
+    throw secretError('LOCAL_KEY_WRITE_FAILED', 'Không tạo được khóa mã hóa local. Chưa lưu dữ liệu mới.', error);
+  }
   return key;
 }
 
@@ -148,7 +181,7 @@ function seal(secret) {
     }
   }
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', localKey(), iv);
+  const cipher = crypto.createCipheriv('aes-256-gcm', localKey(true), iv);
   const encrypted = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
   return {
     alg: 'local',
@@ -159,7 +192,7 @@ function seal(secret) {
 }
 
 function unseal(sealed) {
-  if (!sealed || typeof sealed !== 'object') return '';
+  if (sealed === null || sealed === undefined) return '';
   try {
     if (sealed.alg === 'safeStorage') {
       return safeStorage.decryptString(Buffer.from(sealed.data, 'base64'));
@@ -172,10 +205,11 @@ function unseal(sealed) {
         decipher.final()
       ]).toString('utf8');
     }
-  } catch {
-    return '';
+  } catch (error) {
+    if (String(error.code || '').startsWith('LOCAL_KEY_')) throw error;
+    throw secretError('SECRET_DECRYPT_FAILED', 'Không giải mã được thông tin bí mật. Hãy khôi phục khóa hoặc quyền truy cập kho khóa hệ điều hành; dữ liệu được giữ nguyên.', error);
   }
-  return '';
+  throw secretError('SECRET_DECRYPT_FAILED', 'Định dạng thông tin bí mật không được hỗ trợ. Dữ liệu được giữ nguyên.');
 }
 
 function text(value, maxLength) {
@@ -559,6 +593,66 @@ function setMeta(patch) {
   return { ...store.meta };
 }
 
+const SYNC_RECOVERY_LIMIT = 8;
+
+function getSyncBase() {
+  const sealed = readStore().meta.syncBaseSealed;
+  if (!sealed) return null;
+  try {
+    const parsed = JSON.parse(unseal(sealed) || 'null');
+    return parsed ? normalizeVault(parsed) : null;
+  } catch {
+    return null;
+  }
+}
+
+function setSyncBase(vault, revision = null) {
+  const store = readStore();
+  const normalized = normalizeVault(vault);
+  store.meta = {
+    ...store.meta,
+    syncBaseSealed: seal(JSON.stringify(normalized)),
+    syncBaseAt: new Date().toISOString(),
+    syncBaseRevision: Number.isInteger(revision) ? revision : (store.meta.syncBaseRevision ?? null)
+  };
+  writeStore(store);
+  return { revision: store.meta.syncBaseRevision, at: store.meta.syncBaseAt };
+}
+
+function saveSyncRecovery(vault, reason = 'sync') {
+  const normalized = normalizeVault(vault);
+  const hash = fingerprint(normalized);
+  const store = readStore();
+  const entries = Array.isArray(store.meta.syncRecovery) ? [...store.meta.syncRecovery] : [];
+  if (entries.at(-1)?.hash === hash) return null;
+  const entry = {
+    id: crypto.randomUUID(),
+    at: new Date().toISOString(),
+    reason: String(reason || 'sync').slice(0, 80),
+    hash,
+    sealed: seal(JSON.stringify(normalized))
+  };
+  entries.push(entry);
+  store.meta = { ...store.meta, syncRecovery: entries.slice(-SYNC_RECOVERY_LIMIT) };
+  writeStore(store);
+  return { id: entry.id, at: entry.at, reason: entry.reason };
+}
+
+function listSyncRecovery() {
+  const entries = readStore().meta.syncRecovery;
+  return (Array.isArray(entries) ? entries : []).map(({ id, at, reason, hash }) => ({ id, at, reason, hash }));
+}
+
+function restoreSyncRecovery(id) {
+  const entries = readStore().meta.syncRecovery;
+  const entry = (Array.isArray(entries) ? entries : []).find((item) => item && item.id === id);
+  if (!entry) throw new Error('Không tìm thấy bản phục hồi đồng bộ.');
+  const parsed = JSON.parse(unseal(entry.sealed) || 'null');
+  if (!parsed) throw new Error('Bản phục hồi đồng bộ không đọc được.');
+  const result = replaceFromSync(parsed);
+  return { restored: true, id, at: entry.at, reason: entry.reason, ...result };
+}
+
 function defaultWorkspaceInfo() {
   return defaultWorkspace();
 }
@@ -580,6 +674,11 @@ module.exports = {
   resetLocalData,
   getMeta,
   setMeta,
+  getSyncBase,
+  setSyncBase,
+  saveSyncRecovery,
+  listSyncRecovery,
+  restoreSyncRecovery,
   defaultWorkspaceInfo,
   seal,
   unseal

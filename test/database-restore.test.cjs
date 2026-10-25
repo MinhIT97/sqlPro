@@ -140,3 +140,177 @@ test('hủy restore trả RESTORE_CANCELED kèm số câu đã chạy', async ()
     await fs.rm(folder, { recursive: true, force: true });
   }
 });
+
+test('restore chặn ghi ngoài database đích trước khi chạy bất kỳ câu lệnh nào', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-restore-scope-'));
+  const filePath = path.join(folder, 'backup.sql');
+  await fs.writeFile(filePath, [
+    'CREATE TABLE `items` (`id` int);',
+    'INSERT INTO `other_db`.`items` VALUES (1);',
+    ''
+  ].join('\n'));
+  const session = new DatabaseSession({});
+  session.connection = {};
+  session.metadata = new Map();
+  const calls = [];
+  let usedDatabase = null;
+  session.raw = async (sql) => { calls.push(sql); return { rows: [] }; };
+  session.useDatabase = async (database) => { usedDatabase = database; };
+  try {
+    await assert.rejects(
+      session.restoreDatabase({ database: 'target_db', filePath, createDatabaseIfNotExists: true }),
+      (error) => {
+        assert.equal(error.code, 'RESTORE_SCOPE_REJECTED');
+        assert.equal(error.schema, 'other_db');
+        assert.equal(error.table, 'items');
+        assert.equal(error.statementNumber, 2);
+        return true;
+      }
+    );
+    assert.deepEqual(calls, []);
+    assert.equal(usedDatabase, null);
+    assert.equal(session.activeTask, null);
+  } finally {
+    await fs.rm(folder, { recursive: true, force: true });
+  }
+});
+
+function restoreInventory({ tables = {}, warnings = [], reliable = true, limitations = [] } = {}) {
+  return {
+    tables: new Map(Object.entries(tables).map(([name, entry]) => [name.toLowerCase(), {
+      name,
+      expectedRows: entry.expectedRows ?? 0,
+      canCount: entry.canCount !== false,
+      reason: entry.reason || null
+    }])),
+    rowCountsReliable: reliable,
+    rowCountLimitations: limitations,
+    warnings,
+    statements: 0,
+    skipped: 0
+  };
+}
+
+function verifySession({ foreignKeys = [], orphan = 0, rows = 1, countError = null, metadataError = null, settings = 1 } = {}) {
+  const session = new DatabaseSession({});
+  session.connection = {};
+  session.dead = false;
+  const queries = [];
+  session.raw = async (sql, params) => {
+    queries.push({ sql, params });
+    if (/information_schema\.KEY_COLUMN_USAGE/.test(sql)) {
+      if (metadataError) throw metadataError;
+      return { rows: foreignKeys };
+    }
+    if (/LEFT JOIN/.test(sql)) return { rows: [{ orphans: orphan }] };
+    if (/^SELECT COUNT\(\*\) AS rowCount/.test(sql)) {
+      if (countError) throw countError;
+      return { rows: [{ rowCount: rows }] };
+    }
+    if (/@@FOREIGN_KEY_CHECKS/.test(sql)) return { rows: [{ foreignKeys: settings }] };
+    throw new Error(`Unexpected verification query: ${sql}`);
+  };
+  return { session, queries };
+}
+
+const foreignKey = (overrides = {}) => ({
+  tableName: 'child',
+  constraintName: 'fk_parent',
+  referencedSchema: 'sample',
+  referencedTable: 'parent',
+  columnName: 'parent_id',
+  referencedColumn: 'id',
+  position: 1,
+  ...overrides
+});
+
+test('verifyRestore phát hiện khóa ngoại mồ côi với composite và NULL đúng ngữ nghĩa', async () => {
+  const inventory = restoreInventory({ tables: { child: { expectedRows: 2 } } });
+  const { session, queries } = verifySession({
+    foreignKeys: [
+      foreignKey({ columnName: 'parent_id', referencedColumn: 'id', position: 1 }),
+      foreignKey({ columnName: 'parent_region', referencedColumn: 'region', position: 2 })
+    ],
+    orphan: 1
+  });
+  const result = await session.verifyRestore('sample', inventory);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.verified, false);
+  assert.deepEqual(result.checks.foreignKeys.orphans, [{
+    table: 'child',
+    constraint: 'fk_parent',
+    referencedTable: 'parent',
+    orphans: 1
+  }]);
+  const orphanQuery = queries.find((entry) => /LEFT JOIN/.test(entry.sql));
+  assert.match(orphanQuery.sql, /c\.`parent_id` <=> p\.`id` AND c\.`parent_region` <=> p\.`region`/);
+  assert.match(orphanQuery.sql, /c\.`parent_id` IS NOT NULL AND c\.`parent_region` IS NOT NULL/);
+  assert.match(orphanQuery.sql, /WHERE .* AND p\.`id` IS NULL$/);
+  assert.equal(queries.some((entry) => /^DELETE /i.test(entry.sql)), false);
+});
+
+test('verifyRestore coi dữ liệu sạch là verified và đối chiếu số dòng', async () => {
+  const inventory = restoreInventory({ tables: { child: { expectedRows: 2 } } });
+  const { session } = verifySession({ foreignKeys: [foreignKey()], orphan: 0, rows: 2 });
+  const result = await session.verifyRestore('sample', inventory);
+  assert.equal(result.status, 'verified');
+  assert.equal(result.verified, true);
+  assert.equal(result.checks.foreignKeys.status, 'checked');
+  assert.equal(result.checks.rowCounts.status, 'checked');
+  assert.equal(result.checks.rowCounts.checked, 1);
+  assert.equal(result.checks.warnings.status, 'clean');
+  assert.equal(result.checks.settings.status, 'ok');
+});
+
+test('verifyRestore báo lệch số dòng sau phục hồi', async () => {
+  const inventory = restoreInventory({ tables: { child: { expectedRows: 3 } } });
+  const { session } = verifySession({ foreignKeys: [foreignKey()], orphan: 0, rows: 1 });
+  const result = await session.verifyRestore('sample', inventory);
+  assert.equal(result.status, 'failed');
+  assert.deepEqual(result.checks.rowCounts.mismatches, [{ table: 'child', expected: 3, actual: 1 }]);
+});
+
+test('verifyRestore đánh dấu data-loss khi database đã cắt dữ liệu', async () => {
+  const inventory = restoreInventory({
+    tables: { child: { expectedRows: 1 } },
+    warnings: [{ statement: 2, code: 1265, level: 'Warning', message: 'Data truncated' }]
+  });
+  const { session } = verifySession({ foreignKeys: [], orphan: 0, rows: 1 });
+  const result = await session.verifyRestore('sample', inventory);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.checks.warnings.status, 'data-loss');
+  assert.equal(result.checks.warnings.count, 1);
+});
+
+test('verifyRestore đánh dấu unverified cho khóa ngoại chéo schema và lỗi metadata', async () => {
+  const cross = restoreInventory({ tables: { child: { expectedRows: 1 } } });
+  const crossSession = verifySession({
+    foreignKeys: [foreignKey({ referencedSchema: 'other_db' })],
+    orphan: 0,
+    rows: 1
+  });
+  const crossResult = await crossSession.session.verifyRestore('sample', cross);
+  assert.equal(crossResult.status, 'unverified');
+  assert.equal(crossResult.checks.foreignKeys.status, 'unverified');
+  assert.equal(crossResult.checks.foreignKeys.crossSchema.length, 1);
+  assert.equal(crossSession.queries.some((entry) => /LEFT JOIN/.test(entry.sql)), false);
+  assert.ok(crossResult.limitations.some((message) => message.includes('ngoài database đích')));
+
+  const broken = restoreInventory({ tables: { child: { expectedRows: 1 } } });
+  const brokenSession = verifySession({ metadataError: new Error('metadata unavailable') });
+  const brokenResult = await brokenSession.session.verifyRestore('sample', broken);
+  assert.equal(brokenResult.status, 'unverified');
+  assert.equal(brokenResult.checks.foreignKeys.status, 'unverified');
+  assert.ok(brokenResult.limitations.some((message) => message.includes('metadata')));
+});
+
+test('verifyRestore không đếm bảng vượt giới hạn và báo FOREIGN_KEY_CHECKS còn tắt', async () => {
+  const inventory = restoreInventory({ tables: { huge: { expectedRows: 500001 } } });
+  const { session, queries } = verifySession({ foreignKeys: [], orphan: 0, settings: 0 });
+  const result = await session.verifyRestore('sample', inventory);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.checks.rowCounts.status, 'checked');
+  assert.equal(queries.some((entry) => /^SELECT COUNT\(\*\) AS rowCount/.test(entry.sql)), false);
+  assert.ok(result.limitations.some((message) => message.includes('vượt giới hạn')));
+  assert.equal(result.checks.settings.status, 'failed');
+});

@@ -13,7 +13,7 @@ const {
   decryptVault,
   KDF_VERSION
 } = require('./sync-crypto.cjs');
-const { normalizeVault, fingerprint, mergeVaults } = require('./store-schema.cjs');
+const { normalizeVault, fingerprint, mergeVaultsWithBase } = require('./store-schema.cjs');
 
 const DEFAULT_SERVER_URL = process.env.SQLPRO_SYNC_URL || 'http://localhost:8080';
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -21,6 +21,8 @@ const SESSION_FILE = 'sync-session.json';
 const RETRY_DELAYS = [60_000, 300_000, 900_000];
 
 let runtime = null;
+let generation = 0;
+let lifecycle = new AbortController();
 let inflight = null;
 let syncTimer = null;
 let retryTimer = null;
@@ -35,7 +37,9 @@ let status = {
   lastSyncAt: null,
   remember: false,
   state: 'signed-out',
-  error: null
+  error: null,
+  conflicts: [],
+  conflictCount: 0
 };
 
 function sessionPath() {
@@ -100,7 +104,7 @@ function requestUrl(serverUrl, pathname) {
   return `${serverUrl}${pathname}`;
 }
 
-async function apiRequest(session, pathname, { method = 'GET', body, maxBytes = MAX_RESPONSE_BYTES } = {}) {
+async function apiRequest(session, pathname, { method = 'GET', body, maxBytes = MAX_RESPONSE_BYTES, signal = session.signal } = {}) {
   let response;
   try {
     response = await fetch(requestUrl(session.serverUrl, pathname), {
@@ -110,7 +114,7 @@ async function apiRequest(session, pathname, { method = 'GET', body, maxBytes = 
         ...(session.token ? { Authorization: `Bearer ${session.token}` } : {})
       },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(20_000),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000),
       redirect: 'error'
     });
   } catch {
@@ -206,7 +210,8 @@ function loadSession() {
 }
 
 function applyRuntimeSession(session) {
-  runtime = session;
+  invalidateOperations();
+  runtime = { ...session, signal: lifecycle.signal };
   status = {
     loggedIn: true,
     email: session.email,
@@ -217,14 +222,37 @@ function applyRuntimeSession(session) {
     state: 'idle',
     error: null
   };
+  return runtime;
 }
 
-function clearRuntime() {
-  runtime = null;
+function invalidateOperations() {
+  generation += 1;
+  lifecycle.abort();
+  lifecycle = new AbortController();
+  inflight = null;
   syncTimer = clearTimer(syncTimer);
   retryTimer = clearTimer(retryTimer);
   retryIndex = 0;
   pending = false;
+}
+
+function operation(session = runtime) {
+  const version = generation;
+  const signal = lifecycle.signal;
+  return {
+    session,
+    signal,
+    assertCurrent() {
+      if (version !== generation || session !== runtime || signal.aborted) {
+        throw makeError('Thao tác đồng bộ đã hết hiệu lực.', 'SYNC_CANCELED');
+      }
+    }
+  };
+}
+
+function clearRuntime() {
+  invalidateOperations();
+  runtime = null;
   status = {
     loggedIn: false,
     email: '',
@@ -233,7 +261,9 @@ function clearRuntime() {
     lastSyncAt: null,
     remember: false,
     state: 'signed-out',
-    error: null
+    error: null,
+    conflicts: [],
+    conflictCount: 0
   };
   emitStatus();
 }
@@ -248,9 +278,9 @@ function assertAccount(userId) {
   }
 }
 
-async function fetchServerMeta(serverUrl, allowInsecure) {
+async function fetchServerMeta(serverUrl, allowInsecure, signal) {
   const normalized = normalizeServerUrl(serverUrl, allowInsecure);
-  const meta = await apiRequest({ serverUrl: normalized }, '/api/meta', { maxBytes: 64 * 1024 });
+  const meta = await apiRequest({ serverUrl: normalized }, '/api/meta', { maxBytes: 64 * 1024, signal });
   if (!meta || meta.kdfVersion !== KDF_VERSION || typeof meta.authContext !== 'string') {
     throw makeError('Server không hỗ trợ phiên bản đồng bộ này.', 'UNSUPPORTED_SERVER');
   }
@@ -263,7 +293,10 @@ async function register({ email: rawEmail, password, serverUrl, allowInsecure })
   if (typeof password !== 'string' || password.length < 10) {
     throw makeError('Mật khẩu phải có ít nhất 10 ký tự.', 'WEAK_PASSWORD');
   }
-  const connection = await fetchServerMeta(serverUrl, allowInsecure);
+  clearRuntime();
+  const job = operation();
+  const connection = await fetchServerMeta(serverUrl, allowInsecure, job.signal);
+  job.assertCurrent();
   if (password.length < (connection.meta.minPasswordLength || 10)) {
     throw makeError(`Mật khẩu phải có ít nhất ${connection.meta.minPasswordLength} ký tự.`, 'WEAK_PASSWORD');
   }
@@ -274,8 +307,10 @@ async function register({ email: rawEmail, password, serverUrl, allowInsecure })
   const authProof = deriveAuthProof(masterKey, connection.meta.authContext);
   const result = await apiRequest({ serverUrl: connection.serverUrl }, '/api/auth/register', {
     method: 'POST',
+    signal: job.signal,
     body: { email, authProof }
   });
+  job.assertCurrent();
   if (!result || !result.token || !result.user || !result.vaultSalt) {
     throw makeError('Server trả về phản hồi đăng ký không hợp lệ.', 'INVALID_SERVER_RESPONSE');
   }
@@ -309,13 +344,18 @@ async function login({ email: rawEmail, password, serverUrl, allowInsecure, reme
   if (typeof password !== 'string' || password.length === 0) {
     throw makeError('Mật khẩu không hợp lệ.', 'INVALID_CREDENTIALS');
   }
-  const connection = await fetchServerMeta(serverUrl, allowInsecure);
+  clearRuntime();
+  const job = operation();
+  const connection = await fetchServerMeta(serverUrl, allowInsecure, job.signal);
+  job.assertCurrent();
   const masterKey = deriveMasterKey(password, email);
   const authProof = deriveAuthProof(masterKey, connection.meta.authContext);
   const result = await apiRequest({ serverUrl: connection.serverUrl }, '/api/auth/login', {
     method: 'POST',
+    signal: job.signal,
     body: { email, authProof }
   });
+  job.assertCurrent();
   if (!result || !result.token || !result.user || !result.vaultSalt) {
     throw makeError('Server trả về phản hồi đăng nhập không hợp lệ.', 'INVALID_SERVER_RESPONSE');
   }
@@ -353,7 +393,7 @@ async function logout() {
   deleteSessionFile();
   if (current) {
     try {
-      await apiRequest(current, '/api/auth/logout', { method: 'POST', maxBytes: 64 * 1024 });
+      await apiRequest({ ...current, signal: undefined }, '/api/auth/logout', { method: 'POST', maxBytes: 64 * 1024 });
     } catch {
       // local logout succeeds even when the server is unreachable
     }
@@ -397,46 +437,109 @@ function handleAuthFailure(error) {
   return false;
 }
 
-async function runSync() {
+function publishConflicts(result) {
+  status.conflicts = Array.isArray(result.conflicts) ? result.conflicts : [];
+  status.conflictCount = status.conflicts.filter((entry) => entry.requiresChoice).length;
+}
+
+function clearConflicts() {
+  status.conflicts = [];
+  status.conflictCount = 0;
+}
+
+function saveConflictSnapshots(localVault, remoteVault) {
+  try { store.saveSyncRecovery(localVault, 'conflict-local'); } catch { /* recovery history is best-effort */ }
+  try { store.saveSyncRecovery(remoteVault, 'conflict-remote'); } catch { /* recovery history is best-effort */ }
+}
+
+async function mergeWithRemote(session, job, choices) {
+  const remote = await fetchRemoteVault(session);
+  job.assertCurrent();
+  const local = store.snapshotForSync();
+  const result = mergeVaultsWithBase(local, remote.vault, store.getSyncBase(), { choices });
+  return { remote, local, result };
+}
+
+function normalizeConflictChoices(input) {
+  const choices = new Map();
+  if (input instanceof Map) return input;
+  const entries = Array.isArray(input)
+    ? input
+    : (input && typeof input === 'object'
+      ? Object.entries(input).map(([connectionId, fields]) => ({ connectionId, fields }))
+      : []);
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue;
+    const connectionId = String(entry.connectionId || entry.id || '');
+    if (!connectionId) continue;
+    for (const [path, choice] of Object.entries(entry.fields || {})) {
+      if (choice === 'local' || choice === 'remote') choices.set(`${connectionId}\u0000${path}`, choice);
+    }
+  }
+  return choices;
+}
+
+async function runSync(choices = null) {
   if (!runtime) throw makeError('Chưa đăng nhập tài khoản đồng bộ.', 'NOT_LOGGED_IN');
+  const job = operation();
+  const session = job.session;
   setStatus('syncing');
   try {
-    let remote = await fetchRemoteVault(runtime);
-    let local = store.snapshotForSync();
-    let merged = mergeVaults(local, remote.vault);
+    let { remote, local, result } = await mergeWithRemote(session, job, choices);
+    publishConflicts(result);
+    let merged = result.vault;
     if (fingerprint(merged) !== fingerprint(local)) {
+      job.assertCurrent();
       store.replaceFromSync(merged);
       emitApplied();
     }
+    if (result.conflicts.length) saveConflictSnapshots(local, remote.vault);
+
     let currentRevision = remote.revision;
-    if (fingerprint(merged) !== fingerprint(remote.vault)) {
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        const envelope = encryptVault(merged, runtime.vaultKey, runtime.userId);
-        try {
-          const result = await apiRequest(runtime, '/api/vault', {
-            method: 'PUT',
-            body: { baseRevision: currentRevision, envelope },
-            maxBytes: 64 * 1024
-          });
-          currentRevision = result.revision;
-          break;
-        } catch (error) {
-          if (error.code !== 'REVISION_CONFLICT' || attempt === 2) throw error;
-          const conflictVault = error.data && error.data.envelope
-            ? normalizeVault(decryptVault(error.data.envelope, runtime.vaultKey, runtime.userId))
-            : normalizeVault({});
-          currentRevision = Number.isInteger(error.data && error.data.revision)
-            ? error.data.revision
-            : currentRevision;
-          merged = mergeVaults(store.snapshotForSync(), conflictVault);
-          if (fingerprint(merged) !== fingerprint(store.snapshotForSync())) {
-            store.replaceFromSync(merged);
-            emitApplied();
-          }
-          if (fingerprint(merged) === fingerprint(conflictVault)) break;
+    let remoteVault = remote.vault;
+    for (let attempt = 0; result.requiresResolution || fingerprint(merged) !== fingerprint(remoteVault); attempt += 1) {
+      if (result.requiresResolution) {
+        saveRevision(currentRevision);
+        setStatus('conflict');
+        return statusSnapshot();
+      }
+      if (attempt >= 3) throw makeError('Không thể đồng bộ sau nhiều lần xung đột revision.', 'SYNC_CONFLICT_RETRY');
+      job.assertCurrent();
+      const envelope = encryptVault(merged, session.vaultKey, session.userId);
+      try {
+        const pushed = await apiRequest(session, '/api/vault', {
+          method: 'PUT',
+          body: { baseRevision: currentRevision, envelope },
+          maxBytes: 64 * 1024
+        });
+        job.assertCurrent();
+        currentRevision = pushed.revision;
+        remoteVault = merged;
+        break;
+      } catch (error) {
+        job.assertCurrent();
+        if (error.code !== 'REVISION_CONFLICT' || attempt >= 2) throw error;
+        remoteVault = error.data && error.data.envelope
+          ? normalizeVault(decryptVault(error.data.envelope, session.vaultKey, session.userId))
+          : normalizeVault({});
+        currentRevision = Number.isInteger(error.data && error.data.revision)
+          ? error.data.revision
+          : currentRevision;
+        result = mergeVaultsWithBase(store.snapshotForSync(), remoteVault, store.getSyncBase(), { choices });
+        publishConflicts(result);
+        merged = result.vault;
+        if (fingerprint(merged) !== fingerprint(store.snapshotForSync())) {
+          job.assertCurrent();
+          store.replaceFromSync(merged);
+          emitApplied();
         }
+        if (result.conflicts.length) saveConflictSnapshots(store.snapshotForSync(), remoteVault);
       }
     }
+
+    job.assertCurrent();
+    store.setSyncBase(merged, currentRevision);
+    clearConflicts();
     saveRevision(currentRevision);
     retryIndex = 0;
     setStatus('synced');
@@ -446,12 +549,30 @@ async function runSync() {
     }
     return statusSnapshot();
   } catch (error) {
+    job.assertCurrent();
     if (handleAuthFailure(error)) throw error;
     const offlineCodes = ['NETWORK_ERROR', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNREFUSED', 'HTTP_503', 'HTTP_502'];
     setStatus(offlineCodes.includes(error.code) ? 'offline' : 'error', error);
     if (offlineCodes.includes(error.code)) scheduleRetry();
     throw error;
   }
+}
+
+async function resolveConflicts(choices) {
+  if (!runtime) throw makeError('Chưa đăng nhập tài khoản đồng bộ.', 'NOT_LOGGED_IN');
+  const normalized = normalizeConflictChoices(choices);
+  if (!normalized.size) throw makeError('Chưa chọn hướng xử lý xung đột.', 'SYNC_CHOICE_REQUIRED');
+  return runSync(normalized);
+}
+
+function listRecovery() {
+  return store.listSyncRecovery();
+}
+
+function restoreRecovery(id) {
+  const result = store.restoreSyncRecovery(id);
+  emitApplied();
+  return result;
 }
 
 function syncNow() {
@@ -461,10 +582,11 @@ function syncNow() {
     return inflight;
   }
   pending = false;
-  inflight = runSync().finally(() => {
-    inflight = null;
+  const task = runSync().finally(() => {
+    if (inflight === task) inflight = null;
   });
-  return inflight;
+  inflight = task;
+  return task;
 }
 
 function schedule(delay = 2000) {
@@ -493,15 +615,23 @@ function scheduleRetry() {
 }
 
 async function startup() {
-  const session = loadSession();
+  let session;
+  try { session = loadSession(); }
+  catch (error) {
+    clearRuntime();
+    setStatus('error', error);
+    return statusSnapshot();
+  }
   if (!session) {
     clearRuntime();
     return statusSnapshot();
   }
-  applyRuntimeSession(session);
+  session = applyRuntimeSession(session);
+  const job = operation(session);
   setStatus('idle');
   try {
     const info = await apiRequest(session, '/api/auth/me', { maxBytes: 64 * 1024 });
+    job.assertCurrent();
     if (info && info.user) {
       runtime.email = info.user.email;
       runtime.vaultSalt = info.vaultSalt;
@@ -514,6 +644,7 @@ async function startup() {
     persistSession();
     schedule(3000);
   } catch (error) {
+    try { job.assertCurrent(); } catch { return statusSnapshot(); }
     if (handleAuthFailure(error)) return statusSnapshot();
     if (error.code === 'NETWORK_ERROR') {
       setStatus('offline', error);
@@ -530,8 +661,7 @@ function init(options = {}) {
 }
 
 function shutdown() {
-  syncTimer = clearTimer(syncTimer);
-  retryTimer = clearTimer(retryTimer);
+  invalidateOperations();
 }
 
 module.exports = {
@@ -543,6 +673,9 @@ module.exports = {
   logout,
   status: statusSnapshot,
   syncNow,
+  resolveConflicts,
+  listRecovery,
+  restoreRecovery,
   schedule,
   shutdown
 };

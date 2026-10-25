@@ -149,6 +149,251 @@ function newer(left, right) {
   return stableStringify(left) >= stableStringify(right) ? left : right;
 }
 
+function isSecretPath(path) {
+  return /(^|\.)(password|passphrase|privateKey|privateKeyPath|sshPassword|sshPassphrase|token|secret|key|cert|ca)$/i.test(path)
+    || /(?:password|passphrase|privatekey|secret|token)/i.test(path);
+}
+
+function isIdentityPath(path) {
+  return /(^|\.)(host|hostname|port|user|username|knownHostKey)$/i.test(path);
+}
+
+function requiresChoicePath(path) {
+  return isSecretPath(path) || isIdentityPath(path);
+}
+
+function pathPart(key) {
+  return String(key).replace(/\\/g, '\\\\').replace(/\./g, '\\.');
+}
+
+function pathParts(path) {
+  const parts = [];
+  let part = '';
+  let escaped = false;
+  for (const character of String(path)) {
+    if (escaped) { part += character; escaped = false; }
+    else if (character === '\\') escaped = true;
+    else if (character === '.') { parts.push(part); part = ''; }
+    else part += character;
+  }
+  parts.push(part);
+  return parts;
+}
+
+function ownValue(target, key, value) {
+  const copy = (entry) => {
+    if (Array.isArray(entry)) return entry.map(copy);
+    if (entry && typeof entry === 'object') return Object.fromEntries(Object.entries(entry).map(([name, child]) => [name, copy(child)]));
+    return entry;
+  };
+  Object.defineProperty(target, key, { value: copy(value), writable: true, enumerable: true, configurable: true });
+}
+
+function flattenRecord(record, prefix = null, output = Object.create(null)) {
+  for (const [key, value] of Object.entries(record && typeof record === 'object' ? record : {})) {
+    const path = prefix !== null ? `${prefix}.${pathPart(key)}` : pathPart(key);
+    if (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length) flattenRecord(value, path, output);
+    else output[path] = value;
+  }
+  return output;
+}
+
+function assignPath(target, path, value) {
+  const parts = pathParts(path);
+  let current = target;
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    const part = parts[index];
+    if (!Object.hasOwn(current, part) || !current[part] || typeof current[part] !== 'object' || Array.isArray(current[part])) ownValue(current, part, {});
+    current = current[part];
+  }
+  ownValue(current, parts[parts.length - 1], value);
+}
+
+function sameValue(left, right) {
+  return stableStringify(left) === stableStringify(right);
+}
+
+function latestTimestamp(left, right) {
+  if (!validTimestamp(left)) return validTimestamp(right) ? right : DEFAULT_TIMESTAMP;
+  if (!validTimestamp(right)) return left;
+  return left >= right ? left : right;
+}
+
+function earliestTimestamp(...values) {
+  const valid = values.filter(validTimestamp).sort();
+  return valid[0] || DEFAULT_TIMESTAMP;
+}
+
+function mergeRecordFields(baseRecord, localRecord, remoteRecord, options = {}) {
+  const id = String(localRecord && localRecord.id || remoteRecord && remoteRecord.id || '');
+  const baseFlat = baseRecord ? flattenRecord(baseRecord) : Object.create(null);
+  const localFlat = flattenRecord(localRecord);
+  const remoteFlat = flattenRecord(remoteRecord);
+  const skip = new Set(['id', 'updatedAt', 'createdAt']);
+  const paths = new Set([...Object.keys(baseFlat), ...Object.keys(localFlat), ...Object.keys(remoteFlat)]);
+  const merged = { id };
+  const fields = [];
+  let requiresChoice = false;
+  for (const path of [...paths].sort()) {
+    if (skip.has(path)) continue;
+    const hasBase = Object.hasOwn(baseFlat, path);
+    const hasLocal = Object.hasOwn(localFlat, path);
+    const hasRemote = Object.hasOwn(remoteFlat, path);
+    if (!hasLocal && !hasRemote) continue;
+    const baseValue = hasBase ? baseFlat[path] : undefined;
+    const localValue = hasLocal ? localFlat[path] : undefined;
+    const remoteValue = hasRemote ? remoteFlat[path] : undefined;
+    let value;
+    if (sameValue(localValue, remoteValue)) {
+      value = localValue;
+    } else if (hasBase && sameValue(localValue, baseValue)) {
+      value = remoteValue;
+    } else if (hasBase && sameValue(remoteValue, baseValue)) {
+      value = localValue;
+    } else {
+      const choice = options.choices ? options.choices.get(`${id}\u0000${path}`) : undefined;
+      const secret = options.secretCheck ? options.secretCheck(path) : false;
+      const needsChoice = options.choiceCheck ? options.choiceCheck(path) : false;
+      if (choice === 'remote') value = remoteValue;
+      else if (choice === 'local') value = localValue;
+      else {
+        value = localValue;
+        if (needsChoice) requiresChoice = true;
+      }
+      fields.push({
+        path,
+        secret,
+        requiresChoice: needsChoice && !choice,
+        localChanged: !sameValue(localValue, baseValue),
+        remoteChanged: !sameValue(remoteValue, baseValue),
+        ...(secret ? {} : {
+          local: localValue === undefined ? null : localValue,
+          remote: remoteValue === undefined ? null : remoteValue
+        })
+      });
+    }
+    if (value !== undefined) assignPath(merged, path, value);
+  }
+  merged.updatedAt = latestTimestamp(localRecord.updatedAt, remoteRecord.updatedAt);
+  merged.createdAt = earliestTimestamp(localRecord.createdAt, remoteRecord.createdAt, baseRecord && baseRecord.createdAt);
+  return { record: merged, fields, requiresChoice };
+}
+
+function mergeVaultsWithBase(localInput, remoteInput, baseInput, options = {}) {
+  const local = normalizeVault(localInput);
+  const remote = normalizeVault(remoteInput);
+  const base = baseInput ? normalizeVault(baseInput) : null;
+  const choiceSource = options.choices;
+  const choices = choiceSource && typeof choiceSource.get === 'function' && typeof choiceSource.entries === 'function'
+    ? choiceSource
+    : new Map(Object.entries(choiceSource && typeof choiceSource === 'object' ? choiceSource : {}));
+  const mergeOptions = {
+    choices,
+    secretCheck: isSecretPath,
+    choiceCheck: requiresChoicePath
+  };
+
+  const baseWorkspaces = new Map((base ? base.workspaces : []).map((entry) => [entry.id, entry]));
+  const localWorkspaces = new Map(local.workspaces.map((entry) => [entry.id, entry]));
+  const remoteWorkspaces = new Map(remote.workspaces.map((entry) => [entry.id, entry]));
+  const workspaceIds = new Set([...localWorkspaces.keys(), ...remoteWorkspaces.keys()]);
+  const workspaces = new Map();
+  const conflicts = [];
+  for (const id of workspaceIds) {
+    if (id === DEFAULT_WORKSPACE_ID) continue;
+    const localWorkspace = localWorkspaces.get(id);
+    const remoteWorkspace = remoteWorkspaces.get(id);
+    if (localWorkspace && remoteWorkspace) {
+      const result = mergeRecordFields(baseWorkspaces.get(id), localWorkspace, remoteWorkspace, {
+        choices,
+        secretCheck: () => false,
+        choiceCheck: () => false
+      });
+      workspaces.set(id, result.record);
+      if (result.fields.length) {
+        conflicts.push({
+          id,
+          type: 'workspace',
+          name: result.record.name || 'Workspace',
+          requiresChoice: false,
+          fields: result.fields
+        });
+      }
+    } else {
+      workspaces.set(id, localWorkspace || remoteWorkspace);
+    }
+  }
+
+  const baseConnections = new Map((base ? base.connections : []).map((entry) => [entry.id, entry]));
+  const localConnections = new Map(local.connections.map((entry) => [entry.id, entry]));
+  const remoteConnections = new Map(remote.connections.map((entry) => [entry.id, entry]));
+  const connectionIds = new Set([...localConnections.keys(), ...remoteConnections.keys()]);
+  const connections = new Map();
+  for (const id of connectionIds) {
+    const localConnection = localConnections.get(id);
+    const remoteConnection = remoteConnections.get(id);
+    if (localConnection && remoteConnection) {
+      const result = mergeRecordFields(baseConnections.get(id), localConnection, remoteConnection, mergeOptions);
+      connections.set(id, result.record);
+      if (result.fields.length) {
+        conflicts.push({
+          id,
+          type: 'connection',
+          name: result.record.name || result.record.host || id,
+          workspaceId: result.record.workspaceId || DEFAULT_WORKSPACE_ID,
+          requiresChoice: result.requiresChoice,
+          fields: result.fields
+        });
+      }
+    } else {
+      connections.set(id, localConnection || remoteConnection);
+    }
+  }
+
+  const tombstones = new Map();
+  const now = options.now instanceof Date ? options.now : new Date();
+  const cutoff = now.getTime() - 180 * 24 * 60 * 60 * 1000;
+  for (const tombstone of [...local.tombstones, ...remote.tombstones]) {
+    if (Date.parse(tombstone.updatedAt) < cutoff) continue;
+    const key = `${tombstone.type}:${tombstone.id}`;
+    const current = tombstones.get(key);
+    if (!current || tombstone.updatedAt > current.updatedAt) tombstones.set(key, tombstone);
+  }
+  const workspaceTombstones = new Map();
+  const connectionTombstones = new Map();
+  for (const tombstone of tombstones.values()) {
+    if (tombstone.type === 'workspace') workspaceTombstones.set(tombstone.id, tombstone);
+    else connectionTombstones.set(tombstone.id, tombstone);
+  }
+  for (const [id, workspace] of [...workspaces]) {
+    const tombstone = workspaceTombstones.get(id);
+    if (tombstone && tombstone.updatedAt >= workspace.updatedAt) workspaces.delete(id);
+  }
+  const workspaceIdsAfter = new Set([DEFAULT_WORKSPACE_ID, ...workspaces.keys()]);
+  for (const [id, connection] of [...connections]) {
+    const tombstone = connectionTombstones.get(id);
+    if (tombstone && tombstone.updatedAt >= connection.updatedAt) {
+      connections.delete(id);
+      const conflictIndex = conflicts.findIndex((entry) => entry.type === 'connection' && entry.id === id);
+      if (conflictIndex !== -1) conflicts.splice(conflictIndex, 1);
+      continue;
+    }
+    if (!workspaceIdsAfter.has(connection.workspaceId)) connection.workspaceId = DEFAULT_WORKSPACE_ID;
+  }
+
+  return {
+    vault: normalizeVault({
+      version: VAULT_VERSION,
+      defaultWorkspaceId: DEFAULT_WORKSPACE_ID,
+      workspaces: [defaultWorkspace(), ...workspaces.values()],
+      connections: [...connections.values()],
+      tombstones: [...tombstones.values()]
+    }),
+    conflicts,
+    requiresResolution: conflicts.some((entry) => entry.requiresChoice)
+  };
+}
+
 function mergeVaults(localInput, remoteInput, options = {}) {
   const local = normalizeVault(localInput);
   const remote = normalizeVault(remoteInput);
@@ -218,5 +463,9 @@ module.exports = {
   normalizeStore,
   stableStringify,
   fingerprint,
-  mergeVaults
+  mergeVaults,
+  mergeVaultsWithBase,
+  isSecretPath,
+  isIdentityPath,
+  requiresChoicePath
 };

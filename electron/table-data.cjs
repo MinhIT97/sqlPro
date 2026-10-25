@@ -2,8 +2,8 @@
 
 // SQL planning and bounded count cache are independent of IPC and renderer state.
 class TableDataService {
-  constructor({ columns, raw, quoteId, tableRef, serializeRow, keyParameter, searchParameter, now = Date.now }) {
-    Object.assign(this, { columns, raw, quoteId, tableRef, serializeRow, keyParameter, searchParameter, now });
+  constructor({ columns, raw, quoteId, tableRef, serializeRow, originalHashes = () => ({}), keyParameter, searchParameter, now = Date.now }) {
+    Object.assign(this, { columns, raw, quoteId, tableRef, serializeRow, originalHashes, keyParameter, searchParameter, now });
     this.counts = new Map();
   }
 
@@ -81,6 +81,7 @@ class TableDataService {
     } : null;
     return {
       columns: plan.columns, primaryKey: primary.map((column) => column.name), rows: rows.map(this.serializeRow),
+      originalHashes: rows.map(this.originalHashes),
       total: plan.total, page, pageSize, hasMore: backwards ? rows.length > 0 : extra,
       nextCursor: cursor(rows.at(-1), page + 1, 'next'), previousCursor: page > 1 ? cursor(rows[0], page - 1, 'previous') : null,
       pagination: usable ? 'keyset' : 'offset'

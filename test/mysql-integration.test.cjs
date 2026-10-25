@@ -90,6 +90,127 @@ test('MySQL integration: snapshots, precise import, typed keys, full export and 
       await reader.close();
     });
 
+    await t.test('updates confirm matched rows even for unchanged values and reject deleted or moved keys', async () => {
+      await admin.query('CREATE TABLE update_outcomes (id INT PRIMARY KEY, label VARCHAR(30))');
+      await admin.query("INSERT INTO update_outcomes VALUES (1,'same')");
+      const reader = await session();
+      const input = { database, table: 'update_outcomes', keys: { id: 1 }, values: { label: 'same' } };
+      const unchanged = await reader.updateRow(input);
+      assert.equal(unchanged.status, 'unchanged');
+      assert.equal(unchanged.matchedRows, 1);
+      assert.equal((await reader.updateRow({ ...input, values: { label: 'new' } })).status, 'updated');
+      await admin.query('UPDATE update_outcomes SET id=2 WHERE id=1');
+      await assert.rejects(reader.updateRow(input), { code: 'ROW_NOT_FOUND' });
+      await admin.query('DELETE FROM update_outcomes');
+      await assert.rejects(reader.updateRow({ ...input, keys: { id: 2 } }), { code: 'ROW_NOT_FOUND' });
+      await reader.close();
+    });
+
+    await t.test('guarded deletes respect autocommit off and only roll back their own savepoint', async () => {
+      await admin.query('CREATE TABLE guarded_deletes (id INT PRIMARY KEY, label VARCHAR(30)) ENGINE=InnoDB');
+      await admin.query("INSERT INTO guarded_deletes VALUES (1,'one'),(2,'two')");
+      const reader = await session();
+      const input = { database, table: 'guarded_deletes', keysList: [{ id: 1 }], originalValues: [{ id: 1, label: 'one' }] };
+      await reader.raw('SET autocommit=0');
+      await reader.deleteRows(input);
+      assert.equal(reader.autocommit, false);
+      assert.equal(reader.inTransaction, true);
+      assert.equal((await admin.query('SELECT COUNT(*) AS n FROM guarded_deletes'))[0][0].n, 2);
+      await reader.raw('ROLLBACK');
+      assert.equal((await admin.query('SELECT COUNT(*) AS n FROM guarded_deletes'))[0][0].n, 2);
+
+      await reader.raw("UPDATE guarded_deletes SET label='pending' WHERE id=2");
+      await assert.rejects(reader.deleteRows({ ...input, originalValues: [{ id: 1, label: 'stale' }] }), { code: 'ROW_CONFLICT' });
+      assert.equal((await reader.raw('SELECT label FROM guarded_deletes WHERE id=2')).rows[0].label, 'pending');
+      assert.equal((await admin.query('SELECT label FROM guarded_deletes WHERE id=2'))[0][0].label, 'two');
+      assert.equal(reader.autocommit, false);
+      const raw = reader.raw.bind(reader);
+      // Force a failure after DELETE executes; rollback must preserve the caller's prior UPDATE.
+      reader.raw = async (sql, params) => {
+        const result = await raw(sql, params);
+        if (/^DELETE/.test(sql)) result.result.affectedRows = 0;
+        return result;
+      };
+      await assert.rejects(reader.deleteRows(input), { code: 'ROW_CONFLICT' });
+      reader.raw = raw;
+      assert.equal(Number((await reader.raw('SELECT COUNT(*) AS n FROM guarded_deletes')).rows[0].n), 2);
+      assert.equal((await reader.raw('SELECT label FROM guarded_deletes WHERE id=2')).rows[0].label, 'pending');
+      await reader.raw('COMMIT');
+      assert.equal((await admin.query('SELECT label FROM guarded_deletes WHERE id=2'))[0][0].label, 'pending');
+      assert.equal(reader.autocommit, false);
+      await reader.close();
+    });
+
+    await t.test('original text guards distinguish case, accents, spaces and literal ellipses', async () => {
+      await admin.query('CREATE TABLE guarded_text (id INT PRIMARY KEY, label VARCHAR(30) COLLATE utf8mb4_0900_ai_ci)');
+      await admin.query("INSERT INTO guarded_text VALUES (1,'alice')");
+      const reader = await session();
+      for (const [before, after] of [['alice', 'ALICE'], ['cafe', 'café'], ['alice', 'alice '], ['complete…text', 'changed elsewhere']]) {
+        await admin.query('UPDATE guarded_text SET label=? WHERE id=1', [before]);
+        const original = (await reader.tableData({ database, table: 'guarded_text' })).rows[0];
+        await admin.query('UPDATE guarded_text SET label=? WHERE id=1', [after]);
+        await assert.rejects(reader.updateRow({ database, table: 'guarded_text', keys: { id: 1 }, original, values: { label: 'draft' } }), { code: 'ROW_CONFLICT' });
+        await assert.rejects(reader.deleteRows({ database, table: 'guarded_text', keysList: [{ id: 1 }], originalValues: [original] }), { code: 'ROW_CONFLICT' });
+        assert.equal((await admin.query('SELECT label FROM guarded_text'))[0][0].label, after);
+      }
+      await reader.close();
+    });
+
+    await t.test('JSON document originals match unchanged objects, arrays, scalars and SQL/JSON null', async () => {
+      await admin.query('CREATE TABLE guarded_json (id INT PRIMARY KEY, payload JSON, label VARCHAR(30))');
+      const documents = ['{"n":18446744073709551615,"__proto__":{"safe":true}}', '[1,"x",null]', '"text"', 'null', null, '9007199254740993'];
+      for (let index = 0; index < documents.length; index += 1) await admin.query('INSERT INTO guarded_json VALUES (?, ?, ?)', [index + 1, documents[index], 'before']);
+      const reader = await session();
+      const rows = (await reader.tableData({ database, table: 'guarded_json' })).rows;
+      for (const original of rows) {
+        const result = await reader.updateRow({ database, table: 'guarded_json', keys: { id: original.id }, original, values: { label: 'after' } });
+        assert.equal(result.status, 'updated');
+      }
+      const original = (await reader.tableData({ database, table: 'guarded_json' })).rows[0];
+      await admin.query("UPDATE guarded_json SET payload=JSON_OBJECT('n',1) WHERE id=1");
+      await assert.rejects(reader.updateRow({ database, table: 'guarded_json', keys: { id: 1 }, original, values: { label: 'stale' } }), { code: 'ROW_CONFLICT' });
+      await reader.close();
+    });
+
+    await t.test('full binary hashes guard changes hidden behind identical grid and SQL previews', async () => {
+      await admin.query('CREATE TABLE guarded_blob (id INT PRIMARY KEY, payload BLOB, label VARCHAR(30))');
+      const bytes = Buffer.alloc(64, 1);
+      await admin.query('INSERT INTO guarded_blob VALUES (1, ?, ?)', [bytes, 'before']);
+      const reader = await session();
+      const data = await reader.tableData({ database, table: 'guarded_blob' });
+      const query = await reader.runQuery('SELECT id, payload, label FROM guarded_blob');
+      assert.equal(data.originalHashes[0].payload.kind, 'sha256');
+      assert.deepEqual(query.originalHashes[0][1], data.originalHashes[0].payload);
+      const original = { ...data.rows[0], ...data.originalHashes[0] };
+      await reader.updateRow({ database, table: 'guarded_blob', keys: { id: 1 }, original, values: { label: 'after' } });
+      original.label = 'after';
+      const changed = Buffer.from(bytes); changed[63] = 2;
+      await admin.query('UPDATE guarded_blob SET payload=? WHERE id=1', [changed]);
+      const current = await reader.tableData({ database, table: 'guarded_blob' });
+      assert.equal(current.rows[0].payload, data.rows[0].payload);
+      await assert.rejects(reader.updateRow({ database, table: 'guarded_blob', keys: { id: 1 }, original, values: { label: 'stale' } }), { code: 'ROW_CONFLICT' });
+      await assert.rejects(reader.deleteRows({ database, table: 'guarded_blob', keysList: [{ id: 1 }], originalValues: [original] }), { code: 'ROW_CONFLICT' });
+      await reader.close();
+    });
+
+    await t.test('restore rejects database/global changes before writing and verifies clean row counts', async () => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-restore-safe-'));
+      const filePath = path.join(directory, 'fixture.sql');
+      const reader = await session();
+      try {
+        for (const statement of ['ALTER DATABASE mysql DEFAULT CHARACTER SET latin1', 'SET GLOBAL max_connections=25', 'SET PERSIST sql_mode=""', 'FLUSH TABLES WITH READ LOCK']) {
+          await fs.writeFile(filePath, `CREATE TABLE never_written (id INT);\n${statement};\n`);
+          await assert.rejects(reader.restoreDatabase({ database, filePath }), { code: 'RESTORE_SCOPE_REJECTED' });
+          assert.equal((await admin.query("SHOW TABLES LIKE 'never_written'"))[0].length, 0);
+        }
+        await fs.writeFile(filePath, 'SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE="NO_AUTO_VALUE_ON_ZERO";\nCREATE TABLE verified_rows (id INT PRIMARY KEY);\nINSERT INTO verified_rows VALUES (1),(2);\nSET SQL_MODE=@OLD_SQL_MODE;\n');
+        const result = await reader.restoreDatabase({ database, filePath });
+        assert.equal(result.verification.status, 'verified');
+        assert.equal(result.verification.checks.rowCounts.checked, 1);
+        assert.equal(result.verification.limitations.length, 0);
+      } finally { await reader.close(); await fs.rm(directory, { recursive: true, force: true }); }
+    });
+
     await t.test('keyset pages and exact filters preserve composite order in both directions', async () => {
       await admin.query('CREATE TABLE pages (tenant INT, id INT, label VARCHAR(20), PRIMARY KEY(tenant,id))');
       await admin.query("INSERT INTO pages VALUES (1,1,'same'),(1,2,'same'),(1,3,'same'),(2,1,'same'),(2,2,'other')");

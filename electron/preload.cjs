@@ -34,7 +34,8 @@ const workspaces = Object.freeze({
 
 const db = Object.freeze({
   connect: (profileId, options) => ipcRenderer.invoke('db:connect', profileId, options),
-  disconnect: (profileId) => ipcRenderer.invoke('db:disconnect', profileId),
+  disconnect: (profileId, options) => ipcRenderer.invoke('db:disconnect', profileId, options),
+  sessionState: (profileId) => ipcRenderer.invoke('db:session-state', profileId),
   openProfiles: () => ipcRenderer.invoke('db:open-profiles'),
   databases: (profileId) => ipcRenderer.invoke('db:databases', { profileId }),
   useDatabase: (database, profileId) => ipcRenderer.invoke('db:use-database', { database, profileId }),
@@ -74,6 +75,9 @@ const account = Object.freeze({
   logout: () => ipcRenderer.invoke('account:logout'),
   resetLocal: () => ipcRenderer.invoke('account:reset-local'),
   syncNow: () => ipcRenderer.invoke('account:sync-now'),
+  resolveConflicts: (choices) => ipcRenderer.invoke('account:resolve-conflicts', choices),
+  listRecovery: () => ipcRenderer.invoke('account:list-recovery'),
+  restoreRecovery: (id) => ipcRenderer.invoke('account:restore-recovery', id),
   onStatus: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('sync:status', listener);

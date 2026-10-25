@@ -6,6 +6,11 @@ let historyRows = [];
 let savedQueries = [];
 let activeTransfer = null;
 let transferTaskSeq = 0;
+const rowOriginalHashes = new WeakMap();
+
+function originalRow(row) {
+  return { ...row, ...(rowOriginalHashes.get(row) || {}) };
+}
 
 const desktop = window.sqlProDesktop;
 const RowValues = window.SqlRowValues;
@@ -306,6 +311,7 @@ async function call(promise) {
     if (response.error?.fingerprint) error.fingerprint = response.error.fingerprint;
     if (response.error?.expectedFingerprint) error.expectedFingerprint = response.error.expectedFingerprint;
     if (response.error?.partial) error.partial = response.error.partial;
+    if (response.error?.conflict) error.conflict = response.error.conflict;
     throw error;
   }
   return response.data;
@@ -991,7 +997,11 @@ async function init() {
     if (progress.operation === 'backup') {
       setStatus(`Đang sao lưu… ${progress.rows || 0} dòng · ${formatBytes(progress.bytes)}`);
     } else if (progress.operation === 'restore') {
-      setStatus(`Đang phục hồi… ${progress.executed || 0} câu lệnh · ${formatBytes(progress.bytes)}`);
+      if (progress.phase === 'scan') {
+        setStatus(`Đang kiểm tra phạm vi tệp… ${progress.statements || 0} câu lệnh · ${formatBytes(progress.bytes)}`);
+      } else {
+        setStatus(`Đang phục hồi… ${progress.executed || 0} câu lệnh · ${formatBytes(progress.bytes)}`);
+      }
     } else if (progress.operation === 'export') {
       setStatus(`Đang xuất… ${progress.rows || 0} dòng · ${formatBytes(progress.bytes)}`);
     } else if (progress.operation === 'import') {
@@ -2471,20 +2481,23 @@ function setupContextMenu() {
             const keys = {};
             for (const pk of app.primaryKey) keys[pk] = rowData[pk];
             try {
-              await call(desktop.db.updateRow({
+              requireRowUpdate(await call(desktop.db.updateRow({
                 profileId: app.connection?.id || null,
                 database: app.database,
                 table,
                 keys,
-                values: { [colName]: null }
-              }));
+                values: { [colName]: null },
+                original: originalRow(rowData)
+              })));
               rowData[colName] = null;
               gridTd.className = 'nullcell cell-flash-saved';
               gridTd.innerHTML = '<span class="null-badge">NULL</span>';
               setTimeout(() => gridTd.classList.remove('cell-flash-saved'), 1500);
               toast(`Đã đặt "${colName}" thành NULL`, 'success');
             } catch (err) {
-              toast(err.message, 'error');
+              if (err.code === 'ROW_CONFLICT' || err.code === 'ROW_NOT_FOUND') {
+                showRowConflict(err, { reload: () => loadData({ keepScroll: true }) });
+              } else toast(err.message, 'error');
             }
           } else if (action === 'edit-row') {
             editRow(rowIdx);
@@ -2500,12 +2513,15 @@ function setupContextMenu() {
                 profileId: app.connection?.id || null,
                 database,
                 table: targetTable,
-                keysList: [keys]
+                keysList: [keys],
+                originalValues: [originalRow(rowData)]
               }));
               toast('Đã xóa dòng thành công', 'success');
               await loadData({ keepScroll: true });
             } catch (err) {
-              toast(err.message, 'error');
+              if (err.code === 'ROW_CONFLICT' || err.code === 'ROW_NOT_FOUND') {
+                showRowConflict(err, { reload: () => loadData({ keepScroll: true }) });
+              } else toast(err.message, 'error');
             }
           }
         });
@@ -3007,6 +3023,7 @@ async function connectTo(id, options = {}) {
     app.server = data.server;
     app.databases = data.databases;
     setConnectionState('connected', 'Đã kết nối');
+    void refreshSessionState(id);
     const preferredDatabase = options.database || remembered.database;
     const preferred = preferredDatabase && app.databases.includes(preferredDatabase)
       ? preferredDatabase
@@ -3068,6 +3085,7 @@ async function selectDatabase(database, options = {}) {
   await refreshBackupList(database);
   renderSidebar();
   setConnectionState('connected', 'Đã kết nối');
+  void refreshSessionState();
   const candidate = options.table && app.tables.find((entry) => entry.name === options.table)
     ? options.table
     : (app.tables.find((entry) => entry.type === 'table')?.name || app.tables[0]?.name || null);
@@ -3263,6 +3281,7 @@ async function loadData({ keepScroll = false } = {}) {
     app.columns = data.columns;
     app.primaryKey = data.primaryKey;
     app.rows = data.rows;
+    app.rows.forEach((row, index) => rowOriginalHashes.set(row, data.originalHashes?.[index] || {}));
     app.total = data.total;
     app.page = data.page;
     app.pageSize = data.pageSize;
@@ -3682,7 +3701,66 @@ function createRowValueEditor(column, originalValue, { inline = false, inserting
   };
 }
 
-function startInlineValueEdit({ td, column, value, save, onSaved, next }) {
+function requireRowUpdate(result) {
+  if (!result || Number(result.matchedRows ?? result.affectedRows) !== 1) {
+    const error = new Error('Chưa xác nhận được bản ghi đã lưu. Nội dung đang sửa được giữ lại; hãy hủy chỉnh sửa và tải lại dữ liệu để kiểm tra.');
+    error.code = 'ROW_NOT_FOUND';
+    throw error;
+  }
+  return result;
+}
+
+function showRowConflict(error, { reload } = {}) {
+  const conflict = error.conflict || {};
+  const original = conflict.original || {};
+  const current = conflict.current || {};
+  const names = [...new Set([...Object.keys(original), ...Object.keys(current)])]
+    .filter((name) => JSON.stringify(original[name]) !== JSON.stringify(current[name]));
+  const describe = (value) => {
+    if (value === null || value === undefined) return 'NULL';
+    const text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    return text.length > 120 ? `${text.slice(0, 120)}…` : text;
+  };
+  const diffRows = names.slice(0, 15).map((name) => `
+    <tr>
+      <td class="mono">${esc(name)}</td>
+      <td>${esc(describe(original[name]))}</td>
+      <td>${esc(describe(current[name]))}</td>
+    </tr>`).join('');
+  const counts = [];
+  if (Number(conflict.missing) > 0) counts.push(`${Number(conflict.missing)} bản ghi đã bị xóa`);
+  if (Number(conflict.conflicts) > 0) counts.push(`${Number(conflict.conflicts)} bản ghi đã thay đổi`);
+  const dialog = document.createElement('dialog');
+  dialog.className = 'confirmation-dialog';
+  dialog.innerHTML = `
+    <h2>${error.code === 'ROW_NOT_FOUND' ? 'Bản ghi không còn tồn tại' : 'Bản ghi đã thay đổi'}</h2>
+    <p>${esc(error.message)}</p>
+    ${counts.length ? `<p class="hint">${esc(counts.join(' · '))}. Không có thay đổi nào được ghi.</p>` : ''}
+    ${diffRows ? `
+      <table class="mono" style="width:100%;border-collapse:collapse;margin:12px 0;font-size:12px">
+        <thead><tr><th style="text-align:left">Cột</th><th style="text-align:left">Bản bạn mở</th><th style="text-align:left">Hiện tại</th></tr></thead>
+        <tbody>${diffRows}</tbody>
+      </table>
+      ${names.length > 15 ? `<p class="hint">Còn ${names.length - 15} cột khác nhau chưa hiển thị.</p>` : ''}
+    ` : ''}
+    <div class="actions">
+      <button type="button" id="conflictStay">Giữ nội dung đang sửa</button>
+      ${reload ? '<button type="button" class="primary" id="conflictReload">Tải lại dữ liệu</button>' : '<button type="button" class="primary" id="conflictClose">Đóng</button>'}
+    </div>
+  `;
+  document.body.appendChild(dialog);
+  const close = () => { if (dialog.open) dialog.close(); dialog.remove(); };
+  dialog.addEventListener('cancel', (event) => { event.preventDefault(); close(); });
+  dialog.querySelector('#conflictStay')?.addEventListener('click', close);
+  dialog.querySelector('#conflictClose')?.addEventListener('click', close);
+  dialog.querySelector('#conflictReload')?.addEventListener('click', () => {
+    close();
+    try { reload(); } catch { /* the grid keeps its current data if reload is unavailable */ }
+  });
+  dialog.showModal();
+}
+
+function startInlineValueEdit({ td, column, value, save, onSaved, next, reload }) {
   const originalDisplay = td.innerHTML;
   const editor = createRowValueEditor(column, value, { inline: true });
   if (editor.spec.readOnly) { toast(editor.spec.hint, 'error'); return; }
@@ -3706,7 +3784,7 @@ function startInlineValueEdit({ td, column, value, save, onSaved, next }) {
     if (!change.changed) { cancel(); return true; }
     saving = true; editor.setBusy(true); saveButton.disabled = true; cancelButton.disabled = true;
     try {
-      await save(change.value);
+      requireRowUpdate(await save(change.value));
       finished = true;
       onSaved(change.value);
       td.classList.remove('editing-cell');
@@ -3719,6 +3797,9 @@ function startInlineValueEdit({ td, column, value, save, onSaved, next }) {
       return true;
     } catch (error) {
       editor.showError(error.message || 'Không lưu được dữ liệu.');
+      if (error.code === 'ROW_CONFLICT' || error.code === 'ROW_NOT_FOUND') {
+        showRowConflict(error, { reload: reload ? () => reload() : undefined });
+      }
       return false;
     } finally { saving = false; editor.setBusy(false); saveButton.disabled = false; cancelButton.disabled = false; }
   };
@@ -3757,8 +3838,9 @@ async function inlineEditCell(td) {
   const keys = Object.fromEntries(app.primaryKey.map((key) => [key, row[key]]));
   startInlineValueEdit({
     td, column, value: row[name],
-    save: (value) => call(desktop.db.updateRow({ profileId, database, table: targetTable, keys, values: { [name]: value } })),
+    save: (value) => call(desktop.db.updateRow({ profileId, database, table: targetTable, keys, values: { [name]: value }, original: originalRow(row) })),
     onSaved: (value) => { row[name] = value; },
+    reload: () => loadData({ keepScroll: true }),
     next: (previous) => {
       const next = previous ? td.previousElementSibling : td.nextElementSibling;
       if (next?.dataset.col) void inlineEditCell(next);
@@ -5057,10 +5139,21 @@ async function inlineEditQueryResultCell(td) {
       if (index === -1) { toast(`Kết quả thiếu khóa chính "${key.name}" của bảng "${info.table}".`, 'error'); return; }
       keys[key.name] = row[index];
     }
+    const original = {};
+    for (let index = 0; index < result.columns.length; index += 1) {
+      const sourceColumn = result.columns[index];
+      if ((sourceColumn.orgTable || sourceColumn.table) !== info.table) continue;
+      if (sourceColumn.db && sourceColumn.db !== info.database) continue;
+      const sourceName = sourceColumn.orgName || sourceColumn.name;
+      if (sourceName) Object.defineProperty(original, sourceName, {
+        value: result.originalHashes?.[Number(tr.dataset.queryRow)]?.[index] || row[index], enumerable: true, configurable: true, writable: true
+      });
+    }
     startInlineValueEdit({
       td, column, value: row[colIdx],
-      save: (value) => call(desktop.db.updateRow({ profileId, database: info.database, table: info.table, keys, values: { [column.name]: value } })),
+      save: (value) => call(desktop.db.updateRow({ profileId, database: info.database, table: info.table, keys, values: { [column.name]: value }, original })),
       onSaved: (value) => { row[colIdx] = value; },
+      reload: () => runQuery(),
       next: (previous) => {
         const next = previous ? td.previousElementSibling : td.nextElementSibling;
         if (next?.dataset.colIdx !== undefined) void inlineEditQueryResultCell(next);
@@ -5418,6 +5511,7 @@ async function runQuery() {
     updateQueryButtons();
     renderQueryTabs();
     if (app.query === tab && $('#queryResult')) $('#queryResult').innerHTML = queryResultHtml();
+    void refreshSessionState(target.profileId);
     persistState();
   }
 }
@@ -5523,12 +5617,19 @@ async function editRow(index) {
     try {
       if (editing) {
         const keys = Object.fromEntries(primary.map((name) => [name, row[name]]));
-        await call(desktop.db.updateRow({ profileId, database, table: targetTable, keys, values }));
+        requireRowUpdate(await call(desktop.db.updateRow({ profileId, database, table: targetTable, keys, values, original: originalRow(row) })));
       } else await call(desktop.db.insertRow({ profileId, database, table: targetTable, values }));
       toast(editing ? 'Đã cập nhật bản ghi' : 'Đã thêm bản ghi');
       if (form.isConnected) closeModal();
       if ((app.connection?.id || null) === profileId && app.database === database && table === targetTable) await loadData();
-    } catch (error) { errorBox.textContent = error.message; errorBox.classList.remove('hidden'); }
+    } catch (error) {
+      if (error.code === 'ROW_CONFLICT' || error.code === 'ROW_NOT_FOUND') {
+        showRowConflict(error, {
+          reload: () => { closeModal(); void loadData(); }
+        });
+      }
+      errorBox.textContent = error.message; errorBox.classList.remove('hidden');
+    }
     finally { saveButton.disabled = false; editors.forEach((editor) => editor.setBusy(false)); }
   };
   form.addEventListener('submit', (event) => { event.preventDefault(); void save(); });
@@ -5552,16 +5653,22 @@ async function deleteSelectedRows() {
     const row = app.rows[index];
     return Object.fromEntries(app.primaryKey.map((name) => [name, row[name]]));
   });
+  const originalValues = indexes.map((index) => originalRow(app.rows[index]));
   try {
     const result = await call(desktop.db.deleteRows({
       profileId: app.connection?.id || null,
       database: app.database,
       table,
-      keysList
+      keysList,
+      originalValues
     }));
     toast(`Đã xóa ${result.affectedRows} bản ghi`);
     await loadData();
   } catch (error) {
+    if (error.code === 'ROW_CONFLICT' || error.code === 'ROW_NOT_FOUND') {
+      showRowConflict(error, { reload: () => loadData() });
+      return;
+    }
     toast(error.message, 'error');
   }
 }
@@ -5777,6 +5884,7 @@ function accountStateLabel(status) {
     pending: 'Chờ đồng bộ',
     syncing: 'Đang đồng bộ…',
     synced: 'Đã đồng bộ',
+    conflict: 'Cần xử lý xung đột',
     offline: 'Ngoại tuyến',
     error: 'Lỗi đồng bộ',
     'reauth-required': 'Cần đăng nhập lại'
@@ -5787,6 +5895,7 @@ function accountStateLabel(status) {
 function accountStateClass(status) {
   if (!status || !status.loggedIn) return 'signed-out';
   if (status.state === 'reauth-required') return 'reauth';
+  if (status.state === 'conflict') return 'error';
   if (['pending', 'syncing', 'synced', 'offline', 'error'].includes(status.state)) return status.state;
   return 'idle';
 }
@@ -6005,13 +6114,133 @@ async function resetLocalAccountData(prefill) {
   }
 }
 
-function renderAccountPanel(status) {
+const SYNC_FIELD_LABELS = {
+  name: 'Tên',
+  host: 'Host',
+  port: 'Port',
+  user: 'User',
+  username: 'User',
+  password: 'Mật khẩu',
+  database: 'Database',
+  description: 'Mô tả',
+  workspaceId: 'Workspace',
+  'ssh.host': 'SSH host',
+  'ssh.port': 'SSH port',
+  'ssh.user': 'SSH user',
+  'ssh.password': 'Mật khẩu SSH',
+  'ssh.privateKeyPath': 'Private key',
+  'ssh.passphrase': 'Passphrase SSH',
+  'ssl.ca': 'SSL CA',
+  'ssl.cert': 'SSL cert',
+  'ssl.key': 'SSL key',
+  'ssl.passphrase': 'Passphrase SSL',
+  'ssl.rejectUnauthorized': 'Kiểm tra SSL'
+};
+
+function syncFieldLabel(path) {
+  if (SYNC_FIELD_LABELS[path]) return SYNC_FIELD_LABELS[path];
+  const leaf = String(path).split('.').at(-1);
+  return SYNC_FIELD_LABELS[leaf] || path;
+}
+
+function syncFieldValue(value) {
+  if (value === null || value === undefined || value === '') return '(trống)';
+  if (typeof value === 'boolean') return value ? 'Có' : 'Không';
+  return String(value).slice(0, 120);
+}
+
+let syncChoiceCounter = 0;
+
+function syncConflictFieldHtml(conflict, field) {
+  const label = esc(syncFieldLabel(field.path));
+  if (!field.requiresChoice) {
+    const kept = field.localChanged ? field.local : field.remote;
+    const value = field.secret
+      ? '<em>Giá trị nhạy cảm không được hiển thị.</em>'
+      : `<em>Giữ giá trị máy này: ${esc(syncFieldValue(kept))}</em>`;
+    return `
+      <div class="syncfield">
+        <span>${label}</span>
+        <div class="syncvalues">${value}</div>
+      </div>`;
+  }
+  syncChoiceCounter += 1;
+  const name = `syncChoice${syncChoiceCounter}`;
+  const localLabel = field.secret ? 'Giữ giá trị trên máy này' : `Giữ của máy này: ${esc(syncFieldValue(field.local))}`;
+  const remoteLabel = field.secret ? 'Dùng giá trị từ server' : `Dùng của server: ${esc(syncFieldValue(field.remote))}`;
+  const values = field.secret
+    ? '<div class="syncvalues"><em>Giá trị nhạy cảm không được hiển thị khi đồng bộ.</em></div>'
+    : '';
+  return `
+    <div class="syncfield">
+      <span>${label}</span>
+      ${values}
+      <div class="syncchoices">
+        <label><input type="radio" name="${name}" data-sync-connection="${esc(conflict.id)}" data-sync-path="${esc(field.path)}" value="local" checked> ${localLabel}</label>
+        <label><input type="radio" name="${name}" data-sync-connection="${esc(conflict.id)}" data-sync-path="${esc(field.path)}" value="remote"> ${remoteLabel}</label>
+      </div>
+    </div>`;
+}
+
+function syncConflictsHtml(status) {
+  const conflicts = Array.isArray(status.conflicts) ? status.conflicts : [];
+  if (!conflicts.length) return '';
+  syncChoiceCounter = 0;
+  const blocks = conflicts.map((conflict) => `
+    <div class="syncconflict">
+      <div class="syncconflicthead">
+        <strong>${esc(conflict.name || conflict.id)}</strong>
+        <span class="muted">${conflict.type === 'workspace' ? 'Workspace' : 'Kết nối'}</span>
+      </div>
+      ${(conflict.fields || []).map((field) => syncConflictFieldHtml(conflict, field)).join('')}
+    </div>`).join('');
+  return `
+    <div class="syncsection">
+      <h3>Xung đột cần xử lý</h3>
+      <p class="accounthint">Các trường thay đổi ở cả hai máy được hợp nhất độc lập. Trường nhạy cảm (mật khẩu, khóa, host, user) cần bạn chọn một bên trước khi đồng bộ.</p>
+      ${blocks}
+    </div>`;
+}
+
+function syncRecoveryHtml(entries) {
+  if (!entries.length) return '';
+  const reasons = {
+    'conflict-local': 'Bản trên máy này',
+    'conflict-remote': 'Bản trên server',
+    sync: 'Bản đồng bộ'
+  };
+  const rows = [...entries].reverse().map((entry) => `
+    <div class="syncrecoveryrow">
+      <div>
+        <strong>${esc(reasons[entry.reason] || entry.reason || 'Bản phục hồi')}</strong>
+        <span>${esc(formatSyncTime(entry.at))}</span>
+      </div>
+      <button type="button" data-recovery-id="${esc(entry.id)}">Khôi phục</button>
+    </div>`).join('');
+  return `
+    <div class="syncsection">
+      <h3>Bản phục hồi gần đây</h3>
+      <p class="accounthint">Các bản snapshot được mã hóa trên máy trước mỗi lần ghi đè do xung đột.</p>
+      <div class="syncrecovery">${rows}</div>
+    </div>`;
+}
+
+async function renderAccountPanel(status) {
   const email = status.email || '';
   const label = accountStateLabel(status);
   const errorHtml = status.error?.message
     ? `<div class="errorbox">${esc(status.error.message)}</div>`
     : '';
   const reauth = status.state === 'reauth-required';
+  const conflicts = Array.isArray(status.conflicts) ? status.conflicts : [];
+  const needsChoice = Number(status.conflictCount) > 0
+    || conflicts.some((conflict) => conflict.requiresChoice);
+  let recovery = [];
+  try {
+    recovery = await call(desktop.account.listRecovery());
+  } catch {
+    recovery = [];
+  }
   modal(`
     <h2>Tài khoản &amp; đồng bộ</h2>
     <div class="accountidentity">
@@ -6029,12 +6258,14 @@ function renderAccountPanel(status) {
       <div><span>Mã hóa</span><strong>Đầu cuối</strong></div>
     </div>
     ${errorHtml}
+    ${syncConflictsHtml(status)}
+    ${syncRecoveryHtml(recovery)}
     <div class="accountnote">Connection và workspace được mã hóa trên máy trước khi gửi lên server. Server không đọc được host, user hay mật khẩu. Mật khẩu không thể khôi phục.</div>
     <div class="actions">
       <button type="button" id="accountLogout">Đăng xuất</button>
       <span class="spacer"></span>
       <button type="button" id="accountClose">Đóng</button>
-      <button type="button" class="primary" id="accountSync" ${status.state === 'syncing' ? 'disabled' : ''}>${reauth ? 'Đăng nhập lại' : 'Đồng bộ ngay'}</button>
+      <button type="button" class="primary" id="accountSync" ${status.state === 'syncing' ? 'disabled' : ''}>${reauth ? 'Đăng nhập lại' : needsChoice ? 'Áp dụng lựa chọn' : 'Đồng bộ ngay'}</button>
     </div>
   `);
   $('#accountClose').addEventListener('click', closeModal);
@@ -6048,17 +6279,53 @@ function renderAccountPanel(status) {
     button.disabled = true;
     button.textContent = 'Đang đồng bộ…';
     try {
-      await call(desktop.account.syncNow());
+      if (needsChoice) {
+        const fieldsByConnection = new Map();
+        for (const input of document.querySelectorAll('#modal input[data-sync-path]:checked')) {
+          const connectionId = input.dataset.syncConnection;
+          if (!fieldsByConnection.has(connectionId)) fieldsByConnection.set(connectionId, {});
+          fieldsByConnection.get(connectionId)[input.dataset.syncPath] = input.value;
+        }
+        await call(desktop.account.resolveConflicts(
+          [...fieldsByConnection].map(([connectionId, fields]) => ({ connectionId, fields }))
+        ));
+      } else {
+        await call(desktop.account.syncNow());
+      }
       await refreshAccountStatus();
-      if (app.account?.loggedIn) renderAccountPanel(app.account);
+      if (app.account?.loggedIn) await renderAccountPanel(app.account);
       else closeModal();
+      if (app.account?.state === 'conflict') {
+        toast('Vẫn còn xung đột cần xử lý.', 'error');
+        return;
+      }
       toast('Đã đồng bộ dữ liệu');
     } catch (error) {
       button.disabled = false;
-      button.textContent = 'Đồng bộ ngay';
+      button.textContent = needsChoice ? 'Áp dụng lựa chọn' : 'Đồng bộ ngay';
       await refreshAccountStatus();
       toast(error.message, 'error');
     }
+  });
+  document.querySelectorAll('#modal [data-recovery-id]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const id = button.dataset.recoveryId;
+      const confirmed = await confirmAction(
+        'Khôi phục bản đồng bộ',
+        'Dữ liệu connection và workspace hiện tại sẽ được thay bằng bản phục hồi đã chọn. Bạn có chắc không?',
+        'Khôi phục',
+        { separate: true }
+      );
+      if (!confirmed) return;
+      try {
+        const result = await call(desktop.account.restoreRecovery(id));
+        await refreshAccountStatus();
+        if (app.account?.loggedIn) await renderAccountPanel(app.account);
+        toast(`Đã khôi phục bản đồng bộ ${formatSyncTime(result.at)}`);
+      } catch (error) {
+        toast(error.message, 'error');
+      }
+    });
   });
   $('#accountLogout').addEventListener('click', async () => {
     try {
@@ -6434,18 +6701,46 @@ async function importNavicat() {
   }
 }
 
+async function refreshSessionState(profileId = app.connection?.id || null) {
+  if (!desktop || !profileId || typeof desktop.db.sessionState !== 'function') return;
+  try {
+    const state = await call(desktop.db.sessionState(profileId));
+    if (app.connection?.id !== profileId || !state?.connected) return;
+    app.sessionState = state;
+    setConnectionState(
+      'connected',
+      state.inTransaction ? 'Đã kết nối · transaction' : (state.autocommit === false ? 'Đã kết nối · autocommit OFF' : 'Đã kết nối')
+    );
+  } catch {
+    // session state is advisory; regular query errors still surface
+  }
+}
+
 async function disconnect() {
   if (!desktop) return;
-  invalidateSqlAutocomplete();
+  const profileId = app.connection?.id || null;
+  let result = null;
   try {
-    await call(desktop.db.disconnect(app.connection?.id || null));
-  } catch {
-    // ignore
+    result = await call(desktop.db.disconnect(profileId));
+    if (result?.needsConfirmation) {
+      const confirmed = await confirmAction(
+        'Transaction chưa hoàn tất',
+        'Phiên đang mở transaction chưa commit. Ngắt kết nối sẽ rollback các thay đổi chưa commit của transaction đó.',
+        'Vẫn ngắt kết nối'
+      );
+      if (!confirmed) return;
+      result = await call(desktop.db.disconnect(result.profileId || profileId, { force: true }));
+    }
+  } catch (error) {
+    toast(error.message, 'error');
+    return;
   }
+  invalidateSqlAutocomplete();
   if (app.connection) {
     openConnectionIds.delete(app.connection.id);
     connectionViews.delete(app.connection.id);
   }
+  app.sessionState = null;
   app.connection = null;
   app.database = null;
   app.databases = [];
@@ -6649,6 +6944,43 @@ function backupDatabase() {
   });
 }
 
+function restoreVerificationHtml(verification) {
+  if (!verification) return '';
+  const checks = verification.checks || {};
+  if (verification.status === 'verified') {
+    const fk = Number(checks.foreignKeys?.checked || 0);
+    const rows = Number(checks.rowCounts?.checked || 0);
+    return `<p class="hint">✓ <strong>Đã kiểm chứng:</strong> ${fk.toLocaleString()} khóa ngoại, ${rows.toLocaleString()} bảng đối chiếu số dòng, không có cảnh báo mất dữ liệu.</p>`;
+  }
+  if (verification.status === 'failed') {
+    const problems = [];
+    for (const orphan of checks.foreignKeys?.orphans || []) {
+      problems.push(`${orphan.table} · ${orphan.constraint}: ${Number(orphan.orphans).toLocaleString()} dòng mồ côi tham chiếu ${orphan.referencedTable}`);
+    }
+    for (const mismatch of checks.rowCounts?.mismatches || []) {
+      problems.push(`${mismatch.table}: dự kiến ${Number(mismatch.expected).toLocaleString()} dòng, thực tế ${Number(mismatch.actual).toLocaleString()}`);
+    }
+    for (const warning of checks.warnings?.items || []) {
+      problems.push(`Câu #${warning.statement}: ${warning.code} ${warning.message}`);
+    }
+    if (checks.settings?.status === 'failed') problems.push(checks.settings.message);
+    return `
+      <div class="errorbox" role="alert">
+        <strong>Đã chạy nhưng chưa kiểm chứng đạt.</strong>
+        <ul>${problems.slice(0, 10).map((item) => `<li>${esc(item)}</li>`).join('')}</ul>
+        ${problems.length > 10 ? `<p>Còn ${problems.length - 10} vấn đề khác.</p>` : ''}
+      </div>
+      <p class="hint">SqlPro không tự xóa hoặc sửa các dòng mồ côi. Hãy kiểm tra dữ liệu thủ công trước khi đưa database vào sử dụng.</p>`;
+  }
+  const limitations = (verification.limitations || []).slice(0, 8);
+  return `
+    <div class="hint">
+      <strong>Đã chạy, chưa kiểm chứng đầy đủ.</strong>
+      ${limitations.length ? `<ul>${limitations.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}
+      ${(verification.limitations || []).length > limitations.length ? `<p>Còn ${verification.limitations.length - limitations.length} giới hạn khác.</p>` : ''}
+    </div>`;
+}
+
 function restoreDatabase(backupId = null) {
   if (!desktop) return;
   if (!app.connection || !app.database) {
@@ -6680,7 +7012,7 @@ function restoreDatabase(backupId = null) {
         <input type="checkbox" id="restoreCopyCatalog" checked> Lưu bản sao lưu này vào danh mục của Database đích
       </label>
     </div>
-    <div class="hint">Tệp .sql được chạy tuần tự vào database đích. Các lệnh USE và CREATE/DROP DATABASE trong tệp sẽ bị bỏ qua; khóa ngoại tạm thời tắt trong lúc phục hồi.</div>
+    <div class="hint">Tệp .sql được chạy tuần tự vào database đích. Trước khi ghi, SqlPro kiểm tra toàn bộ tệp: câu lệnh ghi ra ngoài database đích, CALL/PREPARE/EXECUTE và câu lệnh không phân tích được sẽ bị chặn. Các lệnh USE và CREATE/DROP DATABASE trong tệp sẽ bị bỏ qua; khóa ngoại tạm thời tắt trong lúc phục hồi nhưng được kiểm tra lại sau đó. Trigger/routine trong tệp vẫn có thể ghi gián tiếp hoặc dùng SQL động ngoài phần đã phân tích, nên hãy dùng tài khoản chỉ có quyền trên database đích.</div>
     <div class="hint"><strong>Chỉ phục hồi tệp bạn tin cậy</strong> — nội dung tệp có thể thay đổi dữ liệu.</div>
     <div class="actions">
       <button onclick="closeModal()">Hủy</button>
@@ -6749,8 +7081,14 @@ function restoreDatabase(backupId = null) {
         return;
       }
       closeModal();
-      toast(`Đã phục hồi ${result.statements} câu lệnh${result.skipped ? `, bỏ qua ${result.skipped}` : ''}`);
-      setStatus(`Phục hồi hoàn tất • ${result.statements} câu lệnh`);
+      const verification = result.verification;
+      const verificationFailed = verification?.status === 'failed';
+      const verificationUnverified = verification?.status === 'unverified';
+      toast(
+        `Đã phục hồi ${result.statements} câu lệnh${result.skipped ? `, bỏ qua ${result.skipped}` : ''}${verificationFailed ? ' · cần kiểm tra dữ liệu' : verificationUnverified ? ' · chưa kiểm chứng đầy đủ' : ' · đã kiểm chứng'}`,
+        verificationFailed ? 'error' : 'info'
+      );
+      setStatus(`Phục hồi hoàn tất • ${result.statements} câu lệnh${verificationFailed ? ' • có cảnh báo' : ''}`);
       if (app.connection?.id === sourceProfileId) {
         await refreshDatabases();
         if (targetDb !== sourceDb) {
@@ -6776,8 +7114,9 @@ function restoreDatabase(backupId = null) {
       }
       persistState();
       modal(`
-        <h2>Phục hồi hoàn tất</h2>
+        <h2>${verificationFailed ? 'Phục hồi đã chạy nhưng cần kiểm tra' : verificationUnverified ? 'Phục hồi hoàn tất (chưa kiểm chứng đầy đủ)' : 'Phục hồi hoàn tất'}</h2>
         <p>Đã chạy ${result.statements} câu lệnh${result.skipped ? `, bỏ qua ${result.skipped}` : ''} vào <strong>${esc(targetDb)}</strong>.</p>
+        ${restoreVerificationHtml(verification)}
         ${result.copiedBackup ? `<p class="subtle">Đã lưu bản sao lưu vào danh mục của <strong>${esc(targetDb)}</strong>.</p>` : ''}
         <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
       `);
@@ -7024,8 +7363,9 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
 
       closeModal();
       activeTransfer = null;
-      toast(`Đã dán bản sao lưu sang "${finalTargetDb}" thành công!`);
-      setStatus(`Dán hoàn tất sang ${finalTargetDb}`);
+      const pastedFailed = restoreResult?.verification?.status === 'failed';
+      toast(`Đã dán bản sao lưu sang "${finalTargetDb}"${pastedFailed ? ' nhưng cần kiểm tra dữ liệu' : ' thành công!'}`, pastedFailed ? 'error' : 'info');
+      setStatus(`Dán hoàn tất sang ${finalTargetDb}${pastedFailed ? ' • có cảnh báo' : ''}`);
 
       if (targetConnId === app.connection?.id) {
         await refreshDatabases();
@@ -7033,9 +7373,10 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
       }
 
       modal(`
-        <h2>Dán bản sao lưu thành công</h2>
+        <h2>${pastedFailed ? 'Dán bản sao lưu đã chạy nhưng cần kiểm tra' : 'Dán bản sao lưu thành công'}</h2>
         <p>Đã dán thành công bản sao lưu từ <strong>${esc(copied.sourceConnectionName)} › ${esc(copied.sourceDatabase)}</strong> sang <strong>${esc(targetConnName)} › ${esc(finalTargetDb)}</strong>.</p>
         ${restoreResult ? `<p>Đã chạy ${restoreResult.statements} câu lệnh${restoreResult.skipped ? `, bỏ qua ${restoreResult.skipped}` : ''}.</p>` : ''}
+        ${restoreVerificationHtml(restoreResult?.verification)}
         ${(doCatalog || restoreResult?.copiedBackup) ? `<p class="subtle">Bản sao lưu đã được lưu vào danh mục của <strong>${esc(finalTargetDb)}</strong>.</p>` : ''}
         <div class="actions">
           <button onclick="closeModal()">Đóng</button>
@@ -7255,16 +7596,18 @@ function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn
 
       closeModal();
       activeTransfer = null;
-      toast(`Đã sao chép sang database "${targetDb}" thành công!`);
-      setStatus(`Sao chép hoàn tất sang ${targetDb}`);
+      const copiedFailed = restoreResult?.verification?.status === 'failed';
+      toast(`Đã sao chép sang database "${targetDb}"${copiedFailed ? ' nhưng cần kiểm tra dữ liệu' : ' thành công!'}`, copiedFailed ? 'error' : 'info');
+      setStatus(`Sao chép hoàn tất sang ${targetDb}${copiedFailed ? ' • có cảnh báo' : ''}`);
       if (targetConnId === app.connection?.id) {
         await refreshDatabases();
       }
 
       modal(`
-        <h2>Sao chép hoàn tất</h2>
+        <h2>${copiedFailed ? 'Sao chép đã chạy nhưng cần kiểm tra' : 'Sao chép hoàn tất'}</h2>
         <p>Đã sao chép thành công bản sao lưu từ <strong>${esc(sourceConnName)} › ${esc(sourceDb)}</strong> sang <strong>${esc(targetConnName)} › ${esc(targetDb)}</strong>.</p>
         ${restoreResult ? `<p>Đã chạy ${restoreResult.statements} câu lệnh${restoreResult.skipped ? `, bỏ qua ${restoreResult.skipped}` : ''}.</p>` : ''}
+        ${restoreVerificationHtml(restoreResult?.verification)}
         ${(doCatalog || restoreResult?.copiedBackup) ? `<p class="subtle">Bản sao lưu đã được lưu vào danh mục của <strong>${esc(targetDb)}</strong>.</p>` : ''}
         <div class="actions">
           <button onclick="closeModal()">Đóng</button>
@@ -7430,6 +7773,7 @@ async function previewImportDialog(file, database, targetTable, options = {}) {
         </div>
       </div>
       <div class="hint">Không hỗ trợ tiếp tục sau khi hủy hoặc lỗi: chạy lại sẽ bắt đầu từ đầu tệp. “Toàn bộ” có thể giữ transaction lâu trên tệp lớn; “Không dùng transaction” có thể để lại dữ liệu đã ghi khi lỗi. Rollback chỉ được bảo đảm với bảng InnoDB; engine khác như MyISAM có thể giữ lại các dòng đã ghi.</div>
+      <label class="check-row"><input type="checkbox" id="importAllowNonTransactional"> Tôi hiểu và cho phép nhập vào bảng dùng engine không hỗ trợ transaction (ví dụ MyISAM)</label>
       <div class="actions">
         <button onclick="closeModal()">Hủy</button>
         <button class="primary" id="doFileImportBtn">Bắt đầu nhập</button>
@@ -7469,6 +7813,7 @@ async function previewImportDialog(file, database, targetTable, options = {}) {
     }
     const mode = $('#importMode').value;
     const transaction = $('#importTransaction').value;
+    const allowNonTransactional = $('#importAllowNonTransactional')?.checked === true;
     const taskId = newTransferTaskId('import');
     const profileId = app.connection?.id || null;
     showTransferProgress('import', `${database}.${targetTable}`, { taskId, profileId });
@@ -7484,6 +7829,7 @@ async function previewImportDialog(file, database, targetTable, options = {}) {
         mapping,
         mode,
         transaction,
+        allowNonTransactional,
         taskId
       }));
       activeTransfer = null;
@@ -7494,7 +7840,9 @@ async function previewImportDialog(file, database, targetTable, options = {}) {
       }
       if (app.database === database && table === targetTable) await loadData();
       const duplicates = Number(result.duplicates || 0);
-      toast(`Đã nhập ${Number(result.committed ?? result.written ?? 0).toLocaleString()} dòng${duplicates ? `, xử lý ${duplicates.toLocaleString()} bản ghi trùng` : ''}.`);
+      const warnings = Number(result.warnings || 0);
+      const warningText = warnings ? ` · database báo ${warnings.toLocaleString()} cảnh báo, hãy kiểm tra dữ liệu` : '';
+      toast(`Đã nhập ${Number(result.committed ?? result.written ?? 0).toLocaleString()} dòng${duplicates ? `, xử lý ${duplicates.toLocaleString()} bản ghi trùng` : ''}${warningText}.`, warnings ? 'error' : 'info');
     } catch (error) {
       activeTransfer = null;
       closeModal();

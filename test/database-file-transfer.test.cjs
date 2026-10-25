@@ -26,9 +26,9 @@ test('JSON string transport preserves nested JSON export types and large numeric
   assert.equal(typeof JSON.parse(output)[0].payload, 'object');
 });
 
-function createSession(columns, rows = [], insertResult = () => ({ affectedRows: 1, info: 'Duplicates: 0' })) {
+function createSession(columns, rows = [], insertResult = () => ({ affectedRows: 1, info: 'Duplicates: 0' }), options = {}) {
   const session = new DatabaseSession({});
-  const calls = { inserts: [], queries: [], transactions: [], destroyed: 0 };
+  const calls = { inserts: [], queries: [], meta: [], transactions: [], destroyed: 0 };
   session.listColumns = async () => columns;
   session.connection = {
     query(config, params, callback) {
@@ -39,6 +39,11 @@ function createSession(columns, rows = [], insertResult = () => ({ affectedRows:
             for (const row of rows) yield row;
           }
         };
+      }
+      if (/^(?:SELECT|SET|SHOW)\b/i.test(config)) {
+        calls.meta.push({ sql: config, params });
+        callback(null, options.meta ? options.meta(config, params) : {});
+        return;
       }
       calls.inserts.push({ sql: config, params });
       callback(null, insertResult(config, params));
@@ -510,6 +515,150 @@ test('nhập JSON từ chối ngày, số nguyên và BIT không hợp lệ trư
         (error) => error.code === 'IMPORT_VALUE_INVALID' && entry.pattern.test(error.message)
       );
       assert.equal(calls.inserts.length, 0);
+    }
+  });
+});
+
+test('import bật STRICT_ALL_TABLES và khôi phục SQL_MODE của phiên làm việc', async () => {
+  await withTempDir(async (directory) => {
+    const filePath = await writeTemp(directory, 'items.csv', 'id,name\n1,An\n');
+    const { session, calls } = createSession(COLUMNS.slice(0, 2), [], undefined, {
+      meta: (sql) => {
+        if (/sql_mode/i.test(sql)) return [{ sqlMode: '' }];
+        if (/information_schema\.TABLES/i.test(sql)) return [{ engine: 'InnoDB' }];
+        return {};
+      }
+    });
+    await session.importFile({
+      database: 'sample',
+      table: 'items',
+      filePath,
+      format: 'csv',
+      mode: 'insert',
+      transaction: 'batch'
+    });
+    const strict = calls.meta.filter((entry) => entry.sql === 'SET SESSION sql_mode = ?');
+    assert.equal(strict.length, 2);
+    assert.equal(strict[0].params[0], 'STRICT_ALL_TABLES');
+    assert.equal(strict[1].params[0], '');
+  });
+});
+
+test('import từ chối engine không transaction nếu chưa xác nhận', async () => {
+  await withTempDir(async (directory) => {
+    const filePath = await writeTemp(directory, 'items.csv', 'id,name\n1,An\n');
+    const meta = (sql) => {
+      if (/sql_mode/i.test(sql)) return [{ sqlMode: 'STRICT_ALL_TABLES' }];
+      if (/information_schema\.TABLES/i.test(sql)) return [{ engine: 'MyISAM' }];
+      return {};
+    };
+    const blocked = createSession(COLUMNS.slice(0, 2), [], undefined, { meta });
+    await assert.rejects(
+      blocked.session.importFile({
+        database: 'sample',
+        table: 'items',
+        filePath,
+        format: 'csv',
+        mode: 'insert',
+        transaction: 'batch'
+      }),
+      { code: 'IMPORT_NON_TRANSACTIONAL_ENGINE' }
+    );
+    assert.equal(blocked.calls.inserts.length, 0);
+    assert.deepEqual(blocked.calls.transactions, []);
+
+    const allowed = createSession(COLUMNS.slice(0, 2), [], undefined, { meta });
+    const result = await allowed.session.importFile({
+      database: 'sample',
+      table: 'items',
+      filePath,
+      format: 'csv',
+      mode: 'insert',
+      transaction: 'batch',
+      allowNonTransactional: true
+    });
+    assert.equal(result.written, 1);
+    assert.equal(allowed.calls.inserts.length, 1);
+    assert.deepEqual(allowed.calls.transactions, ['begin', 'commit']);
+  });
+});
+
+test('import dừng và rollback khi database báo cắt dữ liệu', async () => {
+  await withTempDir(async (directory) => {
+    const filePath = await writeTemp(directory, 'items.csv', 'id,name\n1,An\n');
+    const { session, calls } = createSession(
+      COLUMNS.slice(0, 2),
+      [],
+      () => ({ affectedRows: 1, info: '', warningStatus: 1 }),
+      {
+        meta: (sql) => {
+          if (/sql_mode/i.test(sql)) return [{ sqlMode: 'STRICT_ALL_TABLES' }];
+          if (/information_schema\.TABLES/i.test(sql)) return [{ engine: 'InnoDB' }];
+          if (/^SHOW WARNINGS/i.test(sql)) {
+            return [{ Code: 1265, Level: 'Warning', Message: 'Data truncated for column name' }];
+          }
+          return {};
+        }
+      }
+    );
+    await assert.rejects(
+      session.importFile({
+        database: 'sample',
+        table: 'items',
+        filePath,
+        format: 'csv',
+        mode: 'insert',
+        transaction: 'batch'
+      }),
+      (error) => {
+        assert.equal(error.code, 'IMPORT_DATA_TRUNCATED');
+        assert.equal(error.row, 1);
+        assert.equal(error.partiallyCommitted, false);
+        assert.equal(error.warnings[0].code, 1265);
+        assert.equal(error.partial.written, 0);
+        return true;
+      }
+    );
+    assert.deepEqual(calls.transactions, ['begin', 'rollback']);
+    assert.equal(session.activeTask, null);
+  });
+});
+
+test('import kiểm tra giới hạn byte của BINARY và TEXT trước khi chèn', async () => {
+  await withTempDir(async (directory) => {
+    const cases = [
+      {
+        name: 'binary.csv',
+        content: 'payload\n0x000102\n',
+        column: { name: 'payload', type: 'varbinary(2)', nullable: 'YES', key: '', extra: '' }
+      },
+      {
+        name: 'text.csv',
+        content: `body\n${'a'.repeat(65536)}\n`,
+        column: { name: 'body', type: 'text', nullable: 'YES', key: '', extra: '' }
+      }
+    ];
+    for (const entry of cases) {
+      const filePath = await writeTemp(directory, entry.name, entry.content);
+      const { session, calls } = createSession([entry.column], [], undefined, {
+        meta: (sql) => {
+          if (/sql_mode/i.test(sql)) return [{ sqlMode: 'STRICT_ALL_TABLES' }];
+          if (/information_schema\.TABLES/i.test(sql)) return [{ engine: 'InnoDB' }];
+          return {};
+        }
+      });
+      await assert.rejects(
+        session.importFile({
+          database: 'sample',
+          table: 'items',
+          filePath,
+          format: 'csv',
+          mode: 'insert',
+          transaction: 'batch'
+        }),
+        (error) => error.code === 'IMPORT_VALUE_INVALID' && /Dòng 1, cột/.test(error.message)
+      );
+      assert.equal(calls.inserts.length, 0, entry.name);
     }
   });
 });

@@ -23,6 +23,8 @@ SQL result giữ tối đa 5.000 dòng và 8 MiB JSON của dữ liệu dòng ch
 
 Registry giữ tối đa 8 phiên, gộp các yêu cầu mở cùng profile và chỉ loại phiên rảnh khỏi cache. Phiên có tác vụ/lease, transaction hoặc autocommit tắt được bảo vệ; khi hết chỗ ứng dụng báo bận thay vì ngắt tác vụ nền. Server đồng bộ chạy scrypt bất đồng bộ với tối đa 2 hash đang xử lý và 32 yêu cầu chờ; khi đầy trả HTTP 503 `AUTH_BUSY` và `Retry-After`.
 
+Sửa/xóa dòng từ lưới đối chiếu giá trị gốc để phát hiện xung đột; text phân biệt hoa/thường/dấu/khoảng trắng, JSON được so sánh như document và BLOB preview dùng hash của toàn bộ byte. Khi thiếu dữ liệu gốc đầy đủ, thao tác báo lỗi và giữ nội dung nhập. Xóa trong phiên có transaction hoặc autocommit tắt dùng savepoint, không tự commit thay người dùng; cần Commit/Rollback theo luồng SQL của phiên.
+
 ## Tương thích Navicat
 
 Nhập được danh sách kết nối từ:
@@ -58,6 +60,13 @@ Tài khoản là **tùy chọn**. Không đăng nhập, SqlPro hoạt động đ
 - Session token 32 byte; server chỉ lưu SHA-256 của token. Token và vault key không đi xuống renderer.
 - Bắt buộc HTTPS khi server không phải localhost. Nếu dùng HTTP không an toàn, ứng dụng yêu cầu xác nhận rõ ràng.
 - Khi server bị xâm nhập, kẻ tấn công vẫn có thể brute-force offline nếu mật khẩu yếu. Vì vậy độ dài tối thiểu là 10 ký tự.
+
+### Khôi phục khóa mã hóa local
+
+- Nếu gặp `LOCAL_KEY_MISSING`, `LOCAL_KEY_INVALID`, `LOCAL_KEY_READ_FAILED` hoặc `SECRET_DECRYPT_FAILED`, ứng dụng dừng thao tác dùng secret và giữ nguyên dữ liệu; không tự thay khóa hoặc biến mật khẩu thành chuỗi rỗng. Với lỗi quyền truy cập/I/O, khôi phục quyền truy cập rồi thử lại.
+- Trước khi khôi phục thủ công, thoát ứng dụng và sao lưu thư mục user data. Với secret dùng AES local, cần giữ **cả** `connections.json` (hoặc bản backup) và `.connections-key` gốc; khôi phục đúng cặp từ cùng bản sao lưu. Không tạo khóa ngẫu nhiên để thay khóa bị mất. Secret dùng `safeStorage` cần truy cập được kho khóa của tài khoản hệ điều hành đã mã hóa nó; sao chép riêng JSON sang máy khác không đủ.
+- Nếu không còn khóa gốc, ciphertext local không thể tự khôi phục. Có thể nhập lại thông tin kết nối hoặc lấy từ vault bằng mật khẩu tài khoản đồng bộ nếu đã có bản cloud. Để bắt đầu lại sau khi đã sao lưu, chọn **Sao lưu & xóa dữ liệu local…**, thoát ứng dụng rồi chuyển tệp `.connections-key` hỏng sang bản lưu riêng; lần lưu secret mới sẽ tạo khóa mới. Giữ các bản backup cũ để còn khả năng phục hồi nếu tìm lại được khóa gốc.
+- Đăng xuất/reset vô hiệu hóa công việc đồng bộ đang chờ và hủy request mạng của phiên cũ. Phản hồi đến muộn không được ghi lại store, revision hoặc trạng thái phiên mới. Request đã được server xử lý trước khi hủy có thể đã cập nhật vault cloud của tài khoản cũ.
 
 > **Quan trọng:** không có khóa khôi phục và chưa hỗ trợ quên mật khẩu. Nếu quên mật khẩu, dữ liệu đã đồng bộ trên server không thể giải mã. Dữ liệu local vẫn còn trên máy.
 
@@ -128,7 +137,8 @@ Nhấp chuột phải vào nhóm **Backups** hoặc một bản backup trong câ
 - Sao lưu ra tệp `.sql` gồm `CREATE TABLE`, `CREATE VIEW`, trigger (gắn với các bảng được chọn), procedure, function, event và `INSERT`; có thể chọn từng đối tượng, chỉ lấy cấu trúc hoặc kèm `DROP … IF EXISTS`.
 - Procedure, function và event được lấy bằng `SHOW CREATE`, đặt trong khối `DELIMITER $$`; mặc định giữ `DEFINER`, có thể chọn loại bỏ để khôi phục trên server khác. Trigger được nhận đúng loại đối tượng khi phục hồi.
 - Phục hồi chạy tệp `.sql` tuần tự vào database đang chọn. Hỗ trợ tệp do SqlPro, `mysqldump` hoặc Navicat tạo, kể cả routine/trigger dùng `DELIMITER`.
-- Trong lúc phục hồi, khóa ngoại được tắt tạm thời; các lệnh `USE` và `CREATE/DROP DATABASE` trong tệp bị bỏ qua để không ghi ra ngoài database đích.
+- Phục hồi quét toàn bộ tệp trước khi ghi, bỏ qua `USE` và `CREATE/DROP DATABASE`. Tên schema ghi rõ phải trùng chính xác đích đã chọn, kể cả chữ hoa/thường; `ALTER DATABASE/SCHEMA` ngoài đích và lệnh cấp server như `FLUSH`, `SET GLOBAL/PERSIST`, `START REPLICA` bị chặn. `SET` chỉ hỗ trợ các biến session cần cho dump và biến `@`; tệp có lệnh chưa hỗ trợ sẽ báo lỗi trước khi chạy. Vẫn cần tài khoản giới hạn quyền trên đích và tệp đáng tin cậy vì routine/trigger có thể có tác động gián tiếp.
+- Trong lúc phục hồi, khóa ngoại được tắt tạm thời rồi bật lại theo trạng thái ban đầu. Sau đó ứng dụng kiểm tra khóa ngoại và số dòng khi có đủ thông tin, phân biệt `verified` (đã kiểm chứng), `unverified` (chưa đủ kiểm chứng) và `failed` (kiểm chứng thất bại); không tự xóa/sửa dòng mồ côi.
 - Tùy chọn **Xóa bảng/view/trigger/procedure/function/event trùng tên** sẽ bỏ đúng đối tượng cũ trước khi tạo lại. Mặc định tắt để tránh mất dữ liệu ngoài ý muốn.
 - Sao lưu/phục hồi và nhập/xuất tệp chạy trong main process, đọc/ghi theo luồng nên không giới hạn tổng dung lượng tệp trong ứng dụng. Cần đủ dung lượng ổ đĩa; các dòng dữ liệu rất lớn vẫn phụ thuộc `max_allowed_packet` của MySQL/MariaDB. Chỉ phục hồi tệp bạn tin cậy vì nội dung tệp có thể thay đổi dữ liệu.
 - Có thể hủy tác vụ đang chạy. Tệp xuất dở được ghi qua tệp tạm `.part` rồi mới đổi tên; khi hủy hoặc lỗi, SqlPro dọn tệp tạm và báo số dòng/dung lượng đã xử lý. Phục hồi/import bị hủy có thể đã ghi một phần dữ liệu, nên báo cáo một phần được hiển thị rõ.

@@ -803,6 +803,24 @@ dialog select{width:100%}
 .accountgrid>div{background:#fff;padding:10px 12px;min-width:0}
 .accountgrid span{display:block;color:#98a3af;font-size:9px;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px}
 .accountgrid strong{font-size:11px;color:#4d5d6d;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.syncsection{margin-top:16px}
+.syncsection h3{font-size:12px;margin:0 0 6px;color:#44525f}
+.syncconflict{border:1px solid #f0dfb8;background:#fffdf7;border-radius:7px;padding:10px 12px;margin-top:8px}
+.syncconflicthead{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:8px}
+.syncconflicthead strong{font-size:11.5px;color:#5c5133;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.syncconflicthead .muted{font-size:9px;flex-shrink:0}
+.syncfield{border-top:1px solid #f1e9d8;padding:8px 0 0;margin-top:8px}
+.syncfield>span{display:block;font-size:10px;font-weight:600;color:#6a6049;margin-bottom:5px}
+.syncvalues{font-size:10px;color:#7d7460;line-height:1.5;overflow-wrap:anywhere}
+.syncchoices{display:flex;flex-direction:column;gap:4px}
+.syncchoices label{display:flex;align-items:center;gap:6px;font-size:10px;color:#5c6673;padding:3px 0;overflow-wrap:anywhere}
+.syncchoices input{flex-shrink:0}
+.syncrecovery{display:flex;flex-direction:column;gap:5px}
+.syncrecoveryrow{display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid #e5eaf0;border-radius:6px;padding:7px 10px}
+.syncrecoveryrow div{min-width:0}
+.syncrecoveryrow strong{display:block;font-size:10.5px;color:#4d5d6d;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.syncrecoveryrow span{display:block;font-size:9px;color:#98a3af;margin-top:2px}
+.syncrecoveryrow button{flex-shrink:0;font-size:10px;padding:5px 8px}
 .workspacelist{display:flex;flex-direction:column;gap:7px;margin:16px 0;max-height:46vh;overflow:auto}
 .workspacerow{display:flex;align-items:center;gap:8px;border:1px solid #e5eaf0;border-radius:7px;padding:10px 11px}
 .workspacerow.active{border-color:#b9ded6;background:#f5fbf9}

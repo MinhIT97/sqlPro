@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const mysql = require('mysql2');
 const { Client: SshClient } = require('ssh2');
-const { SqlScriptParser, splitSqlStatements, stripLeadingComments, createTarget, skipReason } = require('./sql-script.cjs');
+const { SqlScriptParser, splitSqlStatements, stripLeadingComments, createTarget, skipReason, assertStatementScope, countInsertRows } = require('./sql-script.cjs');
 const { CsvStreamParser } = require('./csv-stream.cjs');
 const { JsonArrayStreamParser, isJsonNumber, stringifyJsonValue } = require('./json-array-stream.cjs');
 const RowValues = require('../row-values.js');
@@ -27,6 +27,22 @@ const IMPORT_MAX_PARAMS = 10000;
 const PREVIEW_ROW_LIMIT = 20;
 const PREVIEW_MAX_ROWS = 100;
 const IMPORT_FORMATS = new Set(['csv', 'tsv', 'json']);
+const TRANSACTIONAL_ENGINES = new Set(['innodb', 'ndb', 'ndbcluster', 'tokudb', 'rocksdb']);
+const DATA_LOSS_WARNING_CODES = new Set([1264, 1265, 1292, 1366, 1406]);
+const TEXT_BYTE_LIMITS = {
+  tinytext: 255,
+  text: 65535,
+  mediumtext: 16777215,
+  longtext: 4294967295
+};
+const BLOB_BYTE_LIMITS = {
+  tinyblob: 255,
+  blob: 65535,
+  mediumblob: 16777215,
+  longblob: 4294967295
+};
+const RESTORE_ROWCOUNT_LIMIT = 500000;
+const WORKER_LOCK_WAIT_SECONDS = 15;
 
 const TYPE_NAMES = (() => {
   const names = {};
@@ -85,9 +101,12 @@ function serializeValue(value) {
 }
 
 function serializeRow(row) {
-  const serialized = {};
-  for (const [key, value] of Object.entries(row)) serialized[key] = serializeValue(value);
-  return serialized;
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, serializeValue(value)]));
+}
+
+function originalHashes(row) {
+  return Object.fromEntries(Object.entries(row).filter(([, value]) => Buffer.isBuffer(value) && value.length > 32)
+    .map(([name, value]) => [name, { kind: 'sha256', value: crypto.createHash('sha256').update(value).digest('hex') }]));
 }
 
 function isNumericType(type) {
@@ -99,6 +118,9 @@ function isDateType(type) {
 }
 
 function coerceValue(value, column) {
+  if (ArrayBuffer.isView(value) && !Buffer.isBuffer(value)) {
+    value = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  }
   const spec = RowValues.describe(column, value);
   if (Buffer.isBuffer(value) && (spec.kind === 'binary' || spec.kind === 'bit')) return value;
   let normalized;
@@ -282,6 +304,80 @@ function isJsonColumn(type) {
   return /^json\b/i.test(type);
 }
 
+function isTextColumn(type) {
+  return /^(tinytext|text|mediumtext|longtext|char|varchar)\b/i.test(type);
+}
+
+function binaryLimit(type) {
+  const match = /^(binary|varbinary)\s*\(\s*(\d+)\s*\)/i.exec(type);
+  if (match) return Number(match[2]);
+  const base = /^(tinyblob|blob|mediumblob|longblob)\b/i.exec(type);
+  return base ? BLOB_BYTE_LIMITS[base[1].toLowerCase()] : null;
+}
+
+function textLimit(type) {
+  const base = /^(tinytext|text|mediumtext|longtext)\b/i.exec(type);
+  return base ? TEXT_BYTE_LIMITS[base[1].toLowerCase()] : null;
+}
+
+function ensureImportByteLength(length, limit, rowNumber, column, label) {
+  if (limit && length > limit) {
+    throw importValueError(rowNumber, column, `${label} ${length} byte vượt giới hạn ${limit} byte của ${column.type}.`);
+  }
+}
+
+function originalValuesPredicate(columns, original) {
+  const byName = new Map(columns.map((column) => [column.name, column]));
+  const parts = [];
+  const params = [];
+  const names = [];
+  for (const [name, rawValue] of Object.entries(original && typeof original === 'object' ? original : {})) {
+    const column = byName.get(name);
+    if (!column || rawValue === undefined) continue;
+    if (/(virtual|stored) generated/i.test(column.extra || '')) continue;
+    const spec = RowValues.describe(column);
+    if (spec.kind === 'binary' && rawValue && typeof rawValue === 'object' && rawValue.kind === 'sha256') {
+      if (!/^[a-f0-9]{64}$/.test(rawValue.value || '')) throw fail('Hash dữ liệu gốc không hợp lệ. Hãy tải lại bản ghi.', 'ROW_ORIGINAL_INCOMPLETE');
+      parts.push(`SHA2(${quoteId(name)}, 256) <=> ?`);
+      params.push(rawValue.value);
+      names.push(name);
+      continue;
+    }
+    if (spec.kind === 'binary' && typeof rawValue === 'string' && rawValue.includes('…')) {
+      throw fail('Bản xem trước nhị phân thiếu hash dữ liệu gốc. Hãy tải lại bản ghi trước khi sửa/xóa.', 'ROW_ORIGINAL_INCOMPLETE');
+    }
+    let value = rawValue;
+    if (value && typeof value === 'object' && !Buffer.isBuffer(value) && !ArrayBuffer.isView(value)) {
+      value = isJsonColumn(column.type) ? JSON.stringify(value) : String(value);
+    }
+    if (spec.kind === 'json') {
+      // Parse both operands as documents; binary comparison also works with MariaDB's JSON text representation.
+      parts.push(`CAST(JSON_EXTRACT(${quoteId(name)}, '$') AS BINARY) <=> CAST(JSON_EXTRACT(?, '$') AS BINARY)`);
+    } else if (['text', 'enum', 'set'].includes(spec.kind)) {
+      parts.push(`CAST(${quoteId(name)} AS BINARY) <=> CAST(? AS BINARY)`);
+    } else {
+      parts.push(`${quoteId(name)} <=> ?`);
+    }
+    params.push(spec.kind === 'bit' ? rowKeyParameter(value, column) : coerceValue(value, column));
+    names.push(name);
+  }
+  return { sql: parts.join(' AND '), params, names };
+}
+
+function rowKeySignature(row, pkColumns, byName) {
+  return pkColumns.map((name) => {
+    const value = row[name];
+    if (value === null || value === undefined) return 'null';
+    try {
+      const parameter = rowKeyParameter(value, byName.get(name));
+      if (Buffer.isBuffer(parameter)) return `0x${parameter.toString('hex')}`;
+      return `${typeof parameter}:${String(parameter)}`;
+    } catch {
+      return `${typeof value}:${String(value)}`;
+    }
+  }).join('\u0000');
+}
+
 function importValueError(rowNumber, column, message) {
   const error = fail(`Dòng ${rowNumber}, cột "${column.name}": ${message}`, 'IMPORT_VALUE_INVALID');
   error.row = rowNumber;
@@ -330,8 +426,11 @@ function validateImportValue(raw, column, rowNumber, nullSentinel) {
     const match = /^0x([0-9a-f]*)$/i.exec(value.trim());
     if (match) {
       if (match[1].length % 2 !== 0) throw importValueError(rowNumber, column, 'dữ liệu hex có số ký tự lẻ.');
-      return Buffer.from(match[1], 'hex');
+      const buffer = Buffer.from(match[1], 'hex');
+      ensureImportByteLength(buffer.length, binaryLimit(column.type), rowNumber, column, 'Dữ liệu nhị phân');
+      return buffer;
     }
+    ensureImportByteLength(Buffer.byteLength(value, 'utf8'), binaryLimit(column.type), rowNumber, column, 'Dữ liệu nhị phân');
     return value;
   }
   if (typeof value === 'object') throw importValueError(rowNumber, column, 'không hỗ trợ giá trị object.');
@@ -342,7 +441,11 @@ function validateImportValue(raw, column, rowNumber, nullSentinel) {
     throw importValueError(rowNumber, column, 'không được để trống.');
   }
   try {
-    return coerceValue(text, column);
+    const coerced = coerceValue(text, column);
+    if (isTextColumn(column.type) && typeof coerced === 'string') {
+      ensureImportByteLength(Buffer.byteLength(coerced, 'utf8'), textLimit(column.type), rowNumber, column, 'Chuỗi');
+    }
+    return coerced;
   } catch (error) {
     if (error && error.code === 'ROW_VALUE_INVALID') {
       const message = String(error.message || '').replace(/^Cột "[^"]*":\s*/, '');
@@ -693,7 +796,7 @@ class DatabaseSession {
     this.metadata = new Map();
     this.tableDataService = new TableDataService({
       columns: (...args) => this.listColumns(...args), raw: (...args) => this.raw(...args),
-      quoteId, tableRef, serializeRow, keyParameter: rowKeyParameter, searchParameter: coerceValue
+      quoteId, tableRef, serializeRow, originalHashes, keyParameter: rowKeyParameter, searchParameter: coerceValue
     });
   }
 
@@ -798,6 +901,8 @@ class DatabaseSession {
       bigNumberStrings: true,
       dateStrings: true,
       jsonStrings: true,
+      // UPDATE affectedRows counts matched rows, including assignments to the same value.
+      flags: ['FOUND_ROWS'],
       multipleStatements: false,
       enableKeepAlive: true,
       keepAliveInitialDelay: 10000
@@ -1208,6 +1313,7 @@ class DatabaseSession {
       let columns = [];
       const budget = new ResultBudget({ rows: Math.max(0, Math.min(MAX_QUERY_ROWS, Number(rowLimit) || 0)), bytes: Math.max(0, Math.min(MAX_QUERY_BYTES, Number(byteLimit) || 0)) });
       const rows = budget.rows;
+      const hashes = [];
       let truncated = false;
       let stopping = null;
       let stoppedEarly = false;
@@ -1255,7 +1361,7 @@ class DatabaseSession {
       });
       const complete = () => {
         const done = () => finish(resolve, {
-          kind: 'rows', columns, rows, truncated, bytes: budget.bytes,
+          kind: 'rows', columns, rows, originalHashes: hashes, truncated, bytes: budget.bytes,
           truncationReason: budget.reason, stoppedEarly, durationMs: Date.now() - startedAt
         });
         if (stopping) stopping.then(done);
@@ -1265,7 +1371,7 @@ class DatabaseSession {
         if (settled) return;
         if (truncated) return;
         const values = Array.isArray(row) ? row : Object.values(row || {});
-        if (budget.add(values.map(serializeValue))) return;
+        if (budget.add(values.map(serializeValue))) { hashes.push(originalHashes(values)); return; }
         truncated = true;
         if (Number.isInteger(connection.threadId) && connection.pause && connection.resume) {
           connection.pause();
@@ -1411,7 +1517,7 @@ class DatabaseSession {
     return { insertId: String(result.insertId), affectedRows: result.affectedRows };
   }
 
-  async updateRow({ database, table, keys, values }) {
+  async updateRow({ database, table, keys, values, original }) {
     const columns = await this.listColumns(database, table);
     const byName = new Map(columns.map((column) => [column.name, column]));
     const pkColumns = columns.filter((column) => column.key === 'PRI').map((column) => column.name);
@@ -1422,21 +1528,63 @@ class DatabaseSession {
     const changes = Object.entries(values || {})
       .filter(([name]) => byName.has(name))
       .filter(([name]) => !/(virtual|stored) generated/i.test(byName.get(name).extra));
-    if (!changes.length) return { affectedRows: 0, changedRows: 0 };
+    if (!changes.length) throw fail('Không có cột hợp lệ để cập nhật.', 'NO_ROW_CHANGES');
+    const guard = originalValuesPredicate(columns, original);
     const setSql = changes.map(([name]) => `${quoteId(name)} = ?`).join(', ');
-    const whereSql = pkColumns.map((name) => `${quoteId(name)} <=> ?`).join(' AND ');
+    const whereSql = [
+      pkColumns.map((name) => `${quoteId(name)} <=> ?`).join(' AND '),
+      guard.sql
+    ].filter(Boolean).join(' AND ');
+    const pkParams = pkColumns.map((name) => rowKeyParameter(keys[name], byName.get(name)));
     const params = [
       ...changes.map(([name, value]) => coerceValue(value, byName.get(name))),
-      ...pkColumns.map((name) => rowKeyParameter(keys[name], byName.get(name)))
+      ...pkParams,
+      ...guard.params
     ];
     const { result } = await this.raw(
       `UPDATE ${tableRef(database, table)} SET ${setSql} WHERE ${whereSql} LIMIT 1`,
       params
     );
-    return { affectedRows: result.affectedRows, changedRows: result.changedRows };
+    if (Number(result.affectedRows) !== 1) {
+      if (!guard.sql) {
+        throw fail('Bản ghi không còn tồn tại hoặc khóa chính đã thay đổi. Nội dung đang sửa được giữ lại; hãy hủy chỉnh sửa và tải lại dữ liệu để kiểm tra.', 'ROW_NOT_FOUND');
+      }
+      const wherePk = pkColumns.map((name) => `${quoteId(name)} <=> ?`).join(' AND ');
+      const exists = await this.raw(
+        `SELECT 1 AS present FROM ${tableRef(database, table)} WHERE ${wherePk} LIMIT 1`,
+        pkParams
+      );
+      if (!(exists.rows || []).length) {
+        throw fail('Bản ghi đã bị xóa bởi kết nối khác. Nội dung đang sửa được giữ lại; hãy hủy chỉnh sửa và tải lại dữ liệu.', 'ROW_NOT_FOUND');
+      }
+      const current = await this.raw(
+        `SELECT * FROM ${tableRef(database, table)} WHERE ${wherePk} LIMIT 1`,
+        pkParams
+      );
+      const columnNames = new Set(guard.names);
+      const details = Object.fromEntries(Object.entries(original || {}).filter(([name]) => columnNames.has(name)));
+      const error = fail(
+        'Bản ghi đã thay đổi bởi kết nối khác từ lúc bạn mở. Nội dung đang sửa được giữ lại; hãy xem khác biệt và tải lại trước khi ghi tiếp.',
+        'ROW_CONFLICT'
+      );
+      error.conflict = {
+        table,
+        database,
+        original: details,
+        current: current.rows?.[0] ? serializeRow(current.rows[0]) : null
+      };
+      throw error;
+    }
+    return {
+      status: result.changedRows ? 'updated' : 'unchanged',
+      matchedRows: 1,
+      affectedRows: result.affectedRows,
+      changedRows: result.changedRows,
+      ...(guard.sql ? { guardedBy: 'original-values' } : {})
+    };
   }
 
-  async deleteRows({ database, table, keysList }) {
+  async deleteRows({ database, table, keysList, originalValues }) {
     if (!Array.isArray(keysList) || !keysList.length) throw fail('Chưa chọn bản ghi cần xóa.', 'NO_ROWS');
     if (keysList.length > 1000) throw fail('Chỉ có thể xóa tối đa 1000 bản ghi mỗi lần.', 'TOO_MANY_ROWS');
     const columns = await this.listColumns(database, table);
@@ -1451,11 +1599,115 @@ class DatabaseSession {
       for (const name of pkColumns) params.push(rowKeyParameter(keys[name], byName.get(name)));
     }
     if (!groups.length) throw fail('Không xác định được khóa chính của bản ghi.', 'MISSING_PRIMARY_KEY');
-    const { result } = await this.raw(
-      `DELETE FROM ${tableRef(database, table)} WHERE ${groups.join(' OR ')}`,
-      params
-    );
-    return { affectedRows: result.affectedRows };
+    const originals = Array.isArray(originalValues) ? originalValues : [];
+    const guarded = originals.some((entry) => entry && typeof entry === 'object');
+    if (!guarded) {
+      const { result } = await this.raw(
+        `DELETE FROM ${tableRef(database, table)} WHERE ${groups.join(' OR ')}`,
+        params
+      );
+      return { affectedRows: result.affectedRows, guardedBy: 'primary-key' };
+    }
+
+    const expected = [];
+    const seen = new Set();
+    for (let index = 0; index < keysList.length; index += 1) {
+      const keys = keysList[index];
+      if (!keys || pkColumns.some((name) => !(name in keys))) continue;
+      const signature = rowKeySignature(keys, pkColumns, byName);
+      if (seen.has(signature)) continue;
+      seen.add(signature);
+      expected.push({ keys, original: originals[index], signature });
+    }
+    if (!expected.length) throw fail('Không xác định được khóa chính của bản ghi.', 'MISSING_PRIMARY_KEY');
+    const matchExpressions = expected.map((entry) => {
+      const guard = originalValuesPredicate(columns, entry.original);
+      const pkPredicate = pkColumns.map((name) => `${quoteId(name)} <=> ?`).join(' AND ');
+      const all = [pkPredicate, guard.sql].filter(Boolean).join(' AND ');
+      return { sql: `(${all})`, params: [...pkColumns.map((name) => rowKeyParameter(entry.keys[name], byName.get(name))), ...guard.params] };
+    });
+    const aliasParams = matchExpressions.flatMap((entry) => entry.params);
+    const whereParams = expected.flatMap((entry) => pkColumns.map((name) => rowKeyParameter(entry.keys[name], byName.get(name))));
+    const uniqueGroups = expected.map(() => `(${pkColumns.map((name) => `${quoteId(name)} <=> ?`).join(' AND ')})`);
+    const selectSql = `SELECT ${pkColumns.map(quoteId).join(', ')}, ${matchExpressions.map((entry, index) => `(${entry.sql}) AS m${index}`).join(', ')} FROM ${tableRef(database, table)} WHERE ${uniqueGroups.join(' OR ')} FOR UPDATE`;
+    const ownTransaction = !this.inTransaction && this.autocommit !== false;
+    const savepoint = quoteId(`sqlpro_delete_${crypto.randomBytes(12).toString('hex')}`);
+    let transactionOpen = false;
+    let savepointOpen = false;
+    const transactionCommand = (method) => new Promise((resolve, reject) => {
+      this.connection[method]((error, result) => {
+        if (error) { reject(error); return; }
+        this.updateServerStatus(result);
+        resolve();
+      });
+    });
+    try {
+      if (ownTransaction) {
+        await transactionCommand('beginTransaction');
+        transactionOpen = true;
+        this.inTransaction = true;
+      } else {
+        await this.raw(`SAVEPOINT ${savepoint}`);
+        savepointOpen = true;
+      }
+      const rows = (await this.raw(selectSql, [...aliasParams, ...whereParams])).rows || [];
+      this.inTransaction = true;
+      const bySignature = new Map();
+      for (const row of rows) {
+        bySignature.set(rowKeySignature(row, pkColumns, byName), row);
+      }
+      const missing = [];
+      const conflicts = [];
+      for (let index = 0; index < expected.length; index += 1) {
+        const row = bySignature.get(expected[index].signature);
+        if (!row) {
+          missing.push(expected[index].keys);
+        } else if (Number(row[`m${index}`]) !== 1) {
+          conflicts.push(expected[index].keys);
+        }
+      }
+      if (missing.length || conflicts.length) {
+        const error = fail(
+          missing.length
+            ? `${missing.length} bản ghi đã bị xóa bởi kết nối khác; không có bản ghi nào bị xóa. Hãy tải lại dữ liệu.`
+            : `${conflicts.length} bản ghi đã thay đổi bởi kết nối khác; không có bản ghi nào bị xóa. Hãy tải lại dữ liệu.`,
+          missing.length ? 'ROW_NOT_FOUND' : 'ROW_CONFLICT'
+        );
+        error.missing = missing;
+        error.conflicts = conflicts;
+        throw error;
+      }
+      const { result } = await this.raw(
+        `DELETE FROM ${tableRef(database, table)} WHERE ${uniqueGroups.join(' OR ')}`,
+        whereParams
+      );
+      if (Number(result.affectedRows) !== expected.length) {
+        const error = fail('Số bản ghi xóa không khớp với dữ liệu đã kiểm tra; thao tác đã dừng.', 'ROW_CONFLICT');
+        error.affectedRows = result.affectedRows;
+        throw error;
+      }
+      if (transactionOpen) {
+        await transactionCommand('commit');
+        transactionOpen = false;
+        this.inTransaction = false;
+      } else if (savepointOpen) {
+        await this.raw(`RELEASE SAVEPOINT ${savepoint}`);
+        savepointOpen = false;
+      }
+      return { affectedRows: result.affectedRows, guardedBy: 'original-values', transaction: ownTransaction ? 'statement' : 'existing' };
+    } catch (error) {
+      if (transactionOpen) {
+        try { await transactionCommand('rollback'); this.inTransaction = false; }
+        catch (cleanupError) { error.rollbackCode = cleanupError.code || 'ROLLBACK_FAILED'; }
+      } else if (savepointOpen) {
+        try {
+          await this.raw(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+          await this.raw(`RELEASE SAVEPOINT ${savepoint}`);
+        } catch (cleanupError) { error.rollbackCode = cleanupError.code || 'ROLLBACK_FAILED'; }
+      }
+      if (error.rollbackCode) error.message += ' Không xác nhận được việc hoàn tác phạm vi xóa. Hãy kiểm tra transaction trước khi thao tác tiếp.';
+      throw error;
+    }
   }
 
   async exportTableFile(options, write, onProgress) {
@@ -1752,7 +2004,10 @@ class DatabaseSession {
     let duplicates = 0;
     let batches = 0;
     let transactionOpen = false;
+    let warningCount = 0;
     let lastReport = 0;
+    let previousSqlMode = null;
+    let strictModeChanged = false;
     const partialState = () => ({
       rows: rowsRead,
       written,
@@ -1761,6 +2016,7 @@ class DatabaseSession {
       duplicates,
       batches,
       bytes,
+      warnings: warningCount,
       resumable: false
     });
     const canceledError = () => {
@@ -1808,6 +2064,16 @@ class DatabaseSession {
     };
     const batch = [];
     let maxRows = IMPORT_BATCH_ROWS;
+    const dataLossWarnings = async () => {
+      try {
+        const { rows } = await this.raw('SHOW WARNINGS');
+        return (rows || [])
+          .map((row) => ({ code: Number(row.Code ?? row.code), level: row.Level ?? row.level, message: String(row.Message ?? row.message ?? '') }))
+          .filter((row) => DATA_LOSS_WARNING_CODES.has(row.code));
+      } catch {
+        return [];
+      }
+    };
     const flush = async () => {
       if (!batch.length) return;
       throwIfCanceled();
@@ -1829,6 +2095,21 @@ class DatabaseSession {
           transactionOpen = true;
         }
         const { result } = await this.raw(sql, params);
+        const warningStatus = Number(result.warningStatus || 0);
+        if (warningStatus > 0) {
+          warningCount += warningStatus;
+          const loss = await dataLossWarnings();
+          if (loss.length) {
+            const error = fail(
+              `Database báo mất hoặc cắt dữ liệu ở dòng ${rowStart}: ${loss.map((entry) => entry.message).join('; ')}`,
+              'IMPORT_DATA_TRUNCATED'
+            );
+            error.warnings = loss;
+            error.row = rowStart;
+            error.partiallyCommitted = transaction === 'none';
+            throw error;
+          }
+        }
         affectedRows += Number(result.affectedRows || 0);
         duplicates += parseDuplicateCount(result.info);
         written += rowCount;
@@ -1856,9 +2137,39 @@ class DatabaseSession {
         throw error;
       }
     };
+    let engine = null;
+    try {
+      if (settings.strictMode !== false) {
+        const modeResult = await this.raw('SELECT @@SESSION.sql_mode AS sqlMode');
+        previousSqlMode = String(modeResult.rows?.[0]?.sqlMode ?? '');
+        if (!/\bSTRICT_(?:ALL|TRANS)_TABLES\b/i.test(previousSqlMode)) {
+          const nextMode = previousSqlMode ? `${previousSqlMode},STRICT_ALL_TABLES` : 'STRICT_ALL_TABLES';
+          await this.raw('SET SESSION sql_mode = ?', [nextMode]);
+          strictModeChanged = true;
+        }
+      }
+    } catch {
+      previousSqlMode = null;
+      strictModeChanged = false;
+    }
     try {
       const available = await this.listColumns(database, table);
       if (!available.length) throw fail(`Không tìm thấy bảng hoặc cột của "${table}".`, 'TABLE_NOT_FOUND');
+      try {
+        const engineResult = await this.raw(
+          'SELECT ENGINE AS engine FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=? LIMIT 1',
+          [database, table]
+        );
+        engine = engineResult.rows?.[0]?.engine ? String(engineResult.rows[0].engine) : null;
+      } catch {
+        engine = null;
+      }
+      if (engine && !TRANSACTIONAL_ENGINES.has(engine.toLowerCase()) && settings.allowNonTransactional !== true) {
+        throw fail(
+          `Bảng "${table}" dùng engine ${engine} không hỗ trợ rollback transaction. Hãy xác nhận "Cho phép engine không transaction" trước khi nhập.`,
+          'IMPORT_NON_TRANSACTIONAL_ENGINE'
+        );
+      }
       const reader = readImportFile({ filePath: settings.filePath, format, delimiter, hasHeader }, (size) => {
         bytes += size;
         report();
@@ -1898,6 +2209,8 @@ class DatabaseSession {
         format,
         mode,
         transaction,
+        engine,
+        warnings: warningCount,
         rows: rowsRead,
         written,
         committed,
@@ -1923,8 +2236,25 @@ class DatabaseSession {
       }
       throw error;
     } finally {
+      if (strictModeChanged) {
+        try {
+          await this.raw('SET SESSION sql_mode = ?', [previousSqlMode || '']);
+        } catch {
+          // the worker connection may already be unusable
+        }
+      }
       this.clearActiveTask(task);
     }
+  }
+
+  async prepareWorkerForImport() {
+    this.ensureOpen();
+    await this.raw(`SET SESSION innodb_lock_wait_timeout = ${WORKER_LOCK_WAIT_SECONDS}`);
+  }
+
+  async prepareWorkerForRestore() {
+    this.ensureOpen();
+    await this.raw(`SET SESSION innodb_lock_wait_timeout = ${WORKER_LOCK_WAIT_SECONDS}`);
   }
 
   async backupDatabase(options, write, onProgress) {
@@ -2286,6 +2616,280 @@ class DatabaseSession {
     }
   }
 
+  async scanRestoreInventory({ filePath, database, totalBytes, dropExisting, onProgress, task }) {
+    const inventory = {
+      tables: new Map(),
+      rowCountsReliable: true,
+      rowCountLimitations: [],
+      warnings: [],
+      statements: 0,
+      skipped: 0
+    };
+    const limit = (message) => {
+      if (!inventory.rowCountLimitations.includes(message)) inventory.rowCountLimitations.push(message);
+    };
+    const disableRowCounts = (message) => {
+      inventory.rowCountsReliable = false;
+      limit(message);
+    };
+    const entryFor = (name) => {
+      const key = String(name).toLowerCase();
+      let entry = inventory.tables.get(key);
+      if (!entry) {
+        entry = { name, expectedRows: 0, canCount: false, reason: 'Bảng không được tạo mới trong tệp nên không thể đối chiếu số dòng.' };
+        inventory.tables.set(key, entry);
+      }
+      return entry;
+    };
+    const unverifiable = (entry, reason) => {
+      entry.canCount = false;
+      entry.reason = reason;
+    };
+    const processStatement = (statement) => {
+      const sql = String(statement || '').trim();
+      if (!sql) return;
+      inventory.statements += 1;
+      if (skipReason(sql)) {
+        inventory.skipped += 1;
+        return;
+      }
+      const analysis = assertStatementScope(sql, database, inventory.statements);
+      const command = analysis.command;
+      const target = createTarget(sql);
+      if (command === 'CREATE') {
+        if (target && target.type === 'table') {
+          const ifNotExists = /\bIF\s+NOT\s+EXISTS\b/i.test(analysis.sql);
+          const temporary = /^CREATE\s+TEMPORARY\b/i.test(analysis.sql);
+          let reason = null;
+          if (temporary) reason = 'Bảng tạm không được đối chiếu số dòng sau khi phục hồi.';
+          else if (ifNotExists && !dropExisting) reason = 'CREATE TABLE IF NOT EXISTS có thể giữ lại dữ liệu cũ nên không thể đối chiếu số dòng.';
+          else if (/\bSELECT\b/i.test(analysis.sql)) reason = 'CREATE TABLE ... SELECT không xác định trước được số dòng.';
+          inventory.tables.set(target.name.toLowerCase(), {
+            name: target.name,
+            expectedRows: 0,
+            canCount: !reason,
+            reason
+          });
+        } else if (target && ['trigger', 'procedure', 'function', 'event'].includes(target.type)) {
+          disableRowCounts('Tệp tạo trigger/routine/event nên số dòng có thể thay đổi ngoài các câu INSERT.');
+        }
+      } else if (command === 'INSERT' || command === 'REPLACE') {
+        const ref = analysis.refs[0];
+        if (!ref) return;
+        const entry = entryFor(ref.table);
+        const counted = countInsertRows(sql);
+        const head = analysis.sql.slice(0, 80);
+        if (command === 'REPLACE') unverifiable(entry, 'REPLACE có thể gộp dòng nên không thể đối chiếu số dòng.');
+        else if (/\bIGNORE\b/i.test(head)) unverifiable(entry, 'INSERT IGNORE có thể bỏ dòng nên không thể đối chiếu số dòng.');
+        else if (/\bDELAYED\b/i.test(head)) unverifiable(entry, 'INSERT DELAYED ghi bất đồng bộ nên không thể đối chiếu số dòng.');
+        else if (!counted.reliable) unverifiable(entry, 'INSERT ... SELECT hoặc VALUES không phân tích được nên không thể đối chiếu số dòng.');
+        else if (entry.canCount) entry.expectedRows += counted.rows;
+      } else if (command === 'DELETE') {
+        for (const ref of analysis.refs) unverifiable(entryFor(ref.table), 'Tệp có câu DELETE nên số dòng cuối không còn khớp số dòng đã chèn.');
+      } else if (command === 'TRUNCATE') {
+        for (const ref of analysis.refs) {
+          inventory.tables.set(ref.table.toLowerCase(), { name: ref.table, expectedRows: 0, canCount: true, reason: null });
+        }
+      } else if (command === 'LOAD') {
+        for (const ref of analysis.refs) unverifiable(entryFor(ref.table), 'LOAD DATA không xác định trước được số dòng.');
+      } else if (command === 'DROP' && /^DROP\s+(?:TEMPORARY\s+)?TABLES?\b/i.test(analysis.sql)) {
+        for (const ref of analysis.refs) {
+          const key = ref.table.toLowerCase();
+          const entry = inventory.tables.get(key);
+          if (!entry) continue;
+          if (entry.expectedRows > 0) unverifiable(entry, 'Bảng bị xóa sau khi đã chèn dữ liệu.');
+          else inventory.tables.delete(key);
+        }
+      } else if (command === 'RENAME' && analysis.refs.length >= 2) {
+        for (let index = 0; index + 1 < analysis.refs.length; index += 2) {
+          const from = analysis.refs[index];
+          const to = analysis.refs[index + 1];
+          const entry = inventory.tables.get(from.table.toLowerCase());
+          if (!entry) continue;
+          inventory.tables.delete(from.table.toLowerCase());
+          entry.name = to.table;
+          inventory.tables.set(to.table.toLowerCase(), entry);
+        }
+      }
+    };
+    const parser = new SqlScriptParser();
+    const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
+    let bytes = 0;
+    let lastReport = 0;
+    const canceled = () => {
+      const error = fail('Đã hủy phục hồi.', 'RESTORE_CANCELED');
+      error.partial = { statements: inventory.statements, executed: 0, skipped: inventory.skipped, phase: 'scan' };
+      return error;
+    };
+    for await (const chunk of stream) {
+      if (task && task.canceled) throw canceled();
+      bytes += Buffer.byteLength(chunk);
+      for (const statement of parser.push(chunk)) processStatement(statement);
+      const now = Date.now();
+      if (now - lastReport >= 300) {
+        lastReport = now;
+        if (typeof onProgress === 'function') {
+          onProgress({
+            operation: 'restore',
+            phase: 'scan',
+            bytes,
+            totalBytes,
+            statements: inventory.statements,
+            executed: 0,
+            skipped: inventory.skipped
+          });
+        }
+      }
+    }
+    for (const statement of parser.end()) processStatement(statement);
+    if (task && task.canceled) throw canceled();
+    return { inventory, bytes };
+  }
+
+  async verifyRestore(database, inventory, task) {
+    const checks = {
+      foreignKeys: { status: 'skipped', checked: 0, orphans: [], crossSchema: [], errors: [] },
+      rowCounts: { status: 'skipped', checked: 0, mismatches: [] },
+      warnings: { status: 'clean', count: inventory.warnings.length, items: inventory.warnings },
+      settings: { status: 'ok' }
+    };
+    const limitations = [...inventory.rowCountLimitations];
+    let failed = false;
+    try {
+      const result = await this.raw(
+        `SELECT k.TABLE_NAME AS tableName, k.CONSTRAINT_NAME AS constraintName,
+                k.REFERENCED_TABLE_SCHEMA AS referencedSchema, k.REFERENCED_TABLE_NAME AS referencedTable,
+                k.COLUMN_NAME AS columnName, k.REFERENCED_COLUMN_NAME AS referencedColumn,
+                k.ORDINAL_POSITION AS position
+           FROM information_schema.KEY_COLUMN_USAGE k
+          WHERE k.TABLE_SCHEMA = ? AND k.REFERENCED_TABLE_NAME IS NOT NULL
+          ORDER BY k.TABLE_NAME, k.CONSTRAINT_NAME, k.ORDINAL_POSITION`,
+        [database]
+      );
+      const groups = new Map();
+      for (const row of result.rows || []) {
+        const key = [row.tableName, row.constraintName, row.referencedSchema, row.referencedTable].join('\u0000');
+        if (!groups.has(key)) {
+          groups.set(key, {
+            table: row.tableName,
+            constraint: row.constraintName,
+            referencedSchema: row.referencedSchema,
+            referencedTable: row.referencedTable,
+            columns: [],
+            referencedColumns: []
+          });
+        }
+        const group = groups.get(key);
+        group.columns.push(row.columnName);
+        group.referencedColumns.push(row.referencedColumn);
+      }
+      checks.foreignKeys.status = 'checked';
+      for (const group of groups.values()) {
+        if (String(group.referencedSchema || '').toLowerCase() !== String(database).toLowerCase()) {
+          checks.foreignKeys.crossSchema.push({
+            table: group.table,
+            constraint: group.constraint,
+            referencedSchema: group.referencedSchema,
+            referencedTable: group.referencedTable
+          });
+          limitations.push(`Khóa ngoại ${group.table}.${group.constraint} tham chiếu ${group.referencedSchema}.${group.referencedTable} nằm ngoài database đích nên không kiểm chứng được.`);
+          continue;
+        }
+        if (task && task.canceled) throw fail('Đã hủy phục hồi.', 'RESTORE_CANCELED');
+        const joins = group.columns.map((column, index) =>
+          `c.${quoteId(column)} <=> p.${quoteId(group.referencedColumns[index])}`).join(' AND ');
+        const nulls = group.columns.map((column) => `c.${quoteId(column)} IS NOT NULL`).join(' AND ');
+        const orphanQuery = `SELECT COUNT(*) AS orphans FROM ${quoteId(database)}.${quoteId(group.table)} c
+          LEFT JOIN ${quoteId(database)}.${quoteId(group.referencedTable)} p ON ${joins}
+          WHERE ${nulls} AND p.${quoteId(group.referencedColumns[0])} IS NULL`;
+        try {
+          const orphanResult = await this.raw(orphanQuery);
+          const orphans = Number(orphanResult.rows?.[0]?.orphans || 0);
+          checks.foreignKeys.checked += 1;
+          if (orphans > 0) {
+            failed = true;
+            checks.foreignKeys.orphans.push({
+              table: group.table,
+              constraint: group.constraint,
+              referencedTable: group.referencedTable,
+              orphans
+            });
+          }
+        } catch (error) {
+          checks.foreignKeys.errors.push({ table: group.table, constraint: group.constraint, message: error.message });
+          limitations.push(`Không kiểm tra được khóa ngoại ${group.table}.${group.constraint}: ${error.message}`);
+        }
+      }
+      if (checks.foreignKeys.errors.length || checks.foreignKeys.crossSchema.length) {
+        checks.foreignKeys.status = 'unverified';
+      }
+      if (checks.foreignKeys.orphans.length) checks.foreignKeys.status = 'failed';
+    } catch (error) {
+      checks.foreignKeys.status = 'unverified';
+      checks.foreignKeys.errors.push({ message: error.message });
+      limitations.push(`Không đọc được metadata khóa ngoại: ${error.message}`);
+    }
+
+    const tables = [...inventory.tables.values()].filter((entry) => entry.canCount);
+    if (!inventory.rowCountsReliable) {
+      checks.rowCounts.status = 'unverified';
+    } else if (!tables.length) {
+      checks.rowCounts.status = 'unverified';
+      if (!limitations.length) limitations.push('Tệp không có bảng nào đủ điều kiện để đối chiếu số dòng.');
+    } else {
+      checks.rowCounts.status = 'checked';
+      for (const entry of tables) {
+        if (task && task.canceled) throw fail('Đã hủy phục hồi.', 'RESTORE_CANCELED');
+        if (entry.expectedRows > RESTORE_ROWCOUNT_LIMIT) {
+          limitations.push(`Bảng ${entry.name} có ${entry.expectedRows} dòng dự kiến, vượt giới hạn đối chiếu ${RESTORE_ROWCOUNT_LIMIT}.`);
+          continue;
+        }
+        try {
+          const counted = await this.raw(`SELECT COUNT(*) AS rowCount FROM ${quoteId(database)}.${quoteId(entry.name)}`);
+          const actual = Number(counted.rows?.[0]?.rowCount || 0);
+          checks.rowCounts.checked += 1;
+          if (actual !== entry.expectedRows) {
+            failed = true;
+            checks.rowCounts.mismatches.push({ table: entry.name, expected: entry.expectedRows, actual });
+          }
+        } catch (error) {
+          checks.rowCounts.status = 'unverified';
+          limitations.push(`Không đếm được số dòng của ${entry.name}: ${error.message}`);
+        }
+      }
+      const unverifiable = [...inventory.tables.values()].filter((entry) => !entry.canCount);
+      for (const entry of unverifiable.slice(0, 20)) {
+        if (entry.reason) limitations.push(`${entry.name}: ${entry.reason}`);
+      }
+      if (unverifiable.length > 20) limitations.push(`Còn ${unverifiable.length - 20} bảng khác không đối chiếu được số dòng.`);
+      if (checks.rowCounts.mismatches.length) checks.rowCounts.status = 'failed';
+    }
+
+    if (inventory.warnings.length) {
+      failed = true;
+      checks.warnings.status = 'data-loss';
+    }
+    try {
+      const settings = await this.raw('SELECT @@FOREIGN_KEY_CHECKS AS foreignKeys');
+      if (Number(settings.rows?.[0]?.foreignKeys) === 0) {
+        failed = true;
+        checks.settings = { status: 'failed', message: 'FOREIGN_KEY_CHECKS vẫn đang tắt sau khi phục hồi.' };
+      }
+    } catch (error) {
+      checks.settings = { status: 'unverified', message: error.message };
+      limitations.push(`Không xác minh được FOREIGN_KEY_CHECKS: ${error.message}`);
+    }
+
+    const status = failed ? 'failed' : (limitations.length ? 'unverified' : 'verified');
+    return {
+      status,
+      executed: true,
+      verified: status === 'verified',
+      checks,
+      limitations: [...new Set(limitations)]
+    };
+  }
+
   async restoreDatabase(options, onProgress) {
     const settings = options && typeof options === 'object' ? options : {};
     if (this.activeTask) throw fail('Phiên kết nối đang chạy một tác vụ khác.', 'SESSION_BUSY');
@@ -2319,6 +2923,15 @@ class DatabaseSession {
     const stat = await fs.promises.stat(filePath);
     if (!stat.isFile()) throw fail('Đường dẫn phục hồi không phải là tệp.', 'INVALID_FILE');
 
+    const { inventory } = await this.scanRestoreInventory({
+      filePath,
+      database,
+      totalBytes: stat.size,
+      dropExisting,
+      onProgress,
+      task
+    });
+
     if (createDatabaseIfNotExists) {
       await this.raw(`CREATE DATABASE IF NOT EXISTS ${quoteId(database)} DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
     }
@@ -2344,11 +2957,13 @@ class DatabaseSession {
       if (typeof onProgress === 'function') {
         onProgress({
           operation: 'restore',
+          phase: 'execute',
           bytes,
           totalBytes: stat.size,
           statements,
           executed,
-          skipped
+          skipped,
+          warnings: inventory.warnings.length
         });
       }
     };
@@ -2361,6 +2976,27 @@ class DatabaseSession {
     };
     const throwIfCanceled = () => {
       if (task && task.canceled) throw canceledError();
+    };
+
+    const captureWarnings = async (statementNumber) => {
+      let warnings = [];
+      try {
+        warnings = (await this.raw('SHOW WARNINGS')).rows || [];
+      } catch {
+        return;
+      }
+      for (const warning of warnings) {
+        const code = Number(warning.Code);
+        if (!DATA_LOSS_WARNING_CODES.has(code)) continue;
+        if (inventory.warnings.length < 50) {
+          inventory.warnings.push({
+            statement: statementNumber,
+            code,
+            level: warning.Level,
+            message: warning.Message
+          });
+        }
+      }
     };
 
     const execute = async (rawStatement) => {
@@ -2388,8 +3024,9 @@ class DatabaseSession {
           }
         }
         throwIfCanceled();
-        await this.raw(sql);
+        const result = await this.raw(sql);
         executed += 1;
+        if (result && Number(result.warningStatus) > 0) await captureWarnings(statements);
       } catch (error) {
         if (task && task.canceled) throw canceledError();
         if (!error.partial) error.partial = partialState();
@@ -2428,12 +3065,21 @@ class DatabaseSession {
       this.metadata.clear();
     }
 
+    throwIfCanceled();
+    const verification = await this.verifyRestore(database, inventory, task);
     return {
       database,
       statements: executed,
       skipped,
       bytes,
-      durationMs: Date.now() - startedAt
+      durationMs: Date.now() - startedAt,
+      warnings: inventory.warnings.length,
+      verification,
+      inventory: {
+        tables: inventory.tables.size,
+        expectedRows: [...inventory.tables.values()].reduce((total, entry) => total + (entry.canCount ? entry.expectedRows : 0), 0),
+        rowCountsReliable: inventory.rowCountsReliable
+      }
     };
   }
 }

@@ -73,12 +73,24 @@ class SessionRegistry {
     };
   }
 
-  async close(id) {
+  async reopen(entry, options = {}) {
+    const id = entry.profileId;
+    const version = this.versions.get(id) || 0;
+    const canceled = () => Object.assign(new Error('Yêu cầu kết nối đã hết hiệu lực.'), { code: 'SESSION_OPEN_CANCELED' });
+    if (!await this.close(id, entry)) throw canceled();
+    // Explicit disconnect or another open while disposal awaited wins over retry.
+    if ((this.versions.get(id) || 0) !== version + 1 || this.entries.has(id) || this.opening.has(id)) throw canceled();
+    return this.open(id, options);
+  }
+
+  async close(id, expected) {
+    if (expected && this.entries.get(id) !== expected) return false;
     this.versions.set(id, (this.versions.get(id) || 0) + 1);
     this.opening.delete(id);
     const entry = this.entries.get(id);
     this.entries.delete(id);
     if (entry) await this.dispose(entry);
+    return true;
   }
 
   async closeAll() {

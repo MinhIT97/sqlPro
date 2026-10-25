@@ -128,6 +128,42 @@ function claimDatabaseTransfer(details) {
   return transfer;
 }
 
+function resolveProfileId(profileId) {
+  const id = typeof profileId === 'string' && profileId ? profileId : activeSession?.profileId;
+  if (!id) throw new Error('Chưa kết nối database.');
+  return id;
+}
+
+function activeTransactions() {
+  return [...openSessions.values()]
+    .filter((entry) => !entry.session.dead && entry.session.inTransaction)
+    .map((entry) => entry.profileId);
+}
+
+function confirmActiveTransactions(action = 'ngắt kết nối') {
+  const profiles = activeTransactions();
+  if (!profiles.length) return true;
+  const options = {
+    type: 'warning',
+    title: 'Transaction chưa hoàn tất',
+    message: `Có ${profiles.length} phiên đang mở transaction chưa commit.`,
+    detail: `${action === 'thoát' ? 'Thoát' : 'Ngắt kết nối'} sẽ rollback các thay đổi chưa commit của transaction đó.`,
+    buttons: ['Quay lại', `Vẫn ${action}`],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  };
+  let choice = 0;
+  try {
+    choice = mainWindow && !mainWindow.isDestroyed()
+      ? dialog.showMessageBoxSync(mainWindow, options)
+      : dialog.showMessageBoxSync(options);
+  } catch {
+    choice = 0;
+  }
+  return choice === 1;
+}
+
 function cancelDatabaseTransfer(transfer) {
   const session = transfer.session || openSessions.get(transfer.profileId)?.session;
   const canceled = session?.cancelTask(transfer.taskId) || transfer.pending;
@@ -309,6 +345,10 @@ function createWindow() {
       mainWindow.destroy();
       return;
     }
+    if (!isQuitting && activeTransactions().length && !confirmActiveTransactions('thoát')) {
+      event.preventDefault();
+      return;
+    }
     saveWindowState();
   });
   mainWindow.on('closed', () => { mainWindow = undefined; });
@@ -337,7 +377,8 @@ function handle(channel, handler) {
           sqlState: error && error.sqlState ? String(error.sqlState) : '',
           ...(error && error.fingerprint ? { fingerprint: String(error.fingerprint) } : {}),
           ...(error && error.expectedFingerprint ? { expectedFingerprint: String(error.expectedFingerprint) } : {}),
-          ...(error && error.partial ? { partial: error.partial } : {})
+          ...(error && error.partial ? { partial: error.partial } : {}),
+          ...(error && error.conflict ? { conflict: error.conflict } : {})
         }
       };
     }
@@ -359,6 +400,8 @@ function friendlyError(error) {
     SESSION_CLOSED: 'Phiên kết nối đã đóng. Hãy kết nối lại.',
     QUERY_TIMEOUT: 'Truy vấn quá thời gian cho phép.',
     QUERY_CANCELED: 'Đã hủy truy vấn.',
+    ER_LOCK_WAIT_TIMEOUT: 'Database đang bị transaction khác giữ khóa. Hãy hoàn tất hoặc rollback transaction đó rồi thử lại.',
+    ER_LOCK_DEADLOCK: 'Database phát hiện deadlock và đã hủy một transaction. Hãy thử lại sau khi kiểm tra transaction đang mở.',
     NO_PRIMARY_KEY: 'Bảng không có khóa chính nên không thể sửa/xóa trực tiếp.',
     NETWORK_ERROR: 'Không kết nối được tới server đồng bộ. Kiểm tra URL và kết nối mạng.',
     INVALID_SERVER_URL: 'Địa chỉ server đồng bộ không hợp lệ.',
@@ -425,9 +468,10 @@ function isConnectionError(error) {
   return ['ECONNRESET', 'PROTOCOL_CONNECTION_LOST', 'ETIMEDOUT', 'EPIPE', 'ER_SERVER_SHUTDOWN', 'SESSION_CLOSED'].includes(code);
 }
 
-async function closeSession(profileId) {
-  if (activeSession?.profileId === profileId) activeSession = null;
-  await sessionRegistry.close(profileId);
+async function closeSession(profileId, expected) {
+  if (expected && openSessions.get(profileId) !== expected) return false;
+  if (activeSession?.profileId === profileId && (!expected || activeSession === expected)) activeSession = null;
+  return sessionRegistry.close(profileId, expected);
 }
 
 async function closeActiveSession() {
@@ -439,8 +483,8 @@ async function closeAllSessions() {
   await sessionRegistry.closeAll();
 }
 
-async function openSession(profileId, makeActive = true, options = {}) {
-  const current = await sessionRegistry.open(profileId, options);
+async function openSession(profileId, makeActive = true, options = {}, expected) {
+  const current = await (expected ? sessionRegistry.reopen(expected, options) : sessionRegistry.open(profileId, options));
   if (openSessions.get(profileId) !== current) throw Object.assign(new Error('Yêu cầu kết nối đã bị hủy.'), { code: 'SESSION_OPEN_CANCELED' });
   if (makeActive) activeSession = current;
   return current;
@@ -472,9 +516,10 @@ async function withSession(handler, { retry = false, profileId = null } = {}) {
     return await handler(current.session);
   } catch (error) {
     if (retry && isConnectionError(error)) {
+      if (openSessions.get(current.profileId) !== current) throw error;
       current.session.dead = true;
       release();
-      current = await openSession(current.profileId, activeSession === current);
+      current = await openSession(current.profileId, activeSession === current, {}, current);
       release = sessionRegistry.acquire(current);
       return await handler(current.session);
     }
@@ -623,14 +668,23 @@ handle('account:login', (payload) => {
 handle('account:logout', () => sync.logout());
 
 handle('account:reset-local', async () => {
+  await sync.logout();
   await closeAllSessions();
   const { backupName } = store.resetLocalData();
-  await sync.logout();
   writeJson('renderer-state.json', {});
   return { backupName };
 });
 
 handle('account:sync-now', () => sync.syncNow());
+
+handle('account:resolve-conflicts', (choices) => sync.resolveConflicts(choices));
+
+handle('account:list-recovery', () => sync.listRecovery());
+
+handle('account:restore-recovery', (id) => {
+  if (typeof id !== 'string' || !id) throw new Error('Bản phục hồi không hợp lệ.');
+  return sync.restoreRecovery(id);
+});
 
 handle('db:connect', async (profileId, options = {}) => {
   if (typeof profileId !== 'string' || !profileId) throw new Error('Kết nối không hợp lệ.');
@@ -647,12 +701,12 @@ handle('db:connect', async (profileId, options = {}) => {
     } catch (error) {
       if (!isConnectionError(error)) throw error;
       release();
-      await closeSession(profileId);
-      current = await openSession(profileId, true, { sshHostKey });
+      current = await openSession(profileId, true, { sshHostKey }, current);
       release = sessionRegistry.acquire(current);
       databases = await current.session.listDatabases();
       reused = false;
     }
+    if (openSessions.get(profileId) !== current) throw Object.assign(new Error('Yêu cầu kết nối đã hết hiệu lực.'), { code: 'SESSION_OPEN_CANCELED' });
     current.databases = databases;
     return {
       profileId,
@@ -662,15 +716,30 @@ handle('db:connect', async (profileId, options = {}) => {
       openProfiles: [...openSessions.keys()]
     };
   } catch (error) {
-    await closeSession(profileId);
+    await closeSession(profileId, current);
     throw error;
   } finally { release(); }
 });
 
-handle('db:disconnect', async (profileId) => {
+handle('db:disconnect', async (profileId, options = {}) => {
+  const target = typeof profileId === 'string' && profileId ? openSessions.get(profileId) : activeSession;
+  if (target?.session.inTransaction && (!options || options.force !== true)) {
+    return { disconnected: false, needsConfirmation: true, profileId: target.profileId };
+  }
   if (typeof profileId === 'string' && profileId) await closeSession(profileId);
   else await closeActiveSession();
   return { disconnected: true, openProfiles: [...openSessions.keys()] };
+});
+
+handle('db:session-state', (profileId) => {
+  const current = typeof profileId === 'string' && profileId ? openSessions.get(profileId) : activeSession;
+  const session = current?.session;
+  return {
+    profileId: current?.profileId || null,
+    connected: Boolean(session && !session.dead),
+    inTransaction: Boolean(session?.inTransaction),
+    autocommit: session?.autocommit !== false
+  };
 });
 
 handle('db:open-profiles', () => [...openSessions.entries()]
@@ -950,13 +1019,19 @@ handle('db:import-file', async (payload) => {
   if (typeof payload.database !== 'string' || !payload.database) throw new Error('Chưa chọn database đích.');
   if (typeof payload.table !== 'string' || !payload.table) throw new Error('Chưa chọn bảng đích.');
   if (typeof payload.filePath !== 'string' || !payload.filePath) throw new Error('Chưa chọn tệp để nhập.');
-  const current = await ensureSession(payload.profileId);
-  const profileId = current.profileId;
+  const profileId = resolveProfileId(payload.profileId);
   const format = normalizeFileFormat(payload.format, payload.filePath);
   const taskId = typeof payload.taskId === 'string' && payload.taskId ? payload.taskId : null;
-  claimDatabaseTransfer({ taskId, profileId, operation: 'import', database: payload.database, table: payload.table });
+  const transfer = claimDatabaseTransfer({ taskId, profileId, operation: 'import', database: payload.database, table: payload.table, pending: true });
+  let session;
   try {
-    const stats = await withSessionFor(profileId, (session) => session.importFile({
+    session = new DatabaseSession(runtimeProfile(store.getWithSecrets(profileId)));
+    transfer.session = session;
+    await session.connect();
+    if (transfer.canceled) return { canceled: true };
+    if (typeof session.prepareWorkerForImport === 'function') await session.prepareWorkerForImport();
+    transfer.pending = false;
+    const stats = await session.importFile({
       database: payload.database,
       table: payload.table,
       filePath: payload.filePath,
@@ -966,6 +1041,7 @@ handle('db:import-file', async (payload) => {
       mapping: payload.mapping,
       mode: payload.mode,
       transaction: payload.transaction,
+      allowNonTransactional: payload.allowNonTransactional === true,
       taskId
     }, (progress) => sendDbProgress({
       ...progress,
@@ -973,7 +1049,7 @@ handle('db:import-file', async (payload) => {
       profileId,
       database: payload.database,
       table: payload.table
-    })));
+    }));
     return { canceled: false, ...stats };
   } catch (error) {
     if (error && error.code === 'IMPORT_CANCELED') {
@@ -981,7 +1057,8 @@ handle('db:import-file', async (payload) => {
     }
     throw error;
   } finally {
-    activeDatabaseTransfer = null;
+    try { await session?.close(); }
+    finally { if (activeDatabaseTransfer === transfer) activeDatabaseTransfer = null; }
   }
 });
 
@@ -1085,9 +1162,8 @@ handle('db:restore', async (payload) => {
   if (!payload || typeof payload !== 'object') throw new Error('Tham số không hợp lệ.');
   if (typeof payload.database !== 'string' || !payload.database) throw new Error('Chưa chọn database đích để phục hồi.');
   const taskId = typeof payload.taskId === 'string' && payload.taskId ? payload.taskId : null;
-  const targetProfileId = payload.targetProfileId || payload.profileId;
-  const targetSession = await ensureSession(targetProfileId);
-  const sourceProfileId = payload.sourceProfileId || targetSession.profileId;
+  const targetProfileId = resolveProfileId(payload.targetProfileId || payload.profileId);
+  const sourceProfileId = payload.sourceProfileId || targetProfileId;
   const sourceDatabase = payload.sourceDatabase || payload.database;
   const savedFile = payload.backupId
     ? await resolveBackup(app.getPath('userData'), sourceProfileId, sourceDatabase, payload.backupId)
@@ -1104,9 +1180,16 @@ handle('db:restore', async (payload) => {
   const filePath = savedFile || result.filePaths[0];
   const stat = await fs.promises.stat(filePath);
   if (!stat.isFile()) throw new Error('Đường dẫn phục hồi không phải là tệp.');
-  claimDatabaseTransfer({ taskId, profileId: targetSession.profileId, operation: 'restore' });
+  const transfer = claimDatabaseTransfer({ taskId, profileId: targetProfileId, operation: 'restore', pending: true });
+  let session;
   try {
-    const stats = await withSessionFor(targetSession.profileId, (session) => session.restoreDatabase({
+    session = new DatabaseSession(runtimeProfile(store.getWithSecrets(targetProfileId)));
+    transfer.session = session;
+    await session.connect();
+    if (transfer.canceled) return { canceled: true, filePath };
+    if (typeof session.prepareWorkerForRestore === 'function') await session.prepareWorkerForRestore();
+    transfer.pending = false;
+    const stats = await session.restoreDatabase({
       database: payload.database,
       filePath,
       dropExisting: payload.dropExisting === true,
@@ -1115,13 +1198,13 @@ handle('db:restore', async (payload) => {
     }, (progress) => sendDbProgress({
       ...progress,
       taskId,
-      profileId: targetSession.profileId,
+      profileId: targetProfileId,
       database: payload.database
-    })));
+    }));
     let copiedBackup = null;
-    if (payload.backupId && payload.copyToTargetCatalog && (sourceDatabase !== payload.database || sourceProfileId !== targetSession.profileId)) {
+    if (payload.backupId && payload.copyToTargetCatalog && (sourceDatabase !== payload.database || sourceProfileId !== targetProfileId)) {
       try {
-        copiedBackup = await copyBackup(app.getPath('userData'), sourceProfileId, targetSession.profileId, sourceDatabase, payload.database, payload.backupId);
+        copiedBackup = await copyBackup(app.getPath('userData'), sourceProfileId, targetProfileId, sourceDatabase, payload.database, payload.backupId);
       } catch {
         // non-fatal
       }
@@ -1133,7 +1216,8 @@ handle('db:restore', async (payload) => {
     }
     throw error;
   } finally {
-    activeDatabaseTransfer = null;
+    try { await session?.close(); }
+    finally { if (activeDatabaseTransfer === transfer) activeDatabaseTransfer = null; }
   }
 });
 
@@ -1157,6 +1241,10 @@ app.whenReady().then(() => {
 
 app.on('before-quit', (event) => {
   if (!isQuitting && activeDatabaseTransfer && !confirmStopActiveTransfer()) {
+    event.preventDefault();
+    return;
+  }
+  if (!isQuitting && !activeDatabaseTransfer && activeTransactions().length && !confirmActiveTransactions('thoát')) {
     event.preventDefault();
     return;
   }

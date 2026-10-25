@@ -12,6 +12,29 @@ function stubSession(runQuery) {
   return session;
 }
 
+test('batch row results share a byte allowance without dropping later statements', async () => {
+  const limits = [];
+  const session = stubSession(async (_sql, _timeout, _rows, bytes) => {
+    limits.push(bytes);
+    return { kind: 'rows', columns: [], rows: [], bytes: Math.min(bytes, 8 * 1024 * 1024), truncated: bytes === 0 };
+  });
+  const result = await session.runQueryScript('SELECT 1; SELECT 2; SELECT 3');
+  assert.deepEqual(limits, [16 * 1024 * 1024, 8 * 1024 * 1024, 0]);
+  assert.equal(result.executedCount, 3);
+});
+
+test('batch results capture each statement database before later USE statements change it', async () => {
+  let database = 'first';
+  const session = stubSession(async (sql) => {
+    if (sql.startsWith('USE ')) { database = sql.slice(4); return { kind: 'ok' }; }
+    return { kind: 'rows', rows: [[database]], columns: [], truncated: false };
+  });
+  session.database = 'first';
+  session.raw = async () => ({ rows: [{ value: database }] });
+  const result = await session.runQueryScript('SELECT 1; USE second; SELECT 1; USE first; SELECT 1');
+  assert.deepEqual(result.results.map((entry) => entry.database), ['first', 'first', 'second', 'second', 'first']);
+});
+
 test('parse toàn bộ script trước khi execute', async () => {
   const calls = [];
   const session = stubSession(async (sql) => {

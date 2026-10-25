@@ -5,6 +5,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const SqlAutocomplete = require('../../sql-autocomplete.js');
 const SqlRowValues = require('../../row-values.js');
+const SqlExportValues = require('../../export-values.js');
+const SqlQueryResults = require('../../query-results.js');
 const source = fs.readFileSync(path.join(__dirname, '../../app.js'), 'utf8');
 
 function loadRenderer({ desktop, elements = new Map() } = {}) {
@@ -13,7 +15,7 @@ function loadRenderer({ desktop, elements = new Map() } = {}) {
   const storage = new Map();
   const context = vm.createContext({
     console,
-    window: { sqlProDesktop: desktop, SqlAutocomplete, SqlRowValues, addEventListener() {} },
+    window: { sqlProDesktop: desktop, SqlAutocomplete, SqlRowValues, SqlExportValues, SqlQueryResults, addEventListener() {} },
     document: {
       querySelector: (selector) => elements.get(selector) || null,
       querySelectorAll: () => [],

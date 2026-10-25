@@ -21,6 +21,8 @@ const columns = [
 ];
 let rowEditorColumns = columns;
 let rowEditorFailure = false;
+let sshTestResponses = [];
+let pendingQueryExport = null;
 const tables = Array.from({ length: 14 }, (_, i) => ({ name: i ? `table_${i}` : 'users', type: 'table' }));
 const ok = (data) => ({ ok: true, data });
 const rows = (names, data) => ({ kind: 'rows', columns: names.map((name) => ({ name, type: 'TEXT' })), rows: data, durationMs: 1 });
@@ -33,6 +35,8 @@ handle('state:load', () => ({}));
 handle('state:save', () => ({}));
 handle('workspaces:list', () => ok([{ id: 'ws-personal', name: 'Personal' }]));
 handle('connections:list', () => ok([]));
+handle('connections:test', () => sshTestResponses.shift() || ok({ version: '8.4-test' }));
+handle('connections:save', (payload) => ok({ ...payload, id: payload.id || 'saved-test' }));
 handle('db:open-profiles', () => ok([]));
 handle('account:status', () => ok({ loggedIn: false }));
 handle('db:use-database', () => ok({}));
@@ -42,6 +46,7 @@ handle('db:columns', () => ok(rowEditorColumns));
 handle('db:indexes', () => ok([]));
 handle('db:relations', () => ok({ outbound: [{ table: 'users', column: 'id', refTable: 'table_1', refColumn: 'id', refDatabase: 'test' }], inbound: [] }));
 handle('db:table-data', () => ok({ columns, primaryKey: ['id'], rows: [{ id: 1, name: 'Alice' }], total: 1, page: 1, pageSize: 100 }));
+handle('db:table-count', () => ok({ total: 42 }));
 handle('db:delete-rows', () => ok({ affectedRows: 1 }));
 handle('db:update-row', () => rowEditorFailure ? { ok: false, error: { message: 'Expected row save failure' } } : ok({ affectedRows: 1, changedRows: 1 }));
 handle('db:insert-row', () => ok({ affectedRows: 1, insertId: 2 }));
@@ -114,6 +119,13 @@ handle('db:backup', (payload) => {
 });
 handle('db:list-backups', () => ok([]));
 handle('file:save-text', () => ({ canceled: false }));
+handle('db:export-query', (payload) => new Promise((resolve) => { pendingQueryExport = { payload, resolve }; }));
+handle('db:cancel-task', (payload) => {
+  if (!pendingQueryExport || payload.taskId !== pendingQueryExport.payload.taskId || payload.profileId !== pendingQueryExport.payload.profileId) return ok({ canceled: false });
+  pendingQueryExport.resolve(ok({ canceled: true }));
+  pendingQueryExport = null;
+  return ok({ canceled: true });
+});
 handle('db:query', (payload) => {
   if (!payload || typeof payload.sql !== 'string') return { ok: false, error: { message: 'Invalid query payload' } };
   const sql = payload.sql.trim();
@@ -130,6 +142,16 @@ handle('db:query', (payload) => {
 });
 
 const evaluate = (code) => win.webContents.executeJavaScript(code);
+async function captureReview(name) {
+  if (!process.env.SQLPRO_REVIEW_SCREENSHOT_DIR) return;
+  const { width, height } = win.getContentBounds();
+  win.setContentSize(width + 2, height + 2);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  win.setContentSize(width, height);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  fs.mkdirSync(process.env.SQLPRO_REVIEW_SCREENSHOT_DIR, { recursive: true });
+  fs.writeFileSync(path.join(process.env.SQLPRO_REVIEW_SCREENSHOT_DIR, `${name}.png`), (await win.webContents.capturePage()).toPNG());
+}
 async function until(code) {
   const deadline = Date.now() + 5000;
   while (!await evaluate(code)) {
@@ -274,6 +296,25 @@ app.whenReady().then(async () => {
     await evaluate("inlineEditCell($('#grid td[data-col=\"name\"]')); $('.inline-cell-editor').value=''; $('.inline-cell-editor').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))");
     await until("!$('#grid td[data-col=\"name\"]').classList.contains('editing-cell')");
     assert.equal(calls.filter((call) => call.name === 'db:update-row').at(-1).args[0].values.name, '');
+  });
+
+  await check('table filters and explicit row counts remain usable in a smaller window', async () => {
+    await evaluate("closeModal(); mode='data'; app.columns=" + JSON.stringify(columns) + "; app.primaryKey=['id']; app.rows=[{id:1,name:'Alice'}]; app.total=null; app.search=''; app.hasMore=false; renderDataView()");
+    win.setContentSize(940, 700);
+    assert.equal(await evaluate("$('#nextPage').disabled"), true);
+    assert.equal(await evaluate("$('#workspace .toolbar').scrollWidth <= $('#workspace .toolbar').clientWidth"), true);
+    await evaluate("$('#countRowsBtn').click()");
+    await until("app.total === 42");
+    await evaluate("$('#filterColumn').value='name'; $('#filterColumn').dispatchEvent(new Event('change'))");
+    await until("$('#filterColumn').value === 'name'");
+    await evaluate("$('#filterMode').value='exact'; $('#filterMode').dispatchEvent(new Event('change'))");
+    await until("$('#filterMode').value === 'exact'");
+    await untilNode(() => calls.filter((call) => call.name === 'db:table-data').at(-1)?.args[0].searchMode === 'exact');
+    const payload = calls.filter((call) => call.name === 'db:table-data').at(-1).args[0];
+    assert.equal(payload.searchColumn, 'name'); assert.equal(payload.searchMode, 'exact');
+    await captureReview('table-filters');
+    await evaluate("app.searchColumn=null; app.searchMode='contains'");
+    win.setContentSize(1344, 835);
   });
   await check('file import previews mapping and sends a streaming payload', async () => {
     const before = calls.filter((call) => call.name === 'db:import-file').length;
@@ -435,6 +476,63 @@ app.whenReady().then(async () => {
     await evaluate("$('#confirmOk').click()");
     await until('savedQueries.length === 0');
   });
+  await check('SSH trust preserves the connection form and accepted key for Save', async () => {
+    sshTestResponses = [{ ok: false, error: { code: 'SSH_HOST_KEY_UNKNOWN', fingerprint: 'SHA256:test', message: 'Unknown key' } }];
+    await evaluate("connection(); window.__sshForm=$('#connectionForm'); $('#connHost').value='localhost'; $('#connSsh').checked=true; $('#sshHost').value='ssh.test'; $('#connPassword').value='test-only'; $('#connTest').click()");
+    await until("Boolean(document.querySelector('.confirmation-dialog'))");
+    assert.equal(await evaluate("$('#connectionForm') === window.__sshForm && $('#modal').open"), true);
+    await captureReview('ssh-trust');
+    await evaluate("document.querySelector('.confirmation-dialog #confirmOk').click()");
+    await until("!$('#connTest').disabled");
+    assert.equal(await evaluate("$('#connPassword').value"), 'test-only');
+    assert.equal(await evaluate("$('#connectionForm') === window.__sshForm && $('#modal').open"), true);
+    assert.equal(await evaluate("document.querySelector('.confirmation-dialog') === null"), true);
+    await evaluate("window.__connectTo=connectTo; window.__refreshConnections=refreshConnections; connectTo=async()=>{}; refreshConnections=async()=>{}; $('#connectionForm').requestSubmit()");
+    await until("!$('#modal').open");
+    const saved = calls.filter((call) => call.name === 'connections:save').at(-1).args[0];
+    assert.equal(saved.ssh.knownHostKey.fingerprint, 'SHA256:test');
+    await evaluate("connectTo=window.__connectTo; refreshConnections=window.__refreshConnections; delete window.__sshForm");
+  });
+
+  await check('canceling SSH trust and failing a retry both leave the form editable', async () => {
+    const unknown = { ok: false, error: { code: 'SSH_HOST_KEY_CHANGED', fingerprint: 'SHA256:new', expectedFingerprint: 'SHA256:old', message: 'Changed key' } };
+    sshTestResponses = [unknown];
+    await evaluate("connection(); window.__sshForm=$('#connectionForm'); $('#connSsh').checked=true; $('#sshHost').value='ssh.test'; $('#connTest').click()");
+    await until("Boolean(document.querySelector('.confirmation-dialog'))");
+    await evaluate("document.querySelector('.confirmation-dialog #confirmCancel').click()");
+    await until("!$('#connTest').disabled");
+    assert.equal(await evaluate("$('#connectionForm') === window.__sshForm && $('#modal').open"), true);
+    sshTestResponses = [unknown, { ok: false, error: { message: 'Expected authentication failure' } }];
+    await evaluate("$('#connTest').click()");
+    await until("Boolean(document.querySelector('.confirmation-dialog'))");
+    await evaluate("document.querySelector('.confirmation-dialog #confirmOk').click()");
+    await until("!$('#connTest').disabled");
+    assert.match(await evaluate("$('#connError').textContent"), /Expected authentication failure/);
+    assert.equal(await evaluate("$('#connectionForm') === window.__sshForm && !$('#connSubmit').disabled"), true);
+    sshTestResponses = [unknown];
+    await evaluate("$('#connTest').click()");
+    await until("Boolean(document.querySelector('.confirmation-dialog'))");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+    await until("!document.querySelector('.confirmation-dialog') && !$('#connTest').disabled");
+    assert.equal(await evaluate("$('#connectionForm') === window.__sshForm && $('#modal').open"), true);
+    await evaluate("closeModal(); delete window.__sshForm");
+  });
+
+  await check('small SQL exports use the cancellable full-data task instead of a BLOB preview', async () => {
+    await evaluate("app.query.result={kind:'rows',columns:[{name:'raw',type:'BLOB'}],rows:[['0x00… (64 bytes)']],truncated:false}; app.query.lastSql='SELECT raw FROM items'; app.query.profileId='test'; app.query.database='test'; window.__exportPromise=exportCurrentResult('json'); void 0");
+    await until("Boolean(document.querySelector('[data-cancel-transfer]'))");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const payload = calls.filter((call) => call.name === 'db:export-query').at(-1).args[0];
+    assert.match(payload.taskId, /^export-/);
+    assert.match(await evaluate("$('#modal').textContent"), /SQL được chạy lại/);
+    await captureReview('query-export');
+    await evaluate("document.querySelector('[data-cancel-transfer]').click(); window.__exportPromise");
+    await until("!$('#modal').open");
+    assert.equal(await evaluate('activeTransfer'), null);
+    assert.equal(calls.filter((call) => call.name === 'db:cancel-task').at(-1).args[0].taskId, payload.taskId);
+  });
+
   await check('backup includes routines, events and the strip-DEFINER option', async () => {
     const before = calls.filter((call) => call.name === 'db:backup').length;
     await evaluate('backupDatabase()');

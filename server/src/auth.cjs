@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const { ApiError, badRequest, conflict, forbidden, unauthorized } = require('./errors.cjs');
+const { createTaskGate } = require('./async-gate.cjs');
 
 const SCRYPT_N = 16384;
 const SCRYPT_R = 8;
@@ -29,22 +30,23 @@ function parseAuthProof(value) {
   return value;
 }
 
+const hashGate = createTaskGate();
 function scrypt(secret, salt) {
-  return crypto.scryptSync(secret, salt, 32, {
+  return hashGate.run(() => new Promise((resolve, reject) => crypto.scrypt(secret, salt, 32, {
     N: SCRYPT_N,
     r: SCRYPT_R,
     p: SCRYPT_P,
     maxmem: SCRYPT_MAXMEM
-  });
+  }, (error, result) => error ? reject(error) : resolve(result))));
 }
 
-function hashSecret(secret) {
+async function hashSecret(secret) {
   const salt = crypto.randomBytes(16);
-  const hash = scrypt(Buffer.from(secret, 'utf8'), salt);
+  const hash = await scrypt(Buffer.from(secret, 'utf8'), salt);
   return `scrypt$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${salt.toString('base64url')}$${hash.toString('base64url')}`;
 }
 
-function verifySecret(secret, encoded) {
+async function verifySecret(secret, encoded) {
   if (typeof encoded !== 'string') return false;
   const parts = encoded.split('$');
   if (parts.length !== 6 || parts[0] !== 'scrypt') return false;
@@ -56,17 +58,18 @@ function verifySecret(secret, encoded) {
     const salt = Buffer.from(parts[4], 'base64url');
     const expected = Buffer.from(parts[5], 'base64url');
     if (salt.length < 8 || expected.length !== 32) return false;
-    const actual = scrypt(Buffer.from(secret, 'utf8'), salt);
+    const actual = await scrypt(Buffer.from(secret, 'utf8'), salt);
     return crypto.timingSafeEqual(actual, expected);
-  } catch {
+  } catch (error) {
+    if (error.code === 'AUTH_BUSY') throw error;
     return false;
   }
 }
 
-const DUMMY_VERIFIER = hashSecret(crypto.randomBytes(32).toString('base64url'));
+const DUMMY_VERIFIER = `scrypt$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${crypto.randomBytes(16).toString('base64url')}$${crypto.randomBytes(32).toString('base64url')}`;
 
 function verifyDummy(secret) {
-  verifySecret(secret, DUMMY_VERIFIER);
+  return verifySecret(secret, DUMMY_VERIFIER);
 }
 
 function hashToken(token) {
@@ -146,7 +149,7 @@ function sendSession(response, db, config, user, vaultSalt, status = 200) {
 }
 
 function registerAuthRoutes(app, { db, config, limiter }) {
-  app.post('/api/auth/register', (request, response) => {
+  app.post('/api/auth/register', async (request, response) => {
     const body = request.body && typeof request.body === 'object' ? request.body : {};
     const email = normalizeEmail(body.email);
     const authProof = parseAuthProof(body.authProof);
@@ -161,11 +164,12 @@ function registerAuthRoutes(app, { db, config, limiter }) {
     const user = { id: crypto.randomUUID(), email };
     const vaultSalt = crypto.randomBytes(16).toString('base64url');
     const createdAt = new Date().toISOString();
+    const verifier = await hashSecret(authProof);
     try {
       db.prepare(`
         INSERT INTO users (id, email, verifier, vault_salt, created_at, disabled)
         VALUES (?, ?, ?, ?, ?, 0)
-      `).run(user.id, user.email, hashSecret(authProof), vaultSalt, createdAt);
+      `).run(user.id, user.email, verifier, vaultSalt, createdAt);
     } catch (error) {
       if (db.prepare('SELECT id FROM users WHERE email = ?').get(email)) {
         throw conflict('EMAIL_TAKEN', 'Email đã được đăng ký.');
@@ -176,7 +180,7 @@ function registerAuthRoutes(app, { db, config, limiter }) {
     sendSession(response, db, config, user, vaultSalt, 201);
   });
 
-  app.post('/api/auth/login', (request, response) => {
+  app.post('/api/auth/login', async (request, response) => {
     const body = request.body && typeof request.body === 'object' ? request.body : {};
     const email = normalizeEmail(body.email);
     const authProof = parseAuthProof(body.authProof);
@@ -186,10 +190,10 @@ function registerAuthRoutes(app, { db, config, limiter }) {
       SELECT id, email, verifier, vault_salt, disabled FROM users WHERE email = ?
     `).get(email);
     if (!row) {
-      verifyDummy(authProof);
+      await verifyDummy(authProof);
       throw unauthorized('INVALID_CREDENTIALS', 'Email hoặc mật khẩu không đúng.');
     }
-    if (!verifySecret(authProof, row.verifier)) {
+    if (!await verifySecret(authProof, row.verifier)) {
       throw unauthorized('INVALID_CREDENTIALS', 'Email hoặc mật khẩu không đúng.');
     }
     if (row.disabled) throw forbidden('ACCOUNT_DISABLED', 'Tài khoản đã bị khóa.');

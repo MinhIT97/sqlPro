@@ -4,7 +4,8 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const result = spawnSync(require('electron'), [path.join(__dirname, 'renderer-smoke.cjs')], {
+const flags = process.argv.includes('--no-sandbox') ? ['--no-sandbox'] : [];
+const result = spawnSync(require('electron'), [...flags, path.join(__dirname, 'renderer-smoke.cjs')], {
   env, encoding: 'utf8', windowsHide: true, timeout: 60000
 });
 if (result.stdout) process.stdout.write(result.stdout);

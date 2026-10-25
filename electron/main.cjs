@@ -10,6 +10,7 @@ const sync = require('./sync.cjs');
 const { parseNavicatFile } = require('./navicat.cjs');
 const { DatabaseSession, testConnection, previewImportFile, normalizeFileFormat } = require('./database.cjs');
 const { saveBackupFile } = require('./backup-file.cjs');
+const { SessionRegistry } = require('./session-registry.cjs');
 const { backupDirectory, backupName, listBackups, resolveBackup, copyBackup } = require('./backup-catalog.cjs');
 
 const MAX_RENDERER_STATE_BYTES = 2 * 1024 * 1024;
@@ -19,8 +20,24 @@ const MAX_EXPORT_BYTES = 50 * 1024 * 1024;
 let mainWindow;
 let isQuitting = false;
 let activeSession = null;
-const openSessions = new Map();
 const MAX_OPEN_SESSIONS = 8;
+const sessionRegistry = new SessionRegistry({
+  limit: MAX_OPEN_SESSIONS,
+  isProtected: (entry) => entry === activeSession,
+  create: async (profileId, options) => {
+    const profile = runtimeProfile(store.getWithSecrets(profileId));
+    if (options.sshHostKey) profile.ssh = { ...profile.ssh, knownHostKey: options.sshHostKey };
+    const session = new DatabaseSession(profile);
+    try {
+      await session.connect();
+      if (options.sshHostKey) {
+        try { store.trustSshHostKey(profileId, options.sshHostKey); } catch { /* Ask again next time if trust cannot be stored. */ }
+      }
+      return { profileId, session };
+    } catch (error) { await session.close().catch(() => {}); throw error; }
+  }
+});
+const openSessions = sessionRegistry.entries;
 let activeDatabaseTransfer = null;
 
 if (!app.requestSingleInstanceLock()) {
@@ -104,6 +121,20 @@ function transferLabel(operation) {
   }[operation] || 'database';
 }
 
+function claimDatabaseTransfer(details) {
+  if (activeDatabaseTransfer) throw new Error('Một tác vụ database đang chạy. Hãy đợi tác vụ hoàn tất.');
+  const transfer = { canceled: false, pending: false, ...details };
+  activeDatabaseTransfer = transfer;
+  return transfer;
+}
+
+function cancelDatabaseTransfer(transfer) {
+  const session = transfer.session || openSessions.get(transfer.profileId)?.session;
+  const canceled = session?.cancelTask(transfer.taskId) || transfer.pending;
+  if (canceled) transfer.canceled = true;
+  return Boolean(canceled);
+}
+
 function confirmStopActiveTransfer() {
   const active = activeDatabaseTransfer;
   if (!active) return true;
@@ -124,8 +155,7 @@ function confirmStopActiveTransfer() {
     ? dialog.showMessageBoxSync(mainWindow, options)
     : dialog.showMessageBoxSync(options);
   if (choice === 0) return false;
-  const current = openSessions.get(active.profileId);
-  if (current) current.session.cancelTask(active.taskId);
+  cancelDatabaseTransfer(active);
   return true;
 }
 
@@ -342,7 +372,9 @@ function friendlyError(error) {
     VAULT_DECRYPT_FAILED: 'Không thể giải mã dữ liệu đồng bộ. Kiểm tra mật khẩu hoặc dữ liệu trên server.',
     NOT_LOGGED_IN: 'Chưa đăng nhập tài khoản đồng bộ.',
     SESSION_EXPIRED: 'Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.',
-    VAULT_TOO_LARGE: 'Dữ liệu đồng bộ vượt quá giới hạn 5 MB.'
+    VAULT_TOO_LARGE: 'Dữ liệu đồng bộ vượt quá giới hạn 5 MB.',
+    STORE_READ_FAILED: 'Không đọc được cấu hình kết nối. Tệp dữ liệu được giữ nguyên, không ghi đè; hãy kiểm tra tệp hoặc dùng chức năng đặt lại dữ liệu local.',
+    BACKUP_SNAPSHOT_FAILED: 'Không tạo được snapshot nhất quán cho bản sao lưu.'
   };
   return messages[code] || error.message || 'Đã xảy ra lỗi.';
 }
@@ -379,7 +411,11 @@ function mergeSecrets(payload) {
     if (payload.sshPassword === undefined) base.sshPassword = stored.sshPassword;
     if (payload.sshPassphrase === undefined) base.sshPassphrase = stored.sshPassphrase;
     if (!payload.ssl) base.ssl = stored.ssl;
-    if (!payload.ssh) base.ssh = stored.ssh;
+    if (!payload.ssh) {
+      base.ssh = stored.ssh;
+    } else if (stored && stored.ssh && stored.ssh.knownHostKey && !payload.ssh.knownHostKey) {
+      base.ssh = { ...payload.ssh, knownHostKey: stored.ssh.knownHostKey };
+    }
   }
   return base;
 }
@@ -390,15 +426,8 @@ function isConnectionError(error) {
 }
 
 async function closeSession(profileId) {
-  const current = openSessions.get(profileId);
-  openSessions.delete(profileId);
   if (activeSession?.profileId === profileId) activeSession = null;
-  if (!current) return;
-  try {
-    await current.session.close();
-  } catch {
-    // ignore
-  }
+  await sessionRegistry.close(profileId);
 }
 
 async function closeActiveSession() {
@@ -406,40 +435,14 @@ async function closeActiveSession() {
 }
 
 async function closeAllSessions() {
-  await Promise.all([...openSessions.keys()].map(closeSession));
+  activeSession = null;
+  await sessionRegistry.closeAll();
 }
 
 async function openSession(profileId, makeActive = true, options = {}) {
-  const cached = openSessions.get(profileId);
-  if (cached && !cached.session.dead && cached.session.connection) {
-    openSessions.delete(profileId);
-    openSessions.set(profileId, cached);
-    if (makeActive) activeSession = cached;
-    return cached;
-  }
-  if (cached) await closeSession(profileId);
-  const stored = store.getWithSecrets(profileId);
-  const profile = runtimeProfile(stored);
-  if (options.sshHostKey) {
-    profile.ssh = { ...profile.ssh, knownHostKey: options.sshHostKey };
-  }
-  const session = new DatabaseSession(profile);
-  await session.connect();
-  if (options.sshHostKey) {
-    try {
-      store.trustSshHostKey(profileId, options.sshHostKey);
-    } catch {
-      // The connection is still usable; the next connect will ask again.
-    }
-  }
-  const current = { profileId, session };
+  const current = await sessionRegistry.open(profileId, options);
+  if (openSessions.get(profileId) !== current) throw Object.assign(new Error('Yêu cầu kết nối đã bị hủy.'), { code: 'SESSION_OPEN_CANCELED' });
   if (makeActive) activeSession = current;
-  openSessions.set(profileId, current);
-  while (openSessions.size > MAX_OPEN_SESSIONS) {
-    const oldestId = [...openSessions.keys()].find((id) => id !== activeSession?.profileId);
-    if (!oldestId) break;
-    await closeSession(oldestId);
-  }
   return current;
 }
 
@@ -464,16 +467,19 @@ async function withSessionFor(profileId, handler, { retry = false } = {}) {
 
 async function withSession(handler, { retry = false, profileId = null } = {}) {
   let current = await ensureSession(profileId);
+  let release = sessionRegistry.acquire(current);
   try {
     return await handler(current.session);
   } catch (error) {
     if (retry && isConnectionError(error)) {
       current.session.dead = true;
+      release();
       current = await openSession(current.profileId, activeSession === current);
-      return handler(current.session);
+      release = sessionRegistry.acquire(current);
+      return await handler(current.session);
     }
     throw error;
-  }
+  } finally { release(); }
 }
 
 ipcMain.handle('app:metadata', () => ({
@@ -633,14 +639,17 @@ handle('db:connect', async (profileId, options = {}) => {
   const cached = openSessions.get(profileId);
   let reused = Boolean(cached && !cached.session.dead && cached.session.connection && cached.databases);
   let current = await openSession(profileId, true, { sshHostKey });
+  let release = sessionRegistry.acquire(current);
   try {
     let databases = reused ? current.databases : null;
     try {
       if (!databases) databases = await current.session.listDatabases();
     } catch (error) {
       if (!isConnectionError(error)) throw error;
+      release();
       await closeSession(profileId);
       current = await openSession(profileId, true, { sshHostKey });
+      release = sessionRegistry.acquire(current);
       databases = await current.session.listDatabases();
       reused = false;
     }
@@ -655,7 +664,7 @@ handle('db:connect', async (profileId, options = {}) => {
   } catch (error) {
     await closeSession(profileId);
     throw error;
-  }
+  } finally { release(); }
 });
 
 handle('db:disconnect', async (profileId) => {
@@ -738,6 +747,11 @@ handle('db:table-data', (payload) => {
   return withSessionFor(payload.profileId, (session) => session.tableData(payload), { retry: true });
 });
 
+handle('db:table-count', (payload) => {
+  if (!payload || typeof payload.database !== 'string' || typeof payload.table !== 'string') throw new Error('Tham số không hợp lệ.');
+  return withSessionFor(payload.profileId, (session) => session.countTableRows(payload), { retry: true });
+});
+
 handle('db:query', (payload) => {
   if (!payload || typeof payload.sql !== 'string') throw new Error('Câu lệnh SQL không hợp lệ.');
   const database = typeof payload.database === 'string' && payload.database ? payload.database : null;
@@ -769,9 +783,7 @@ handle('db:cancel-task', (payload) => {
   if (!active || !profileId || active.profileId !== profileId || active.taskId !== taskId) {
     return { canceled: false, reason: 'not-running' };
   }
-  const current = openSessions.get(profileId);
-  if (!current) return { canceled: false, reason: 'no-session' };
-  const canceled = current.session.cancelTask(taskId);
+  const canceled = cancelDatabaseTransfer(active);
   return { canceled, reason: canceled ? 'canceled' : 'not-running' };
 });
 
@@ -847,7 +859,7 @@ handle('db:export-file', async (payload) => {
   let filePath = result.filePath;
   if (!filePath.toLowerCase().endsWith(extension)) filePath += extension;
   const taskId = typeof payload.taskId === 'string' && payload.taskId ? payload.taskId : null;
-  activeDatabaseTransfer = { taskId, profileId, operation: 'export', database: payload.database, table: payload.table };
+  claimDatabaseTransfer({ taskId, profileId, operation: 'export', database: payload.database, table: payload.table });
   try {
     const stats = await saveBackupFile(filePath, (write) =>
       withSessionFor(profileId, (session) => session.exportTableFile({
@@ -858,6 +870,8 @@ handle('db:export-file', async (payload) => {
         columns: payload.columns,
         filters: payload.filters,
         search: payload.search,
+        searchColumn: payload.searchColumn,
+        searchMode: payload.searchMode,
         orderBy: payload.orderBy,
         taskId
       }, write, (progress) => sendDbProgress({
@@ -878,6 +892,58 @@ handle('db:export-file', async (payload) => {
   }
 });
 
+handle('db:export-query', async (payload) => {
+  if (!payload || typeof payload !== 'object') throw new Error('Tham số không hợp lệ.');
+  if (typeof payload.sql !== 'string' || !payload.sql.trim()) throw new Error('Câu lệnh SQL không hợp lệ.');
+  if (typeof payload.taskId !== 'string' || !payload.taskId) throw new Error('Thiếu mã tác vụ xuất dữ liệu.');
+  const format = payload.format === 'json' ? 'json' : 'csv';
+  const extension = format === 'json' ? '.json' : '.csv';
+  const database = typeof payload.database === 'string' && payload.database ? payload.database : null;
+  const taskId = payload.taskId;
+  const transfer = claimDatabaseTransfer({ taskId, profileId: payload.profileId || activeSession?.profileId, operation: 'export', database, pending: true });
+  let filePath;
+  try {
+    const current = await ensureSession(payload.profileId);
+    const profileId = current.profileId;
+    transfer.profileId = profileId;
+    if (transfer.canceled) return { canceled: true };
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Xuất toàn bộ kết quả truy vấn',
+      defaultPath: `query-result${extension}`,
+      filters: [
+        format === 'json' ? { name: 'JSON', extensions: ['json'] } : { name: 'CSV', extensions: ['csv'] },
+        { name: 'Tất cả tệp', extensions: ['*'] }
+      ]
+    });
+    if (transfer.canceled) return { canceled: true };
+    if (result.canceled || !result.filePath) return { canceled: true, dialog: true };
+    filePath = result.filePath;
+    if (!filePath.toLowerCase().endsWith(extension)) filePath += extension;
+    const stats = await saveBackupFile(filePath, (write) =>
+      withSessionFor(profileId, async (session) => {
+        if (session.activeTask) throw new Error('Phiên kết nối đang chạy một tác vụ khác.');
+        transfer.session = session;
+        if (database) await session.useDatabase(database);
+        if (transfer.canceled) throw Object.assign(new Error('Đã hủy xuất dữ liệu.'), { code: 'EXPORT_CANCELED' });
+        transfer.pending = false;
+        return session.exportQueryFile({ sql: payload.sql, format, filePath, taskId }, write, (progress) => sendDbProgress({
+          ...progress,
+          taskId,
+          profileId,
+          database
+        }));
+      }));
+    return { canceled: false, filePath, ...stats };
+  } catch (error) {
+    if (error && error.code === 'EXPORT_CANCELED') {
+      return { canceled: true, filePath, ...(error.partial || {}) };
+    }
+    throw error;
+  } finally {
+    if (activeDatabaseTransfer === transfer) activeDatabaseTransfer = null;
+  }
+});
+
 handle('db:import-file', async (payload) => {
   if (activeDatabaseTransfer) throw new Error('Một tác vụ database đang chạy. Hãy đợi tác vụ hoàn tất.');
   if (!payload || typeof payload !== 'object') throw new Error('Tham số không hợp lệ.');
@@ -888,7 +954,7 @@ handle('db:import-file', async (payload) => {
   const profileId = current.profileId;
   const format = normalizeFileFormat(payload.format, payload.filePath);
   const taskId = typeof payload.taskId === 'string' && payload.taskId ? payload.taskId : null;
-  activeDatabaseTransfer = { taskId, profileId, operation: 'import', database: payload.database, table: payload.table };
+  claimDatabaseTransfer({ taskId, profileId, operation: 'import', database: payload.database, table: payload.table });
   try {
     const stats = await withSessionFor(profileId, (session) => session.importFile({
       database: payload.database,
@@ -936,20 +1002,25 @@ handle('db:backup', async (payload) => {
     taskId
   };
   if (!requested.includeStructure && !requested.includeData) throw new Error('Hãy chọn cấu trúc hoặc dữ liệu để sao lưu.');
-  const current = await ensureSession(payload.profileId);
-  const profileId = current.profileId;
-  const directory = backupDirectory(app.getPath('userData'), profileId, requested.database);
-  await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
-  const id = backupName();
-  const filePath = path.join(directory, id);
-  activeDatabaseTransfer = { taskId, profileId, operation: 'backup' };
+  const profileId = payload.profileId || activeSession?.profileId;
+  if (!profileId) throw new Error('Chưa chọn kết nối để sao lưu.');
+  const transfer = claimDatabaseTransfer({ taskId, profileId, operation: 'backup', pending: true });
+  let session;
   try {
-    const stats = await saveBackupFile(filePath, (write) =>
-      withSessionFor(profileId, (session) => session.backupDatabase(
-        requested,
-        write,
-        (progress) => sendDbProgress({ ...progress, taskId, profileId, database: requested.database })
-      )));
+    session = new DatabaseSession(runtimeProfile(store.getWithSecrets(profileId)));
+    transfer.session = session;
+    await session.connect();
+    if (transfer.canceled) return { canceled: true, id: null, filePath: null };
+    const directory = backupDirectory(app.getPath('userData'), profileId, requested.database);
+    await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
+    const id = backupName();
+    const filePath = path.join(directory, id);
+    const stats = await saveBackupFile(filePath, (write) => {
+      if (transfer.canceled) throw Object.assign(new Error('Đã hủy sao lưu.'), { code: 'BACKUP_CANCELED' });
+      transfer.pending = false;
+      return session.backupDatabase(requested, write,
+        (progress) => sendDbProgress({ ...progress, taskId, profileId, database: requested.database }));
+    });
     return { canceled: false, id, filePath, ...stats };
   } catch (error) {
     if (error && error.code === 'BACKUP_CANCELED') {
@@ -957,7 +1028,8 @@ handle('db:backup', async (payload) => {
     }
     throw error;
   } finally {
-    activeDatabaseTransfer = null;
+    try { await session?.close(); }
+    finally { if (activeDatabaseTransfer === transfer) activeDatabaseTransfer = null; }
   }
 });
 
@@ -1032,7 +1104,7 @@ handle('db:restore', async (payload) => {
   const filePath = savedFile || result.filePaths[0];
   const stat = await fs.promises.stat(filePath);
   if (!stat.isFile()) throw new Error('Đường dẫn phục hồi không phải là tệp.');
-  activeDatabaseTransfer = { taskId, profileId: targetSession.profileId, operation: 'restore' };
+  claimDatabaseTransfer({ taskId, profileId: targetSession.profileId, operation: 'restore' });
   try {
     const stats = await withSessionFor(targetSession.profileId, (session) => session.restoreDatabase({
       database: payload.database,
@@ -1090,8 +1162,7 @@ app.on('before-quit', (event) => {
   }
   isQuitting = true;
   sync.shutdown();
-  for (const current of openSessions.values()) current.session.close().catch(() => undefined);
-  openSessions.clear();
+  sessionRegistry.closeAll().catch(() => undefined);
   activeSession = null;
 });
 app.on('window-all-closed', () => {

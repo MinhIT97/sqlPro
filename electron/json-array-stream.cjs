@@ -1,7 +1,107 @@
 'use strict';
 
+const NUMBER_TOKEN = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+const jsonNumbers = new WeakSet();
+
+class JsonNumber {
+  constructor(raw) {
+    this.raw = String(raw);
+    jsonNumbers.add(this);
+  }
+
+  toString() {
+    return this.raw;
+  }
+}
+
+function isJsonNumber(value) {
+  return value !== null && typeof value === 'object' && jsonNumbers.has(value);
+}
+
+function quoteNumberTokens(text, marker) {
+  const numbers = [];
+  let output = '';
+  let inString = false;
+  let escaped = false;
+  let index = 0;
+  while (index < text.length) {
+    const character = text[index];
+    if (inString) {
+      output += character;
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      index += 1;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      output += character;
+      index += 1;
+      continue;
+    }
+    if (character === '-' || (character >= '0' && character <= '9')) {
+      NUMBER_TOKEN.lastIndex = index;
+      const match = NUMBER_TOKEN.exec(text);
+      if (match) {
+        numbers.push(match[0]);
+        output += JSON.stringify(`${marker}${numbers.length - 1}`);
+        index = NUMBER_TOKEN.lastIndex;
+        continue;
+      }
+    }
+    output += character;
+    index += 1;
+  }
+  return { text: output, numbers };
+}
+
+function replaceNumberPlaceholders(value, marker, numbers) {
+  if (typeof value === 'string') {
+    if (value.startsWith(marker)) {
+      const index = Number(value.slice(marker.length));
+      if (Number.isInteger(index) && index >= 0 && index < numbers.length) {
+        return new JsonNumber(numbers[index]);
+      }
+    }
+    return value;
+  }
+  if (Array.isArray(value)) return value.map((entry) => replaceNumberPlaceholders(entry, marker, numbers));
+  if (value && typeof value === 'object') {
+    const result = {};
+    for (const [key, entry] of Object.entries(value)) {
+      Object.defineProperty(result, key, {
+        value: replaceNumberPlaceholders(entry, marker, numbers),
+        enumerable: true, writable: true, configurable: true
+      });
+    }
+    return result;
+  }
+  return value;
+}
+
+function parseWithNumberTokens(text, marker) {
+  const quoted = quoteNumberTokens(text, marker);
+  const parsed = JSON.parse(quoted.text);
+  return replaceNumberPlaceholders(parsed, marker, quoted.numbers);
+}
+
+function stringifyJsonValue(value) {
+  if (isJsonNumber(value)) return value.raw;
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return `[${value.map(stringifyJsonValue).join(',')}]`;
+  if (typeof value === 'object') {
+    return `{${Object.entries(value)
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stringifyJsonValue(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 class JsonArrayStreamParser {
-  constructor() {
+  constructor(options = {}) {
+    this.preserveNumbers = options.preserveNumbers === true;
+    this.numberMarker = `\u0000sqlpro-json-number-${Math.random().toString(36).slice(2)}-`;
     this.state = 'before';
     this.buffer = '';
     this.elements = [];
@@ -145,7 +245,9 @@ class JsonArrayStreamParser {
     if (!text) return;
     let value;
     try {
-      value = JSON.parse(text);
+      value = this.preserveNumbers
+        ? parseWithNumberTokens(text, this.numberMarker)
+        : JSON.parse(text);
     } catch {
       throw new Error(`JSON không hợp lệ ở phần tử ${this.elements.length + 1} (dòng ${this.line}).`);
     }
@@ -161,4 +263,4 @@ class JsonArrayStreamParser {
   }
 }
 
-module.exports = { JsonArrayStreamParser };
+module.exports = { JsonArrayStreamParser, JsonNumber, isJsonNumber, stringifyJsonValue };

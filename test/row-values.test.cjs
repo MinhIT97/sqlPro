@@ -92,6 +92,8 @@ test('text length counts Unicode characters and YEAR retains its special zero va
 test('desktop packaging includes the shared editor module before the renderer', () => {
   const config = require('../package.json');
   assert.ok(config.build.files.includes('row-values.js'));
+  assert.ok(config.build.files.includes('query-results.js'));
   const html = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
   assert.ok(html.indexOf('src="row-values.js"') < html.indexOf('src="app.js"'));
+  assert.ok(html.indexOf('src="query-results.js"') < html.indexOf('src="app.js"'));
 });

@@ -53,7 +53,9 @@
       event.preventDefault();
       view('query').then(() => document.querySelector('#sql')?.focus());
     }
-    if (event.key === 'Escape' && document.querySelector('#modal')?.open) closeModal();
+    if (event.key === 'Escape' && document.querySelector('#modal')?.open
+      && !document.querySelector('.confirmation-dialog[open]')
+      && !document.querySelector('#modal [data-transfer-running]')) closeModal();
   });
 
   window.addEventListener('beforeunload', () => {

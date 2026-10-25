@@ -36,6 +36,19 @@ test('binary and BIT updates bind bytes, including binary primary keys', async (
   assert.deepEqual(requests[1].params, [Buffer.from('00', 'hex'), Buffer.from('00ff', 'hex')]);
 });
 
+test('deleting rows binds binary and BIT primary keys as bytes', async () => {
+  const { session, requests } = setup([column('id', 'binary(2)', { key: 'PRI' }), column('flags', 'bit(4)', { key: 'PRI' })]);
+  await session.deleteRows({
+    database: 'demo',
+    table: 'items',
+    keysList: [{ id: '0x00ff', flags: '1010' }, { id: Buffer.from('abcd', 'hex'), flags: '0001' }]
+  });
+  assert.deepEqual(requests[0].params, [
+    Buffer.from('00ff', 'hex'), Buffer.from('0a', 'hex'),
+    Buffer.from('abcd', 'hex'), Buffer.from('01', 'hex')
+  ]);
+});
+
 test('insert honors omitted defaults and preserves empty/literal NULL/JSON values', async () => {
   const { session, requests } = setup([column('empty', 'varchar(20)'), column('literal', 'varchar(20)'), column('nullable', 'int'), column('json', 'json'), column('generated', 'int', { extra: 'STORED GENERATED' })]);
   await session.insertRow({ database: 'demo', table: 'items', values: { empty: '', literal: 'NULL', nullable: null, json: '{"n":18446744073709551615}', generated: 1 } });

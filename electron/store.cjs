@@ -20,19 +20,73 @@ function keyPath() {
   return path.join(app.getPath('userData'), '.connections-key');
 }
 
-function readStore() {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(storePath(), 'utf8'));
-    const needsMigration = parsed.version !== STORE_VERSION
-      || !Array.isArray(parsed.workspaces)
-      || !Array.isArray(parsed.tombstones)
-      || (Array.isArray(parsed.connections) && parsed.connections.some((entry) => !entry.workspaceId));
-    const normalized = normalizeStore(parsed);
-    if (needsMigration) writeStore(normalized);
-    return normalized;
-  } catch {
-    return normalizeStore({});
+function readStoreError(message, cause) {
+  const error = new Error(message);
+  error.code = 'STORE_READ_FAILED';
+  if (cause && cause.code) error.causeCode = String(cause.code);
+  return error;
+}
+
+function validateStoredShape(parsed) {
+  const invalid = () => { throw readStoreError('Tệp cấu hình kết nối không đúng cấu trúc hoặc phiên bản chưa được hỗ trợ. Dữ liệu hiện có được giữ nguyên.'); };
+  const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+  if (!object(parsed)) invalid();
+  if (parsed.version !== undefined && ![1, STORE_VERSION].includes(parsed.version)) invalid();
+  if (!Array.isArray(parsed.connections)) invalid();
+  const unique = (entries, valid, key) => {
+    const seen = new Set();
+    for (const entry of entries) {
+      if (!valid(entry)) invalid();
+      const id = key(entry);
+      if (seen.has(id)) invalid();
+      seen.add(id);
+    }
+  };
+  unique(parsed.connections, (entry) => object(entry) && typeof entry.id === 'string' && Boolean(entry.id)
+    && (entry.workspaceId === undefined || (typeof entry.workspaceId === 'string' && Boolean(entry.workspaceId))), (entry) => entry.id);
+  for (const name of ['workspaces', 'tombstones']) {
+    if (parsed[name] !== undefined && !Array.isArray(parsed[name])) invalid();
+    if (parsed.version === STORE_VERSION && parsed[name] === undefined) invalid();
   }
+  unique(parsed.workspaces || [], (entry) => object(entry) && typeof entry.id === 'string'
+    && /^[A-Za-z0-9_-]{1,80}$/.test(entry.id), (entry) => entry.id);
+  unique(parsed.tombstones || [], (entry) => object(entry) && ['connection', 'workspace'].includes(entry.type)
+    && typeof entry.id === 'string' && /^[^\s]{1,120}$/.test(entry.id), (entry) => `${entry.type}:${entry.id}`);
+  if (parsed.meta !== undefined && !object(parsed.meta)) invalid();
+  if (parsed.workspaces) {
+    const ids = new Set([DEFAULT_WORKSPACE_ID, ...parsed.workspaces.map((entry) => entry.id)]);
+    if (parsed.connections.some((entry) => entry.workspaceId && !ids.has(entry.workspaceId))) invalid();
+  }
+}
+
+function readStore() {
+  let source;
+  try {
+    source = fs.readFileSync(storePath(), 'utf8');
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return normalizeStore({});
+    throw readStoreError(
+      'Không đọc được tệp cấu hình kết nối. Dữ liệu hiện có được giữ nguyên để tránh ghi đè.',
+      error
+    );
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(source);
+  } catch (error) {
+    throw readStoreError(
+      'Tệp cấu hình kết nối bị hỏng nên không thể đọc. Dữ liệu hiện có được giữ nguyên để tránh ghi đè.',
+      error
+    );
+  }
+  validateStoredShape(parsed);
+  const needsMigration = parsed.version !== STORE_VERSION
+    || !Array.isArray(parsed.workspaces)
+    || !Array.isArray(parsed.tombstones)
+    || (Array.isArray(parsed.connections) && parsed.connections.some((entry) => !entry.workspaceId));
+  const normalized = normalizeStore(parsed);
+  if (needsMigration) writeStore(normalized);
+  return normalized;
 }
 
 function writeStore(store) {

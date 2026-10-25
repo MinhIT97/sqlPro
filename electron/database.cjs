@@ -7,11 +7,16 @@ const mysql = require('mysql2');
 const { Client: SshClient } = require('ssh2');
 const { SqlScriptParser, splitSqlStatements, stripLeadingComments, createTarget, skipReason } = require('./sql-script.cjs');
 const { CsvStreamParser } = require('./csv-stream.cjs');
-const { JsonArrayStreamParser } = require('./json-array-stream.cjs');
+const { JsonArrayStreamParser, isJsonNumber, stringifyJsonValue } = require('./json-array-stream.cjs');
 const RowValues = require('../row-values.js');
+const ExportValues = require('../export-values.js');
+const { ResultBudget } = require('./result-budget.cjs');
+const { TableDataService } = require('./table-data.cjs');
 
 const MAX_QUERY_ROWS = 5000;
 const MAX_QUERY_BATCH_ROWS = 10000;
+const MAX_QUERY_BYTES = 8 * 1024 * 1024;
+const MAX_QUERY_BATCH_BYTES = 16 * 1024 * 1024;
 const MAX_QUERY_STATEMENTS = 100;
 const MAX_PAGE_SIZE = 500;
 const BACKUP_INSERT_ROWS = 200;
@@ -112,6 +117,13 @@ function coerceValue(value, column) {
   return normalized;
 }
 
+function rowKeyParameter(value, column) {
+  if (Buffer.isBuffer(value)) return value;
+  const kind = RowValues.describe(column).kind;
+  if (kind !== 'binary' && kind !== 'bit') return value;
+  return coerceValue(RowValues.displayValue(column, value), column);
+}
+
 function normalizeFileFormat(format, filePath) {
   const value = String(format || '').toLowerCase();
   if (IMPORT_FORMATS.has(value)) return value;
@@ -127,16 +139,6 @@ function normalizeDelimiter(format, delimiter) {
   const value = delimiter === undefined || delimiter === null || delimiter === '' ? ',' : String(delimiter);
   if (value.length !== 1) throw fail('Dấu phân cách phải là đúng một ký tự.', 'INVALID_DELIMITER');
   return value;
-}
-
-function csvField(value, delimiter) {
-  if (value === null || value === undefined) return '\\N';
-  let text = String(value);
-  if (text === '\\N') text = '\\\\N';
-  if (text.includes('"') || text.includes(delimiter) || /[\r\n]/.test(text) || /^\s|\s$/.test(text)) {
-    return `"${text.replace(/"/g, '""')}"`;
-  }
-  return text;
 }
 
 function exportTextValue(value) {
@@ -184,7 +186,7 @@ function resolveFileColumns(columns, requested) {
   return selected;
 }
 
-function buildFileWhere(filters, columns, search = '') {
+function buildFileWhere(filters, columns, search = '', { searchColumn, searchMode } = {}) {
   const filterParts = [];
   const searchParts = [];
   const params = [];
@@ -230,9 +232,11 @@ function buildFileWhere(filters, columns, search = '') {
   }
   const term = String(search || '').trim().slice(0, 200);
   if (term) {
-    for (const column of columns) {
-      searchParts.push(`CAST(${quoteId(column.name)} AS CHAR) LIKE ?`);
-      params.push(`%${term}%`);
+    const selected = searchColumn ? columns.filter((column) => column.name === searchColumn) : columns;
+    if (!selected.length) throw fail('Cột tìm kiếm không hợp lệ.', 'COLUMN_NOT_FOUND');
+    for (const column of selected) {
+      searchParts.push(searchMode === 'exact' ? `${searchColumn ? quoteId(column.name) : `CAST(${quoteId(column.name)} AS CHAR)`} = ?` : `CAST(${quoteId(column.name)} AS CHAR) LIKE ?`);
+      params.push(searchMode === 'exact' ? (searchColumn ? coerceValue(term, column) : term) : `%${term}%`);
     }
   }
   let sql = '';
@@ -278,14 +282,6 @@ function isJsonColumn(type) {
   return /^json\b/i.test(type);
 }
 
-function isIntegerColumn(type) {
-  return /^(tinyint|smallint|mediumint|int|integer|bigint)\b/i.test(type);
-}
-
-function isDecimalColumn(type) {
-  return /^(decimal|numeric|float|double|real)\b/i.test(type);
-}
-
 function importValueError(rowNumber, column, message) {
   const error = fail(`Dòng ${rowNumber}, cột "${column.name}": ${message}`, 'IMPORT_VALUE_INVALID');
   error.row = rowNumber;
@@ -299,6 +295,7 @@ function validateImportValue(raw, column, rowNumber, nullSentinel) {
     if (value === '\\N') value = null;
     else if (value === '\\\\N') value = '\\N';
   }
+  if (isJsonNumber(value)) value = value.raw;
   if (value === undefined || value === null) {
     if (column.nullable !== 'YES' && !/auto_increment/i.test(column.extra)) {
       throw importValueError(rowNumber, column, 'không cho phép NULL.');
@@ -322,7 +319,7 @@ function validateImportValue(raw, column, rowNumber, nullSentinel) {
     }
     if (typeof value === 'object') {
       try {
-        return JSON.stringify(value);
+        return stringifyJsonValue(value);
       } catch {
         throw importValueError(rowNumber, column, 'không thể chuyển thành JSON.');
       }
@@ -335,56 +332,24 @@ function validateImportValue(raw, column, rowNumber, nullSentinel) {
       if (match[1].length % 2 !== 0) throw importValueError(rowNumber, column, 'dữ liệu hex có số ký tự lẻ.');
       return Buffer.from(match[1], 'hex');
     }
-  }
-  if (isNumericType(column.type)) {
-    if (typeof value === 'boolean') return value ? 1 : 0;
-    if (typeof value === 'bigint') return value.toString();
-    if (typeof value === 'object') throw importValueError(rowNumber, column, 'phải là số.');
-    const text = String(value).trim();
-    if (!text) {
-      if (column.nullable === 'YES') return null;
-      throw importValueError(rowNumber, column, 'không được để trống.');
-    }
-    if (/^bit\b/i.test(column.type)) {
-      if (!/^[01]+$/.test(text)) throw importValueError(rowNumber, column, 'phải là chuỗi bit 0/1.');
-      return text;
-    }
-    if (isIntegerColumn(column.type)) {
-      if (!/^[+-]?\d+$/.test(text)) throw importValueError(rowNumber, column, 'phải là số nguyên.');
-      return text;
-    }
-    if (isDecimalColumn(column.type)) {
-      if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(text)) {
-        throw importValueError(rowNumber, column, 'phải là số hợp lệ.');
-      }
-      return text;
-    }
-    if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(text)) {
-      throw importValueError(rowNumber, column, 'phải là số hợp lệ.');
-    }
-    return text;
-  }
-  if (isDateType(column.type)) {
-    if (value instanceof Date) {
-      if (Number.isNaN(value.getTime())) throw importValueError(rowNumber, column, 'ngày giờ không hợp lệ.');
-      return value;
-    }
-    if (typeof value === 'object') throw importValueError(rowNumber, column, 'phải là ngày giờ dạng chuỗi.');
-    const text = String(value).trim();
-    if (!text) {
-      if (column.nullable === 'YES') return null;
-      throw importValueError(rowNumber, column, 'không được để trống.');
-    }
-    let pattern;
-    if (/^date\b/i.test(column.type)) pattern = /^\d{4}-\d{2}-\d{2}$/;
-    else if (/^time\b/i.test(column.type)) pattern = /^-?\d{1,3}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?$/;
-    else if (/^year\b/i.test(column.type)) pattern = /^\d{4}$/;
-    else pattern = /^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?)?$/;
-    if (!pattern.test(text)) throw importValueError(rowNumber, column, 'không đúng định dạng ngày giờ.');
-    return text;
+    return value;
   }
   if (typeof value === 'object') throw importValueError(rowNumber, column, 'không hỗ trợ giá trị object.');
-  return String(value);
+  if (typeof value === 'boolean' && isNumericType(column.type)) return value ? 1 : 0;
+  const text = typeof value === 'string' ? value : String(value);
+  if (!text.trim() && (isNumericType(column.type) || isDateType(column.type))) {
+    if (column.nullable === 'YES') return null;
+    throw importValueError(rowNumber, column, 'không được để trống.');
+  }
+  try {
+    return coerceValue(text, column);
+  } catch (error) {
+    if (error && error.code === 'ROW_VALUE_INVALID') {
+      const message = String(error.message || '').replace(/^Cột "[^"]*":\s*/, '');
+      throw importValueError(rowNumber, column, message);
+    }
+    throw error;
+  }
 }
 
 function resolveImportTargets(columns, headers, mapping) {
@@ -443,7 +408,7 @@ function assertUniqueHeaders(headers) {
 
 async function* readImportFile({ filePath, format, delimiter, hasHeader }, onBytes) {
   const parser = format === 'json'
-    ? new JsonArrayStreamParser()
+    ? new JsonArrayStreamParser({ preserveNumbers: true })
     : new CsvStreamParser({ delimiter });
   const stream = fs.createReadStream(filePath, { encoding: 'utf8', highWaterMark: 64 * 1024 });
   let first = true;
@@ -451,7 +416,7 @@ async function* readImportFile({ filePath, format, delimiter, hasHeader }, onByt
   let rowNumber = 0;
   const consume = function* (entry) {
     if (format === 'json') {
-      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || isJsonNumber(entry)) {
         throw fail('Mỗi phần tử JSON phải là một object.', 'INVALID_JSON_ROW');
       }
       rowNumber += 1;
@@ -489,6 +454,15 @@ async function* readImportFile({ filePath, format, delimiter, hasHeader }, onByt
   }
 }
 
+function previewImportValue(value) {
+  if (isJsonNumber(value)) {
+    const numeric = Number(value.raw);
+    return Number.isFinite(numeric) && String(numeric) === value.raw ? numeric : value.raw;
+  }
+  if (value && typeof value === 'object') return stringifyJsonValue(value);
+  return value;
+}
+
 async function previewImportFile(options) {
   const settings = options && typeof options === 'object' ? options : {};
   if (typeof settings.filePath !== 'string' || !settings.filePath) {
@@ -500,7 +474,9 @@ async function previewImportFile(options) {
   const delimiter = normalizeDelimiter(format, settings.delimiter);
   const hasHeader = settings.hasHeader !== false;
   const limit = Math.min(PREVIEW_MAX_ROWS, Math.max(1, Number(settings.limit) || PREVIEW_ROW_LIMIT));
-  const parser = format === 'json' ? new JsonArrayStreamParser() : new CsvStreamParser({ delimiter });
+  const parser = format === 'json'
+    ? new JsonArrayStreamParser({ preserveNumbers: true })
+    : new CsvStreamParser({ delimiter });
   const stream = fs.createReadStream(settings.filePath, { encoding: 'utf8', highWaterMark: 64 * 1024 });
   let bytes = 0;
   let headers = null;
@@ -515,7 +491,7 @@ async function previewImportFile(options) {
   };
   const consume = (entry) => {
     if (format === 'json') {
-      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || isJsonNumber(entry)) {
         throw fail('Mỗi phần tử JSON phải là một object.', 'INVALID_JSON_ROW');
       }
       if (!headers) headers = [];
@@ -525,7 +501,7 @@ async function previewImportFile(options) {
         done = true;
         return;
       }
-      rows.push(headers.map((key) => (entry[key] === undefined ? null : entry[key])));
+      rows.push(headers.map((key) => (entry[key] === undefined ? null : previewImportValue(entry[key]))));
       return;
     }
     if (first) {
@@ -705,13 +681,20 @@ function verifySshHostKey(known, host, port, key) {
 class DatabaseSession {
   constructor(profile) {
     this.profile = profile;
+    this.database = profile.database || null;
     this.connection = null;
     this.ssh = null;
     this.dead = false;
     this.version = null;
     this.cancelQuery = null;
     this.activeTask = null;
+    this.inTransaction = false;
+    this.autocommit = true;
     this.metadata = new Map();
+    this.tableDataService = new TableDataService({
+      columns: (...args) => this.listColumns(...args), raw: (...args) => this.raw(...args),
+      quoteId, tableRef, serializeRow, keyParameter: rowKeyParameter, searchParameter: coerceValue
+    });
   }
 
   setActiveTask(taskId, cancel) {
@@ -900,15 +883,21 @@ class DatabaseSession {
     this.dead = true;
     if (connection) {
       await new Promise((resolve) => {
-        const timer = setTimeout(resolve, 1000);
+        let finished = false;
+        const finish = (force = false) => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timer);
+          if (force) { try { connection.destroy(); } catch { /* Already closed. */ } }
+          resolve();
+        };
+        const timer = setTimeout(() => finish(true), 1000);
         try {
           connection.end(() => {
-            clearTimeout(timer);
-            resolve();
+            finish();
           });
         } catch {
-          clearTimeout(timer);
-          resolve();
+          finish(true);
         }
       });
     }
@@ -919,6 +908,12 @@ class DatabaseSession {
     if (!this.connection || this.dead) throw fail('Phiên kết nối đã đóng. Hãy kết nối lại.', 'SESSION_CLOSED');
   }
 
+  updateServerStatus(result) {
+    if (!Number.isInteger(result?.serverStatus)) return;
+    this.inTransaction = Boolean(result.serverStatus & 1);
+    this.autocommit = Boolean(result.serverStatus & 2);
+  }
+
   raw(sql, params = []) {
     this.ensureOpen();
     return new Promise((resolve, reject) => {
@@ -927,6 +922,8 @@ class DatabaseSession {
           reject(error);
           return;
         }
+        this.updateServerStatus(result);
+        if (/^(INSERT|UPDATE|DELETE|REPLACE|TRUNCATE|ALTER|DROP|CREATE|RENAME)$/.test(statementCommand(sql))) this.tableDataService.invalidate();
         resolve({ result, fields, rows: Array.isArray(result) ? result : [] });
       });
     });
@@ -944,6 +941,7 @@ class DatabaseSession {
   async useDatabase(database) {
     if (typeof database !== 'string' || !database) throw fail('Database không hợp lệ.', 'INVALID_DATABASE');
     await this.raw(`USE ${quoteId(database)}`);
+    this.database = database;
     return { database };
   }
 
@@ -1130,55 +1128,26 @@ class DatabaseSession {
     return columns.filter((column) => column.key === 'PRI').map((column) => column.name);
   }
 
-  async tableData({ database, table, page = 1, pageSize = 100, search = '', orderBy = null, orderDir = 'ASC' }) {
-    const columns = await this.listColumns(database, table);
-    if (!columns.length) throw fail(`Không tìm thấy bảng ${table}.`, 'TABLE_NOT_FOUND');
-    const safePage = Math.max(1, Math.min(1000000, Number(page) || 1));
-    const safePageSize = Math.max(1, Math.min(MAX_PAGE_SIZE, Number(pageSize) || 100));
-    const columnNames = new Set(columns.map((column) => column.name));
-    const conditions = [];
-    const params = [];
-    const term = String(search || '').trim().slice(0, 200);
-    if (term) {
-      for (const column of columns) {
-        conditions.push(`CAST(${quoteId(column.name)} AS CHAR) LIKE ?`);
-        params.push(`%${term}%`);
-      }
-    }
-    const where = conditions.length ? `WHERE ${conditions.join(' OR ')}` : '';
-    let order = '';
-    if (orderBy && columnNames.has(orderBy)) {
-      order = `ORDER BY ${quoteId(orderBy)} ${String(orderDir).toUpperCase() === 'DESC' ? 'DESC' : 'ASC'}`;
-    } else {
-      const pk = columns.filter((column) => column.key === 'PRI').map((column) => column.name);
-      if (pk.length === 1) order = `ORDER BY ${quoteId(pk[0])} ASC`;
-    }
-    let total = null;
-    try {
-      const count = await this.raw(
-        `SELECT /*+ MAX_EXECUTION_TIME(3000) */ COUNT(*) AS total FROM ${tableRef(database, table)} ${where}`,
-        params
-      );
-      total = Number(count.rows[0]?.total ?? 0);
-    } catch {
-      total = null;
-    }
-    const offset = (safePage - 1) * safePageSize;
-    const { result } = await this.raw(
-      `SELECT * FROM ${tableRef(database, table)} ${where} ${order} LIMIT ? OFFSET ?`,
-      [...params, safePageSize, offset]
-    );
-    return {
-      columns,
-      primaryKey: columns.filter((column) => column.key === 'PRI').map((column) => column.name),
-      rows: result.map(serializeRow),
-      total,
-      page: safePage,
-      pageSize: safePageSize
-    };
+  tableData(options) {
+    return this.tableDataService.read(options);
   }
 
-  async runQuery(sql, timeoutMs = 30000, rowLimit = MAX_QUERY_ROWS) {
+  countTableRows(options) {
+    return this.tableDataService.count(options);
+  }
+
+  async interruptRead(connection) {
+    if (!Number.isInteger(connection.threadId) || connection.threadId <= 0) return false;
+    const control = new DatabaseSession({ ...this.profile, database: null });
+    try {
+      await control.connect();
+      if (this.dead || this.connection !== connection) return false;
+      await control.raw(`KILL QUERY ${connection.threadId}`);
+      return true;
+    } finally { await control.close(); }
+  }
+
+  async runQuery(sql, timeoutMs = 30000, rowLimit = MAX_QUERY_ROWS, byteLimit = MAX_QUERY_BYTES) {
     this.ensureOpen();
     const statement = String(sql || '').trim();
     if (!statement) throw fail('Câu lệnh SQL đang trống.', 'EMPTY_QUERY');
@@ -1220,6 +1189,8 @@ class DatabaseSession {
             return;
           }
           this.metadata.clear();
+          this.tableDataService.invalidate();
+          this.updateServerStatus(result);
           finish(resolve, {
             kind: 'ok',
             affectedRows: result?.affectedRows ?? 0,
@@ -1235,8 +1206,11 @@ class DatabaseSession {
       const connection = this.connection;
       let settled = false;
       let columns = [];
-      const rows = [];
+      const budget = new ResultBudget({ rows: Math.max(0, Math.min(MAX_QUERY_ROWS, Number(rowLimit) || 0)), bytes: Math.max(0, Math.min(MAX_QUERY_BYTES, Number(byteLimit) || 0)) });
+      const rows = budget.rows;
       let truncated = false;
+      let stopping = null;
+      let stoppedEarly = false;
       const finish = (fn, value) => {
         if (settled) return;
         settled = true;
@@ -1262,7 +1236,8 @@ class DatabaseSession {
       };
       let query;
       try {
-        query = connection.query({ sql: statement, rowsAsArray: true });
+        // Static array parsing also accepts column aliases such as __proto__.
+        query = connection.query({ sql: statement, rowsAsArray: true, disableEval: true });
       } catch (error) {
         finish(reject, error);
         return;
@@ -1278,26 +1253,31 @@ class DatabaseSession {
           type: TYPE_NAMES[field.columnType] || String(field.columnType)
         }));
       });
-      const safeRowLimit = Math.max(0, Math.min(MAX_QUERY_ROWS, Number(rowLimit) || 0));
+      const complete = () => {
+        const done = () => finish(resolve, {
+          kind: 'rows', columns, rows, truncated, bytes: budget.bytes,
+          truncationReason: budget.reason, stoppedEarly, durationMs: Date.now() - startedAt
+        });
+        if (stopping) stopping.then(done);
+        else done();
+      };
       query.on('result', (row) => {
         if (settled) return;
-        if (rows.length >= safeRowLimit) {
-          truncated = true;
-          return;
-        }
+        if (truncated) return;
         const values = Array.isArray(row) ? row : Object.values(row || {});
-        rows.push(values.map(serializeValue));
+        if (budget.add(values.map(serializeValue))) return;
+        truncated = true;
+        if (Number.isInteger(connection.threadId) && connection.pause && connection.resume) {
+          connection.pause();
+          stopping = this.interruptRead(connection).then((stopped) => { stoppedEarly = stopped; }, () => {})
+            .finally(() => { if (!settled && !this.dead) connection.resume(); });
+        }
       });
-      query.on('error', (error) => finish(reject, error));
-      query.on('end', () => {
-        finish(resolve, {
-          kind: 'rows',
-          columns,
-          rows,
-          truncated,
-          durationMs: Date.now() - startedAt
-        });
+      query.on('error', (error) => {
+        if (stopping && error.code === 'ER_QUERY_INTERRUPTED') complete();
+        else finish(reject, error);
       });
+      query.on('end', complete);
     });
   }
 
@@ -1338,6 +1318,7 @@ class DatabaseSession {
           try {
             const current = await this.raw('SELECT DATABASE() AS value');
             result.activeDatabase = current.rows[0]?.value || null;
+            this.database = result.activeDatabase;
           } catch {
             // Preserve the successful USE result if metadata cannot be read.
           }
@@ -1349,19 +1330,31 @@ class DatabaseSession {
       const deadline = startedAt + Math.max(1, Number(timeoutMs) || 30000);
       const results = [];
       let storedRows = 0;
+      let storedBytes = 0;
       for (let index = 0; index < statements.length; index += 1) {
         if (task.canceled) break;
         const statement = statements[index];
+        const database = this.database;
         try {
           const remainingMs = deadline - Date.now();
           if (remainingMs <= 0) throw fail('Truy vấn quá thời gian cho phép.', 'QUERY_TIMEOUT');
           const result = await this.runQuery(
             statement,
             remainingMs,
-            Math.max(0, MAX_QUERY_BATCH_ROWS - storedRows)
+            Math.max(0, MAX_QUERY_BATCH_ROWS - storedRows),
+            Math.max(0, MAX_QUERY_BATCH_BYTES - storedBytes)
           );
           if (result.kind === 'rows') storedRows += result.rows.length;
-          results.push({ index: index + 1, sql: statement, ok: true, result });
+          if (result.kind === 'rows') storedBytes += result.bytes || 0;
+          results.push({ index: index + 1, sql: statement, database, ok: true, result });
+          if (statementCommand(statement) === 'USE') {
+            try {
+              const current = await this.raw('SELECT DATABASE() AS value');
+              this.database = current.rows[0]?.value || null;
+            } catch {
+              this.database = null;
+            }
+          }
         } catch (error) {
           results.push({ index: index + 1, sql: statement, ok: false, error: queryError(error) });
           break;
@@ -1434,12 +1427,7 @@ class DatabaseSession {
     const whereSql = pkColumns.map((name) => `${quoteId(name)} <=> ?`).join(' AND ');
     const params = [
       ...changes.map(([name, value]) => coerceValue(value, byName.get(name))),
-      ...pkColumns.map((name) => {
-        const column = byName.get(name);
-        const kind = RowValues.describe(column).kind;
-        return kind === 'binary' || kind === 'bit'
-          ? coerceValue(Buffer.isBuffer(keys[name]) ? keys[name] : RowValues.displayValue(column, keys[name]), column) : keys[name];
-      })
+      ...pkColumns.map((name) => rowKeyParameter(keys[name], byName.get(name)))
     ];
     const { result } = await this.raw(
       `UPDATE ${tableRef(database, table)} SET ${setSql} WHERE ${whereSql} LIMIT 1`,
@@ -1452,6 +1440,7 @@ class DatabaseSession {
     if (!Array.isArray(keysList) || !keysList.length) throw fail('Chưa chọn bản ghi cần xóa.', 'NO_ROWS');
     if (keysList.length > 1000) throw fail('Chỉ có thể xóa tối đa 1000 bản ghi mỗi lần.', 'TOO_MANY_ROWS');
     const columns = await this.listColumns(database, table);
+    const byName = new Map(columns.map((column) => [column.name, column]));
     const pkColumns = columns.filter((column) => column.key === 'PRI').map((column) => column.name);
     if (!pkColumns.length) throw fail('Bảng không có khóa chính nên không thể xóa trực tiếp.', 'NO_PRIMARY_KEY');
     const groups = [];
@@ -1459,7 +1448,7 @@ class DatabaseSession {
     for (const keys of keysList) {
       if (!keys || pkColumns.some((name) => !(name in keys))) continue;
       groups.push(`(${pkColumns.map((name) => `${quoteId(name)} <=> ?`).join(' AND ')})`);
-      for (const name of pkColumns) params.push(keys[name]);
+      for (const name of pkColumns) params.push(rowKeyParameter(keys[name], byName.get(name)));
     }
     if (!groups.length) throw fail('Không xác định được khóa chính của bản ghi.', 'MISSING_PRIMARY_KEY');
     const { result } = await this.raw(
@@ -1523,6 +1512,7 @@ class DatabaseSession {
       const size = Buffer.byteLength(chunk);
       await write(chunk);
       bytes += size;
+      throwIfCanceled();
     };
     const emit = async (text) => {
       throwIfCanceled();
@@ -1534,17 +1524,17 @@ class DatabaseSession {
       const available = await this.listColumns(database, table);
       if (!available.length) throw fail(`Không tìm thấy cột của bảng "${table}".`, 'TABLE_NOT_FOUND');
       selected = resolveFileColumns(available, settings.columns);
-      const where = buildFileWhere(settings.filters, available, settings.search);
+      const where = buildFileWhere(settings.filters, available, settings.search, settings);
       const order = buildFileOrder(settings.orderBy, available);
       const names = selected.map((column) => quoteId(column.name));
       const sql = `SELECT ${names.join(', ')} FROM ${tableRef(database, table)}${where.sql}${order}`;
       if (format === 'json') {
         await emit('[\n');
       } else {
-        await emit(`${selected.map((column) => csvField(column.name, delimiter)).join(delimiter)}\n`);
+        await emit(`${selected.map((column) => ExportValues.csvField(column.name, delimiter)).join(delimiter)}\n`);
       }
       throwIfCanceled();
-      const query = this.connection.query({ sql, values: where.params, rowsAsArray: true });
+      const query = this.connection.query({ sql, values: where.params, rowsAsArray: true, disableEval: true });
       let firstRow = true;
       try {
         for await (const row of query.stream()) {
@@ -1554,7 +1544,7 @@ class DatabaseSession {
             await emit(`${firstRow ? '' : ',\n'}{${fields.join(',')}}`);
             firstRow = false;
           } else {
-            await emit(`${selected.map((_column, index) => csvField(exportTextValue(row[index]), delimiter)).join(delimiter)}\n`);
+            await emit(`${selected.map((_column, index) => ExportValues.csvField(exportTextValue(row[index]), delimiter)).join(delimiter)}\n`);
           }
           rows += 1;
           report();
@@ -1574,6 +1564,142 @@ class DatabaseSession {
         rows,
         bytes,
         columns: selected.map((column) => column.name),
+        durationMs: Date.now() - startedAt
+      };
+    } catch (error) {
+      if (task.canceled && (!error || error.code !== 'EXPORT_CANCELED')) {
+        const canceled = fail('Đã hủy xuất dữ liệu.', 'EXPORT_CANCELED');
+        canceled.partial = partialState();
+        throw canceled;
+      }
+      throw error;
+    } finally {
+      this.clearActiveTask(task);
+    }
+  }
+
+  async exportQueryFile(options, write, onProgress) {
+    this.ensureOpen();
+    const settings = options && typeof options === 'object' ? options : {};
+    const statement = String(settings.sql || '').trim();
+    if (!statement) throw fail('Câu lệnh SQL đang trống.', 'EMPTY_QUERY');
+    if (statement.length > 1024 * 1024) throw fail('Câu lệnh SQL vượt quá 1 MB.', 'QUERY_TOO_LARGE');
+    let statements;
+    try {
+      statements = splitSqlStatements(statement);
+    } catch (error) {
+      throw fail(error.message, 'INVALID_SQL_SCRIPT');
+    }
+    if (statements.length !== 1 || !isReadStatement(statements[0])) {
+      throw fail('Chỉ có thể xuất toàn bộ kết quả cho một câu lệnh đọc dữ liệu.', 'INVALID_EXPORT_QUERY');
+    }
+    if (typeof write !== 'function') throw fail('Không có đích ghi tệp xuất.', 'INVALID_OUTPUT');
+    if (this.activeTask) throw fail('Phiên kết nối đang chạy một tác vụ khác.', 'SESSION_BUSY');
+    const format = normalizeFileFormat(settings.format, settings.filePath);
+    const delimiter = format === 'tsv' ? '\t' : ',';
+    const task = this.setActiveTask(
+      typeof settings.taskId === 'string' ? settings.taskId : null,
+      () => {
+        task.canceled = true;
+        this.dead = true;
+        try {
+          this.connection?.destroy();
+        } catch {
+          // cancellation is reported by the row loop
+        }
+      }
+    );
+    const startedAt = Date.now();
+    let rows = 0;
+    let bytes = 0;
+    let columns = [];
+    let names = [];
+    let outputStarted = false;
+    let lastReport = 0;
+    const partialState = () => ({ rows, bytes, format, columns: columns.map((column) => column.name) });
+    const throwIfCanceled = () => {
+      if (!task.canceled) return;
+      const error = fail('Đã hủy xuất dữ liệu.', 'EXPORT_CANCELED');
+      error.partial = partialState();
+      throw error;
+    };
+    const report = (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastReport < 300) return;
+      lastReport = now;
+      if (typeof onProgress === 'function') {
+        onProgress({ operation: 'export', rows, bytes, format });
+      }
+    };
+    let pending = '';
+    let pendingBytes = 0;
+    const flush = async () => {
+      if (!pending) return;
+      throwIfCanceled();
+      const chunk = pending;
+      pending = '';
+      pendingBytes = 0;
+      const size = Buffer.byteLength(chunk);
+      await write(chunk);
+      bytes += size;
+      throwIfCanceled();
+    };
+    const emit = async (text) => {
+      throwIfCanceled();
+      pending += text;
+      pendingBytes += Buffer.byteLength(text);
+      if (pendingBytes >= FILE_WRITE_CHUNK_BYTES) await flush();
+    };
+    const startOutput = async () => {
+      if (outputStarted) return;
+      outputStarted = true;
+      names = format === 'json'
+        ? ExportValues.uniqueColumnNames(columns.map((column) => column.name))
+        : columns.map((column) => column.name);
+      if (format === 'json') await emit('[\n');
+      else await emit(`${names.map((name) => ExportValues.csvField(name, delimiter)).join(delimiter)}\n`);
+    };
+    try {
+      const query = this.connection.query({ sql: statements[0], rowsAsArray: true, disableEval: true });
+      query.on('fields', (fields) => {
+        columns = fields.map((field) => ({
+          name: field.name,
+          type: TYPE_NAMES[field.columnType] || String(field.columnType)
+        }));
+      });
+      let firstRow = true;
+      try {
+        for await (const row of query.stream()) {
+          throwIfCanceled();
+          if (!columns.length) {
+            columns = row.map((_value, index) => ({ name: `column_${index + 1}`, type: '' }));
+          }
+          await startOutput();
+          if (format === 'json') {
+            const fields = columns.map((column, index) => `${JSON.stringify(names[index])}:${exportJsonField(row[index], column)}`);
+            await emit(`${firstRow ? '' : ',\n'}{${fields.join(',')}}`);
+            firstRow = false;
+          } else {
+            await emit(`${columns.map((_column, index) => ExportValues.csvField(exportTextValue(row[index]), delimiter)).join(delimiter)}\n`);
+          }
+          rows += 1;
+          report();
+        }
+      } catch (error) {
+        throwIfCanceled();
+        throw error;
+      }
+      if (!columns.length) throw fail('Không đọc được metadata cột của kết quả truy vấn.', 'EXPORT_NO_COLUMNS');
+      await startOutput();
+      throwIfCanceled();
+      if (format === 'json') await emit('\n]\n');
+      await flush();
+      report(true);
+      return {
+        format,
+        rows,
+        bytes,
+        columns: names,
         durationMs: Date.now() - startedAt
       };
     } catch (error) {
@@ -1849,6 +1975,7 @@ class DatabaseSession {
         // cancellation still propagates through the task flag
       }
     });
+    let snapshotOpen = false;
     try {
       const available = await this.listTables(database);
       let selected;
@@ -1925,6 +2052,20 @@ class DatabaseSession {
 
       const dataTables = selected.filter((entry) => entry.type === 'table');
       const views = selected.filter((entry) => entry.type === 'view');
+      const transactional = dataTables.length > 0
+        && dataTables.every((entry) => String(entry.engine || '').toLowerCase() === 'innodb');
+      const warnings = includeData && dataTables.length && !transactional
+        ? ['Có bảng không dùng InnoDB: bản sao lưu không có snapshot chung; hãy tạm dừng ghi dữ liệu trong lúc sao lưu.'] : [];
+      if (includeData && transactional) {
+        try {
+          await this.raw('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+          await this.raw('START TRANSACTION WITH CONSISTENT SNAPSHOT');
+        } catch (error) {
+          throw fail(`Không tạo được snapshot nhất quán cho bản sao lưu: ${error.message}`, 'BACKUP_SNAPSHOT_FAILED');
+        }
+        snapshotOpen = true;
+        this.metadata.clear();
+      }
       const startedAt = Date.now();
       let bytes = 0;
       let rows = 0;
@@ -1960,6 +2101,7 @@ class DatabaseSession {
         `-- Created: ${new Date().toISOString()}`,
         `-- Structure: ${includeStructure ? 'yes' : 'no'} · Data: ${includeData ? 'yes' : 'no'}`,
         `-- DEFINER: ${stripDefiner ? 'removed' : 'kept'}`,
+        `-- Consistency: ${snapshotOpen ? 'InnoDB consistent snapshot' : includeData ? 'no shared data snapshot' : 'structure only'}`,
         '',
         'SET NAMES utf8mb4;',
         'SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;',
@@ -1991,7 +2133,8 @@ class DatabaseSession {
           await emit(`-- Data ${quoteId(entry.name)}\n`);
           const query = this.connection.query({
             sql: `SELECT ${names.join(', ')} FROM ${tableRef(database, entry.name)}`,
-            rowsAsArray: true
+            rowsAsArray: true,
+            disableEval: true
           });
           let batch = [];
           let batchBytes = 0;
@@ -2126,9 +2269,19 @@ class DatabaseSession {
         events: eventDdl.length,
         rows,
         bytes,
+        snapshot: snapshotOpen,
+        warnings,
         durationMs: Date.now() - startedAt
       };
     } finally {
+      if (snapshotOpen) {
+        try {
+          await this.raw('ROLLBACK');
+        } catch {
+          // the connection may already be destroyed by cancellation
+        }
+        this.metadata.clear();
+      }
       this.clearActiveTask(task);
     }
   }

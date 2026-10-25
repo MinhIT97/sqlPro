@@ -9,6 +9,8 @@ let transferTaskSeq = 0;
 
 const desktop = window.sqlProDesktop;
 const RowValues = window.SqlRowValues;
+const ExportValues = window.SqlExportValues;
+const QueryResults = window.SqlQueryResults;
 
 const DEFAULT_WORKSPACE_ID = 'ws-personal';
 const openTreeGroups = new Set(['tables']);
@@ -220,6 +222,7 @@ function showTransferProgress(operation, database, context = {}) {
   };
   modal(`
     ${taskProgressHtml(operation, database)}
+    ${context.note ? `<p class="hint">${esc(context.note)}</p>` : ''}
   `);
   const cancelButton = document.querySelector('[data-cancel-transfer]');
   if (cancelButton) cancelButton.addEventListener('click', cancelActiveTransfer);
@@ -1623,13 +1626,17 @@ function maybeRefreshObjectMetadata(sql, tab) {
 // SQLPRO ENHANCED CORE FEATURES (P0)
 // ==========================================
 
-function exportCurrentResult(format) {
-  const result = app.query?.result;
+async function exportCurrentResult(format) {
+  if (activeTransfer) { toast('Một tác vụ database đang chạy. Hãy đợi hoặc hủy trước.', 'error'); return; }
+  const query = app.query;
+  const result = query?.result;
   if (!result) {
     toast('Không có kết quả truy vấn để xuất.', 'error');
     return;
   }
   let target = null;
+  let targetSql = result.kind === 'rows' ? (app.query?.lastSql || null) : null;
+  let targetDatabase;
   if (result.kind === 'rows') {
     target = result;
   } else if (result.kind === 'batch') {
@@ -1637,41 +1644,82 @@ function exportCurrentResult(format) {
     const entry = (result.results || []).find((item) => item.index === Number(String(tabKey).replace('result-', '')));
     if (entry && entry.result && entry.result.kind === 'rows') {
       target = entry.result;
+      targetSql = entry.sql || null;
+      targetDatabase = entry.database;
     } else {
       const first = (result.results || []).find((item) => item.ok && item.result?.kind === 'rows');
-      if (first) target = first.result;
+      if (first) {
+        target = first.result;
+        targetSql = first.sql || null;
+        targetDatabase = first.database;
+      }
     }
   }
-  if (!target || !target.rows || !target.rows.length) {
+  if (!target || !target.rows || (!target.rows.length && !target.truncated)) {
     toast('Không tìm thấy dữ liệu dòng để xuất.', 'error');
+    return;
+  }
+  if (targetSql && typeof desktop.db?.exportQuery === 'function') {
+    const taskId = newTransferTaskId('export');
+    const profileId = query.resultContext?.profileId || query.profileId || app.connection?.id || null;
+    const database = targetDatabase !== undefined ? targetDatabase : (query.resultContext ? query.resultContext.database : (query.database || null));
+    showTransferProgress('export', database || 'Kết quả truy vấn', {
+      taskId, profileId,
+      note: 'SQL được chạy lại để xuất đầy đủ dữ liệu tại thời điểm xuất; không dùng bản xem trước của ô.'
+    });
+    const transfer = activeTransfer;
+    try {
+      const response = await call(desktop.db.exportQuery({
+        sql: targetSql,
+        profileId, database, format, taskId
+      }));
+      if (response.canceled) {
+        if (!response.dialog) toast('Đã hủy xuất dữ liệu. Tệp tạm đã được dọn.');
+      } else {
+        toast('Đã xuất toàn bộ ' + response.rows + ' dòng ra ' + format.toUpperCase());
+      }
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      if (activeTransfer === transfer) { activeTransfer = null; closeModal(); }
+    }
+    return;
+  }
+  if (target.truncated || target.rows.some((row) => row.some((value, index) =>
+    /^(?:tinyblob|blob|mediumblob|longblob|binary|varbinary|bit)\b/i.test(target.columns[index]?.type || '')
+      && typeof value === 'string' && value.includes('…')))) {
+    toast('Kết quả chỉ có bản xem trước. Hãy chạy lại SQL để xuất dữ liệu đầy đủ.', 'error');
     return;
   }
   const cols = target.columns.map((c) => c.name);
   if (format === 'csv') {
-    const escapeCsv = (val) => '"' + String(val ?? '').replace(/"/g, '""') + '"';
     const csvContent = '\uFEFF' + [
-      cols.map(escapeCsv).join(','),
-      ...target.rows.map((row) => row.map(escapeCsv).join(','))
+      cols.map((name) => ExportValues.csvField(name, ',')).join(','),
+      ...target.rows.map((row) => row.map((value) => ExportValues.csvField(value, ',')).join(','))
     ].join('\r\n');
     desktop.saveTextFile({
       suggestedName: 'query-result.csv',
       contents: csvContent,
       filters: [{ name: 'CSV', extensions: ['csv'] }]
     }).then((res) => {
-      if (!res.canceled) toast('Đã xuất ' + target.rows.length + ' dòng ra CSV');
+      if (!res.canceled) {
+        toast('Đã xuất ' + target.rows.length + ' dòng ra CSV'
+          + (target.truncated ? ' (chỉ các dòng đang hiển thị)' : ''));
+      }
     }).catch((err) => toast(err.message, 'error'));
   } else {
-    const jsonRows = target.rows.map((row) => {
-      const obj = {};
-      cols.forEach((col, idx) => { obj[col] = row[idx]; });
-      return obj;
-    });
+    const names = ExportValues.uniqueColumnNames(cols);
+    const json = '[\n' + target.rows.map((row) => '{' + names.map((name, index) =>
+      `${JSON.stringify(name)}:${ExportValues.jsonField(row[index], target.columns[index])}`).join(',') + '}').join(',\n') + '\n]';
     desktop.saveTextFile({
       suggestedName: 'query-result.json',
-      contents: JSON.stringify(jsonRows, null, 2),
+      contents: json,
       filters: [{ name: 'JSON', extensions: ['json'] }]
     }).then((res) => {
-      if (!res.canceled) toast('Đã xuất ' + target.rows.length + ' dòng ra JSON');
+      if (!res.canceled) {
+        toast('Đã xuất ' + target.rows.length + ' dòng ra JSON'
+          + (target.truncated ? ' (chỉ các dòng đang hiển thị)' : ''));
+      }
     }).catch((err) => toast(err.message, 'error'));
   }
 }
@@ -2872,6 +2920,8 @@ async function connectTo(id, options = {}) {
       tables: app.tables, backups: app.backups, selectedBackupId: app.selectedBackupId,
       columns: app.columns, primaryKey: app.primaryKey, rows: app.rows,
       total: app.total, page: app.page, search: app.search,
+      searchColumn: app.searchColumn, searchMode: app.searchMode,
+      pageCursor: app.pageCursor, nextCursor: app.nextCursor, previousCursor: app.previousCursor, hasMore: app.hasMore,
       orderBy: app.orderBy, orderDir: app.orderDir,
       indexes: app.indexes, relations: app.relations, table, mode
     });
@@ -3167,6 +3217,12 @@ async function selectTable(name, options = {}) {
   table = name;
   app.page = 1;
   app.search = '';
+  app.searchColumn = null;
+  app.searchMode = 'contains';
+  app.pageCursor = null;
+  app.nextCursor = null;
+  app.previousCursor = null;
+  app.hasMore = undefined;
   app.orderBy = null;
   app.orderDir = 'ASC';
   renderSidebar();
@@ -3197,6 +3253,9 @@ async function loadData({ keepScroll = false } = {}) {
       page: app.page,
       pageSize: app.pageSize,
       search: app.search,
+      searchColumn: app.searchColumn || null,
+      searchMode: app.searchMode || 'contains',
+      cursor: app.pageCursor || null,
       orderBy: app.orderBy,
       orderDir: app.orderDir
     }));
@@ -3207,6 +3266,9 @@ async function loadData({ keepScroll = false } = {}) {
     app.total = data.total;
     app.page = data.page;
     app.pageSize = data.pageSize;
+    app.nextCursor = data.nextCursor || null;
+    app.previousCursor = data.previousCursor || null;
+    app.hasMore = data.hasMore;
     renderDataView();
     if (scroll) {
       const nextBox = $('#grid .tablebox');
@@ -3709,6 +3771,8 @@ function renderDataView() {
   $('#workspace').innerHTML = `
     <div class="toolbar">
       <input class="filter" id="filter" placeholder="⌕  Tìm trong bảng…" value="${esc(app.search)}">
+      <select id="filterColumn" aria-label="Cột tìm kiếm"><option value="">Tất cả cột</option>${app.columns.map((column) => `<option value="${esc(column.name)}" ${app.searchColumn === column.name ? 'selected' : ''}>${esc(column.name)}</option>`).join('')}</select>
+      <select id="filterMode" aria-label="Cách tìm kiếm"><option value="contains">Chứa</option><option value="exact" ${app.searchMode === 'exact' ? 'selected' : ''}>Bằng</option></select>
       <button id="addRowBtn">＋ Thêm bản ghi</button>
       <button class="danger" id="deleteRowsBtn" ${editable ? '' : 'disabled title="Bảng không có khóa chính"'}>⌫ Xóa</button>
       <button id="refreshBtn">↻</button>
@@ -3726,6 +3790,7 @@ function renderDataView() {
   filter.addEventListener('input', debounce(() => {
     app.search = filter.value;
     app.page = 1;
+    app.pageCursor = null;
     loadData().then(() => {
       const next = $('#filter');
       if (next) {
@@ -3734,6 +3799,11 @@ function renderDataView() {
       }
     });
   }, 350));
+  for (const selector of ['#filterColumn', '#filterMode']) $(selector).addEventListener('change', () => {
+    app.searchColumn = $('#filterColumn').value || null;
+    app.searchMode = $('#filterMode').value;
+    app.page = 1; app.pageCursor = null; void loadData();
+  });
   $('#addRowBtn').addEventListener('click', () => editRow(null));
   $('#deleteRowsBtn').addEventListener('click', deleteSelectedRows);
   $('#refreshBtn').addEventListener('click', () => loadData());
@@ -3786,11 +3856,11 @@ function dataGridHtml() {
   `).join('') || `<tr><td colspan="${app.columns.length + 1}" class="empty">Không có dữ liệu phù hợp.</td></tr>`;
   return `<div class="tablebox"><table><thead>${header}</thead><tbody>${body}</tbody></table></div>
     <div class="pagination">
-      <span>${app.total === null ? 'Không rõ tổng số' : `${app.total} bản ghi`} <span style="margin:0 10px">·</span> ${app.pageSize} dòng / trang</span>
+      <span>${app.total === null ? 'Chưa đếm tổng' : `${app.total} bản ghi`} <button id="countRowsBtn" type="button">${app.total === null ? 'Đếm tổng' : 'Đếm lại'}</button> <span style="margin:0 10px">·</span> ${app.pageSize} dòng / trang</span>
       <div>
         <button id="prevPage" ${app.page <= 1 ? 'disabled' : ''}>‹</button>
         <span class="pageinfo">${app.page}${pageCountText()}</span>
-        <button id="nextPage" ${pageCount !== null && app.page >= pageCount ? 'disabled' : ''}>›</button>
+        <button id="nextPage" ${(app.hasMore === false || (app.hasMore !== true && pageCount !== null && app.page >= pageCount)) ? 'disabled' : ''}>›</button>
       </div>
     </div>`;
 }
@@ -3801,6 +3871,17 @@ function pageCountText() {
 }
 
 function positionPagination() {
+  $('#countRowsBtn')?.addEventListener('click', async () => {
+    const target = { profileId: app.connection?.id, database: app.database, table, search: app.search, searchColumn: app.searchColumn || null, searchMode: app.searchMode || 'contains', force: true };
+    const button = $('#countRowsBtn');
+    button.disabled = true;
+    try {
+      const result = await call(desktop.db.tableCount(target));
+      if (target.profileId !== app.connection?.id || target.database !== app.database || target.table !== table || target.search !== app.search || target.searchColumn !== (app.searchColumn || null) || target.searchMode !== (app.searchMode || 'contains')) return;
+      app.total = result.total; renderDataView();
+    } catch (error) { toast(error.message, 'error'); }
+    finally { button.disabled = false; }
+  });
   const selectAll = $('#selectAllRows');
   if (selectAll) {
     selectAll.addEventListener('change', () => {
@@ -3822,6 +3903,7 @@ function positionPagination() {
         app.orderDir = 'ASC';
       }
       app.page = 1;
+      app.pageCursor = null;
       loadData({ keepScroll: true });
     });
   });
@@ -3830,12 +3912,14 @@ function positionPagination() {
   if (previous) previous.addEventListener('click', () => {
     if (app.page <= 1) return;
     app.page -= 1;
+    app.pageCursor = app.previousCursor || null;
     loadData();
   });
   if (next) next.addEventListener('click', () => {
     const count = app.total === null ? null : Math.max(1, Math.ceil(app.total / app.pageSize));
-    if (count !== null && app.page >= count) return;
+    if (app.hasMore === false || (app.hasMore !== true && count !== null && app.page >= count)) return;
     app.page += 1;
+    app.pageCursor = app.nextCursor || null;
     loadData();
   });
 }
@@ -4573,6 +4657,8 @@ async function runExplainQuery() {
     }));
     result.isExplain = true;
     tab.result = result;
+    tab.lastSql = explainSql;
+    tab.resultContext = { profileId: target.profileId, database: tab.database || null };
     tab.resultTab = null;
     tab.resultView = 'data';
     tab.sortCol = null;
@@ -4993,26 +5079,17 @@ function singleQueryResultHtml(result, compact = false) {
   }
   const sortCol = app.query.sortCol;
   const sortDir = app.query.sortDir === 'DESC' ? -1 : 1;
-  const compareText = new Intl.Collator(undefined, { numeric: true }).compare;
   const header = `<tr><th></th>${result.columns.map((column, index) => {
     const sorted = sortCol === index;
     return `<th class="sortable${sorted ? (sortDir === 1 ? ' sorted-asc' : ' sorted-desc') : ''}" data-query-sort="${index}">${esc(column.name)} <small>${esc(column.type)}</small>${sorted ? `<span class="sort-arrow">${sortDir === 1 ? '▲' : '▼'}</span>` : ''}</th>`;
   }).join('')}</tr>`;
-  const rows = Number.isInteger(sortCol) && sortCol >= 0 && sortCol < result.columns.length ? [...result.rows].sort((a, b) => {
-    const left = a[sortCol];
-    const right = b[sortCol];
-    if (left == null) return right == null ? 0 : -sortDir;
-    if (right == null) return sortDir;
-    if (typeof left === 'number' && typeof right === 'number') return (left - right) * sortDir;
-    return compareText(String(left), String(right)) * sortDir;
-  }) : result.rows;
+  const rows = QueryResults.orderedRows(result.rows, sortCol < result.columns.length ? sortCol : null, app.query.sortDir);
 
   const hasPk = result.columns && result.columns.some((c) => (c.flags & 2) || c.key === 'PRI');
   const hasTable = result.columns && result.columns.some((c) => c.table || c.orgTable);
   const isEditable = !result.isExplain && (hasPk || (hasTable && Boolean(table) && app.primaryKey?.length));
 
-  const body = rows.map((row, index) => {
-    const origIndex = result.rows.indexOf(row);
+  const body = rows.map(({ row, origIndex }, index) => {
     return `
       <tr data-query-row="${origIndex}">
         <td class="muted">${index + 1}</td>
@@ -5047,7 +5124,7 @@ function singleQueryResultHtml(result, compact = false) {
   const exportToolbar = `
     <div class="query-grid-toolbar">
       <div class="actions-left">
-        <span class="resulttitle">✓ ${result.rows.length} dòng · ${result.durationMs} ms${result.truncated ? ' · giới hạn 5000 dòng' : ''}</span>
+        <span class="resulttitle">✓ ${result.rows.length} dòng · ${result.durationMs} ms${result.truncated ? ' · đã giới hạn hiển thị' : ''}</span>
         ${badgeHtml}
       </div>
       <div class="actions-right">
@@ -5060,7 +5137,7 @@ function singleQueryResultHtml(result, compact = false) {
     ${compact ? '' : exportToolbar}
     <div class="tablebox"><table><thead>${header}</thead><tbody>${body}</tbody></table></div>
     ${compact ? `<div class="query-grid-status">${result.rows.length} dòng · ${result.durationMs} ms${result.truncated ? ' · đã giới hạn dữ liệu hiển thị' : ''}</div>` : ''}
-    ${!compact && result.truncated ? '<div class="hint">Kết quả hiển thị đã đạt giới hạn dòng. Truy vấn vẫn chạy hết và kết nối vẫn được giữ.</div>' : ''}
+    ${!compact && result.truncated ? `<div class="hint">${result.truncationReason === 'byte-limit' ? 'Dữ liệu hiển thị đã đạt giới hạn dung lượng.' : 'Kết quả hiển thị đã đạt giới hạn dòng.'} ${result.stoppedEarly ? 'Đã gửi yêu cầu dừng đọc phần còn lại.' : 'Phần còn lại được đọc bỏ để giữ phiên kết nối.'} Chọn xuất để lấy đầy đủ dữ liệu.</div>` : ''}
     ${!compact ? `
       <div class="hint query-grid-hint">
         ${isEditable
@@ -5282,6 +5359,8 @@ async function runQuery() {
       result = await call(desktop.db.query({ ...request, confirmed: true }));
     }
     tab.result = result;
+    tab.lastSql = sqlToRun;
+    tab.resultContext = { profileId: target.profileId, database: request.database };
     tab.error = null;
     tab.resultTab = result.kind === 'batch'
       ? (result.failedCount ? 'message' : queryBatchTabs(result).find((item) => item.entry)?.key || 'message')
@@ -5487,21 +5566,28 @@ async function deleteSelectedRows() {
   }
 }
 
-function confirmAction(title, message, confirmLabel = 'Xác nhận') {
+function confirmAction(title, message, confirmLabel = 'Xác nhận', { separate = false } = {}) {
   return new Promise((resolve) => {
-    modal(`
+    const html = `
       <h2>${esc(title)}</h2>
       <p>${esc(message)}</p>
       <div class="actions">
         <button id="confirmCancel">Hủy</button>
         <button class="danger" id="confirmOk">${esc(confirmLabel)}</button>
       </div>
-    `);
-    const dialog = $('#modal');
+    `;
+    const dialog = separate ? document.createElement('dialog') : $('#modal');
+    if (separate) {
+      dialog.className = 'confirmation-dialog';
+      dialog.innerHTML = html;
+      document.body.appendChild(dialog);
+      dialog.showModal();
+    } else modal(html);
     let settled = false;
     const onClose = () => {
       if (settled) return;
       settled = true;
+      if (separate) dialog.remove();
       resolve(false);
     };
     dialog.addEventListener('close', onClose);
@@ -5510,10 +5596,19 @@ function confirmAction(title, message, confirmLabel = 'Xác nhận') {
       settled = true;
       dialog.removeEventListener('close', onClose);
       resolve(value);
-      closeModal();
+      if (separate) { dialog.close(); dialog.remove(); }
+      else closeModal();
     };
-    $('#confirmCancel').addEventListener('click', () => finish(false));
-    $('#confirmOk').addEventListener('click', () => finish(true));
+    const find = (selector) => separate ? dialog.querySelector(selector) : $(selector);
+    find('#confirmCancel').addEventListener('click', () => finish(false));
+    find('#confirmOk').addEventListener('click', () => finish(true));
+    if (separate) {
+      dialog.addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape') return;
+        event.preventDefault(); event.stopPropagation(); finish(false);
+      });
+      find('#confirmCancel').focus();
+    }
   });
 }
 
@@ -5979,6 +6074,7 @@ function renderAccountPanel(status) {
 
 function connection(profile) {
   const existing = profile || null;
+  let trustedHostKey = existing?.ssh?.knownHostKey;
   const p = existing || {};
   const savedPassword = existing ? existing.hasPassword : false;
   const savedSslPassphrase = existing ? existing.hasSslPassphrase : false;
@@ -6144,7 +6240,8 @@ function connection(profile) {
         port: Number($('#sshPort').value),
         user: $('#sshUser').value,
         authMethod: $('#sshAuthMethod').value,
-        privateKeyPath: $('#sshKeyPath').value
+        privateKeyPath: $('#sshKeyPath').value,
+        knownHostKey: trustedHostKey || undefined
       }
     };
     const password = $('#connPassword').value;
@@ -6159,6 +6256,31 @@ function connection(profile) {
     return payload;
   };
 
+  const handleHostKeyPrompt = async (error, payload) => {
+    if (!payload?.ssh?.enabled || !['SSH_HOST_KEY_UNKNOWN', 'SSH_HOST_KEY_CHANGED'].includes(error?.code) || !error?.fingerprint) {
+      return false;
+    }
+    const changed = error.code === 'SSH_HOST_KEY_CHANGED';
+    const fingerprint = String(error.fingerprint);
+    const expected = error.expectedFingerprint ? String(error.expectedFingerprint) : '';
+    const accepted = await confirmAction(
+      changed ? 'SSH host key đã thay đổi' : 'Tin cậy SSH host key lần đầu?',
+      changed
+        ? `Không kết nối tới ${payload.ssh.host}:${payload.ssh.port} trước khi bạn xác minh.\n\nFingerprint trước: ${expected}\nFingerprint mới: ${fingerprint}\n\nChỉ tin cậy nếu khóa mới khớp với quản trị viên máy chủ.`
+        : `Chưa có SSH host key được tin cậy cho ${payload.ssh.host}:${payload.ssh.port}.\n\nFingerprint SHA-256: ${fingerprint}\n\nSo sánh với fingerprint do quản trị viên máy chủ cung cấp trước khi tin cậy.`,
+      changed ? 'Tin cậy khóa mới' : 'Tin cậy và tiếp tục',
+      { separate: true }
+    );
+    if (!accepted) return false;
+    payload.ssh.knownHostKey = {
+      host: payload.ssh.host,
+      port: payload.ssh.port,
+      fingerprint
+    };
+    trustedHostKey = payload.ssh.knownHostKey;
+    return true;
+  };
+
   $('#connCancel').addEventListener('click', closeModal);
   testButton.addEventListener('click', async () => {
     errorBox.classList.add('hidden');
@@ -6167,8 +6289,18 @@ function connection(profile) {
     testButton.textContent = 'Đang kiểm tra…';
     try {
       const payload = readForm();
-      const result = await call(desktop.connections.test(payload));
-      showSuccess(`✓ Kết nối thành công! Phiên bản: MySQL ${result.version || ''}`);
+      try {
+        const result = await call(desktop.connections.test(payload));
+        showSuccess(`✓ Kết nối thành công! Phiên bản: MySQL ${result.version || ''}`);
+      } catch (err) {
+        if (await handleHostKeyPrompt(err, payload)) {
+          testButton.textContent = 'Đang kiểm tra lại…';
+          const result = await call(desktop.connections.test(payload));
+          showSuccess(`✓ Đã tin cậy khóa! Kết nối thành công MySQL ${result.version || ''}`);
+        } else {
+          throw err;
+        }
+      }
     } catch (error) {
       showError(error.message);
     } finally {
@@ -6190,7 +6322,16 @@ function connection(profile) {
     try {
       payload = readForm();
       // 1. Kiểm tra kết nối trước khi lưu
-      await call(desktop.connections.test(payload));
+      try {
+        await call(desktop.connections.test(payload));
+      } catch (err) {
+        if (await handleHostKeyPrompt(err, payload)) {
+          submitButton.textContent = 'Đang kiểm tra lại…';
+          await call(desktop.connections.test(payload));
+        } else {
+          throw err;
+        }
+      }
 
       // 2. Kết nối thành công -> Lưu cấu hình và mở kết nối
       submitButton.textContent = 'Đang lưu…';
@@ -6362,6 +6503,7 @@ function backupDatabase() {
       <div class="errorbox" id="backupEventError" hidden></div>
     </div>
     <div class="hint">SqlPro tự lưu tệp .sql vào thư mục backup của ứng dụng và hiển thị trong nhánh Backups. Dung lượng phụ thuộc vào ổ đĩa và máy chủ MySQL.</div>
+    <div class="hint">Backup dùng kết nối riêng và snapshot chung khi tất cả bảng dữ liệu là InnoDB. Với engine khác, hãy tạm dừng ghi dữ liệu. Tránh thay đổi cấu trúc bảng trong lúc sao lưu.</div>
     <div class="actions">
       <button onclick="closeModal()">Hủy</button>
       <button class="primary" id="backupGo">Tạo bản sao lưu</button>
@@ -6489,6 +6631,7 @@ function backupDatabase() {
       modal(`
         <h2>Sao lưu hoàn tất</h2>
         <p>Đã sao lưu ${parts.join(', ')} (${Number(result.rows || 0).toLocaleString()} dòng) · ${formatBytes(result.bytes)}.</p>
+        ${(result.warnings || []).map((message) => `<div class="hint" role="status">${esc(message)}</div>`).join('')}
         <label>Đường dẫn tệp đã lưu</label>
         <input value="${esc(result.filePath)}" readonly aria-label="Đường dẫn tệp sao lưu">
         <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
@@ -7420,6 +7563,8 @@ async function transfer(type) {
           format,
           taskId,
           search: useFilter ? app.search : '',
+          searchColumn: useFilter ? app.searchColumn : null,
+          searchMode: useFilter ? app.searchMode : 'contains',
           orderBy: app.orderBy ? { column: app.orderBy, direction: app.orderDir } : null
         }));
         activeTransfer = null;

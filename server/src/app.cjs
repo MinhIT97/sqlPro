@@ -102,6 +102,7 @@ function createApp({ db, config = readConfig() }) {
       console.error('[sqlpro-server]', error && error.stack ? error.stack : error);
     }
     const body = { error: { code, message } };
+    if (code === 'AUTH_BUSY') response.setHeader('Retry-After', '1');
     if (error && error.details && typeof error.details === 'object') {
       Object.assign(body, error.details);
     }

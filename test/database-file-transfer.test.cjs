@@ -449,3 +449,67 @@ test('preview JSON hợp nhất key của nhiều object', async () => {
     assert.equal(preview.truncated, false);
   });
 });
+
+test('preview JSON giữ nguyên số lớn và object lồng khi hiển thị', async () => {
+  await withTempDir(async (directory) => {
+    const filePath = await writeTemp(
+      directory,
+      'precise.json',
+      '[{"id":9007199254740993,"small":2,"nested":{"n":18446744073709551615}}]'
+    );
+    const preview = await previewImportFile({ filePath, format: 'json' });
+    assert.deepEqual(preview.rows, [
+      ['9007199254740993', 2, '{"n":18446744073709551615}']
+    ]);
+  });
+});
+
+test('nhập JSON giữ nguyên số lớn và áp dụng quy tắc kiểu giống trình sửa dòng', async () => {
+  await withTempDir(async (directory) => {
+    const filePath = await writeTemp(
+      directory,
+      'precise.json',
+      '[{"id":9007199254740993,"flags":"1010","born":"2024-02-29","ratio":12345678901234567890.123456789}]'
+    );
+    const columns = [
+      { name: 'id', type: 'bigint', nullable: 'NO', key: 'PRI', extra: '' },
+      { name: 'flags', type: 'bit(4)', nullable: 'YES', key: '', extra: '' },
+      { name: 'born', type: 'date', nullable: 'YES', key: '', extra: '' },
+      { name: 'ratio', type: 'decimal(30,9)', nullable: 'YES', key: '', extra: '' }
+    ];
+    const { session, calls } = createSession(columns);
+    await session.importFile({
+      database: 'sample',
+      table: 'items',
+      filePath,
+      format: 'json',
+      mode: 'insert',
+      transaction: 'batch'
+    });
+    assert.deepEqual(calls.inserts[0].params, [
+      '9007199254740993',
+      Buffer.from('0a', 'hex'),
+      '2024-02-29',
+      '12345678901234567890.123456789'
+    ]);
+  });
+});
+
+test('nhập JSON từ chối ngày, số nguyên và BIT không hợp lệ trước khi ghi', async () => {
+  await withTempDir(async (directory) => {
+    const cases = [
+      { name: 'date.json', value: '{"born":"2026-02-30"}', column: { name: 'born', type: 'date' }, pattern: /Dòng 1, cột "born"/ },
+      { name: 'tinyint.json', value: '{"score":256}', column: { name: 'score', type: 'tinyint unsigned' }, pattern: /255/ },
+      { name: 'bit.json', value: '{"flags":"10101"}', column: { name: 'flags', type: 'bit(4)' }, pattern: /4 bit/ }
+    ];
+    for (const entry of cases) {
+      const filePath = await writeTemp(directory, entry.name, `[${entry.value}]`);
+      const { session, calls } = createSession([{ ...entry.column, nullable: 'YES', key: '', extra: '' }]);
+      await assert.rejects(
+        session.importFile({ database: 'sample', table: 'items', filePath, format: 'json', mode: 'insert', transaction: 'batch' }),
+        (error) => error.code === 'IMPORT_VALUE_INVALID' && entry.pattern.test(error.message)
+      );
+      assert.equal(calls.inserts.length, 0);
+    }
+  });
+});

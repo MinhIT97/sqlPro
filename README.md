@@ -12,11 +12,16 @@ SqlPro là ứng dụng desktop Electron quản trị MySQL/MariaDB trên Window
 - SQL Editor gợi ý từ khóa, hàm, bảng/view và cột theo kết nối hiện tại; hỗ trợ alias bảng.
 - Nhiều tab SQL Editor; mỗi tab giữ nội dung riêng khi chuyển qua lại.
 - Thêm, sửa, xóa bản ghi có khóa chính; tìm kiếm và phân trang.
+- Lọc theo cột với chế độ chứa/bằng; lấy trang trước, đếm tổng theo yêu cầu. Phân trang PK dùng keyset khi có cursor phù hợp, có thứ tự ổn định cho khóa ghép; sort khác dùng OFFSET với PK làm tie-breaker. Cache COUNT giữ tối đa 15 giây và bị xóa khi phiên ghi dữ liệu.
 - Editor theo kiểu cột cho hộp thoại thêm/sửa dòng và sửa trực tiếp trong bảng/kết quả SQL: lịch DATE/DATETIME/TIMESTAMP, chọn TIME, số/YEAR, ENUM/SET, JSON và hex nhị phân. NULL/DEFAULT được chọn riêng; giữ số lớn, giây lẻ và giờ theo phiên database. Dữ liệu nhị phân chỉ có bản xem trước, cột generated và dữ liệu không gian được giữ ở chế độ chỉ đọc khi không thể sửa đầy đủ từ lưới.
 - Nhập CSV/TSV/JSON và xuất CSV/TSV/JSON theo luồng, có xem trước, ánh xạ cột và hủy giữa chừng.
 - Sao lưu database ra tệp `.sql` (cấu trúc bảng/view, trigger, procedure, function, event và dữ liệu) và phục hồi từ tệp `.sql`.
 - Lưu mật khẩu bằng Electron `safeStorage` (OS keychain); nếu không khả dụng thì mã hóa AES-256-GCM với khóa cục bộ quyền `0600`.
 - Renderer không bao giờ nhận mật khẩu đã lưu; mọi truy cập database nằm trong main process.
+
+SQL result giữ tối đa 5.000 dòng và 8 MiB JSON của dữ liệu dòng cho mỗi kết quả; toàn batch tối đa 10.000 dòng/16 MiB. Khi vượt giới hạn, SqlPro thử dùng kết nối điều khiển cùng tài khoản để gửi `KILL QUERY`, giữ phiên và transaction gốc. Nếu không mở được kết nối điều khiển, ứng dụng đọc bỏ phần dư trong giới hạn timeout và thông báo đúng trạng thái. Một dòng vượt ngân sách có thể không được đưa vào lưới; vẫn xuất đầy đủ qua luồng tệp. Giới hạn này không giới hạn kích thước tổng tệp export hay khẳng định giới hạn toàn bộ heap của driver.
+
+Registry giữ tối đa 8 phiên, gộp các yêu cầu mở cùng profile và chỉ loại phiên rảnh khỏi cache. Phiên có tác vụ/lease, transaction hoặc autocommit tắt được bảo vệ; khi hết chỗ ứng dụng báo bận thay vì ngắt tác vụ nền. Server đồng bộ chạy scrypt bất đồng bộ với tối đa 2 hash đang xử lý và 32 yêu cầu chờ; khi đầy trả HTTP 503 `AUTH_BUSY` và `Retry-After`.
 
 ## Tương thích Navicat
 
@@ -174,6 +179,16 @@ Chạy kiểm tra toàn bộ cú pháp và test desktop:
 ```bash
 npm run check
 ```
+
+Kiểm thử MySQL tích hợp chạy trên một server kiểm thử riêng tại `127.0.0.1` với user `root` không mật khẩu. Test tự tạo database tên `sqlpro_test_*` rồi xóa đúng database đó. Trên PowerShell, đặt cổng của instance kiểm thử trước khi chạy:
+
+```powershell
+$env:SQLPRO_TEST_MYSQL_PORT = '53379'
+npm run test:mysql
+Remove-Item Env:SQLPRO_TEST_MYSQL_PORT
+```
+
+Không đặt biến này thì bộ test tích hợp được bỏ qua trong `npm run check`. CI tạo container MySQL 8.4 riêng để chạy snapshot khi có ghi đồng thời, transaction độc lập, import JSON/số lớn, CRUD khóa nhị phân và export/hủy stream. Backup dùng kết nối riêng; snapshot dữ liệu áp dụng khi mọi bảng được chọn là InnoDB. Với engine khác hoặc thay đổi DDL đồng thời, cần tạm dừng thay đổi tương ứng trong lúc backup.
 
 Server có bộ test riêng:
 

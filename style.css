@@ -1071,6 +1071,10 @@ textarea.inline-cell-editor:focus {
   color: #087f72;
 }
 
+.toolbar:has(#filterColumn) { flex-wrap: wrap; }
+#filterColumn { max-width: 180px; min-width: 90px; }
+#filterMode { width: 88px; }
+
 /* Schema-aware editors shared by row forms, data grids and SQL result grids. */
 .sql-value-editor {
   display: flex;

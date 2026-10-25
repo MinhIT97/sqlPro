@@ -78,4 +78,11 @@ test('đổi A → B → A dùng lại phiên cũ và ngắt kết nối chỉ �
   created[1].dead = true;
   assert.equal((await call('db:connect', 'b')).ok, true);
   assert.equal(created.length, 3);
+  const worker = created[2];
+  const background = call('db:query', { profileId: 'b', database: 'sample', sql: 'SLOW', taskId: 'background' });
+  await new Promise((resolve) => setImmediate(resolve));
+  for (let i = 0; i < 8; i++) assert.equal((await call('db:connect', `extra-${i}`)).ok, true);
+  assert.equal(worker.dead, false);
+  worker.finishQuery({ kind: 'ok' });
+  assert.equal((await background).ok, true);
 });

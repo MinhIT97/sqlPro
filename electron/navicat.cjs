@@ -211,10 +211,18 @@ function parseXml(text) {
 }
 
 function parseNavicatFile(filePath) {
-  const text = fs.readFileSync(filePath, 'utf8');
-  const trimmed = text.trimStart();
-  if (!trimmed) throw new Error('Tệp kết nối Navicat rỗng.');
-  const parsed = trimmed.startsWith('<') ? parseXml(text) : parseJson(text);
+  let parsed;
+  try {
+    const text = fs.readFileSync(filePath, 'utf8');
+    const trimmed = text.trimStart();
+    if (!trimmed) throw new Error('empty');
+    parsed = trimmed.startsWith('<') ? parseXml(text) : parseJson(text);
+  } catch {
+    // JSON/OS exceptions may contain credential-bearing input or private file paths.
+    const error = new Error('Không đọc được tệp Navicat hoặc định dạng tệp không hợp lệ. Hãy kiểm tra tệp và quyền truy cập.');
+    error.code = 'NAVICAT_IMPORT_FAILED';
+    throw error;
+  }
   const connections = [];
   let skipped = 0;
   for (const connection of parsed) {

@@ -36,6 +36,8 @@ Các thông số được ánh xạ: host, port, username, password, database m�
 
 Chọn **CONNECTIONS → ⇩** hoặc menu **Tệp → Nhập kết nối Navicat…**.
 
+Hai script cũ không còn là luồng nhập mật khẩu: `import-navicat-passwords.py` chỉ trả số lượng profile/có lưu credential, không giải mã hay xuất host/user/password; `sync-navicat-passwords.cjs` đã khóa ghi trực tiếp và chỉ hướng dẫn mở menu nhập. Luồng nhập trong ứng dụng mã hóa secret qua store repository và yêu cầu xác nhận SSH host key khi kết nối. Tệp `.ncx`/JSON và bản sao lưu có thể chứa credential, cần giữ ngoài repository và không đưa vào log/CI. Nếu từng chạy bản script cũ và lưu/chia sẻ output, kiểm tra nơi đã nhận output và đổi credential thực tế bị lộ; `.gitignore` không xóa lịch sử hoặc log cũ.
+
 ### Giới hạn tương thích
 
 - Chỉ MySQL và MariaDB; PostgreSQL/SQL Server trong Navicat sẽ bị bỏ qua.

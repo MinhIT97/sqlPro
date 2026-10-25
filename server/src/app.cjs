@@ -99,11 +99,12 @@ function createApp({ db, config = readConfig() }) {
       code = 'INVALID_JSON';
       message = 'Dữ liệu JSON không hợp lệ.';
     } else if (!(error instanceof ApiError) && status >= 500 && config.logErrors) {
-      console.error('[sqlpro-server]', error && error.stack ? error.stack : error);
+      // Dependency exceptions can embed SQL params, credentials or request data.
+      console.error('[sqlpro-server]', 'INTERNAL_ERROR');
     }
     const body = { error: { code, message } };
     if (code === 'AUTH_BUSY') response.setHeader('Retry-After', '1');
-    if (error && error.details && typeof error.details === 'object') {
+    if (error instanceof ApiError && error.details && typeof error.details === 'object') {
       Object.assign(body, error.details);
     }
     response.status(status).json(body);

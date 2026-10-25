@@ -88,6 +88,24 @@ test('remembered local sync secrets prevent initializing a replacement key', () 
   assert.equal(r.files.has(r.key), false);
 });
 
+test('Navicat import stores encrypted secrets and returns metadata without plaintext to the UI', () => {
+  const r = setup();
+  const marker = 'synthetic-navicat-private-fixture';
+  const result = r.store.importMany([{
+    host: 'fixture.example', name: 'fixture', user: 'fixture', password: marker,
+    ssl: { passphrase: marker }, ssh: { enabled: true, host: 'fixture.example', password: marker, passphrase: marker }
+  }]);
+  assert.equal(result.added, 1);
+  assert.equal(JSON.stringify(result).includes(marker), false);
+  assert.equal(result.connections[0].hasPassword, true);
+  assert.equal(result.connections[0].hasSshPassword, true);
+  const file = r.files.get(path.join('/fixture', 'connections.json'));
+  assert.equal(file.includes(marker), false);
+  assert.equal(r.store.getWithSecrets(result.connections[0].id).password, marker);
+  assert.equal(r.store.getWithSecrets(result.connections[0].id).sshPassword, marker);
+  assert.equal(r.store.getWithSecrets(result.connections[0].id).sshPassphrase, marker);
+});
+
 const syncVault = (id, password) => normalizeVault({
   connections: [{
     id,

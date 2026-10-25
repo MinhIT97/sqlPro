@@ -5,6 +5,13 @@ release/
 server/data/
 .env
 /docs/
+__pycache__/
+# Local credential exports belong outside the repository.
+/connections.json
+/.connections-key
+/navicat-export*.json
+/navicat-export*.ncx
+/navicat-credentials*.json
 *.db
 *.db-wal
 *.db-shm

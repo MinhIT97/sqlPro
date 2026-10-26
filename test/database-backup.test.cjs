@@ -29,6 +29,48 @@ test('backup chia INSERT theo dung lượng khi mỗi dòng lớn', async () => 
   assert.equal(result.bytes, Buffer.byteLength(chunks.join('')));
 });
 
+test('backup báo phần trăm ước tính và giữ dưới 100 cho đến khi tệp hoàn tất', async () => {
+  const session = new DatabaseSession({});
+  session.connection = {
+    query() {
+      return { async *stream() { for (let index = 0; index < 4; index += 1) yield [index]; } };
+    }
+  };
+  session.listTables = async () => [{ name: 'items', type: 'table', rowEstimate: 4 }];
+  session.listColumns = async () => [{ name: 'id', extra: '' }];
+  const progress = [];
+  await session.writeBackup(
+    { database: 'sample', tables: ['items'], includeStructure: false },
+    async () => {},
+    (entry) => progress.push(entry)
+  );
+  assert.ok(progress.length > 0);
+  assert.ok(progress.every((entry) => Number.isInteger(entry.percent) && entry.percent >= 0 && entry.percent < 100));
+  assert.ok(progress.at(-1).percent > 0);
+  assert.ok(progress.some((entry) => entry.stage === 'table-data' && entry.objectName === 'items' && entry.objectIndex === 1 && entry.objectTotal === 1));
+  assert.ok(progress.some((entry) => entry.events.some((event) => event.stage === 'table-data' && event.objectName === 'items')));
+  assert.equal(progress.at(-1).stage, 'finishing');
+});
+
+test('backup nhiều dòng vẫn nhường event loop cho thao tác khác', async () => {
+  const session = new DatabaseSession({});
+  session.connection = {
+    query() {
+      return { async *stream() { for (let index = 0; index < 2000; index += 1) yield [index]; } };
+    }
+  };
+  session.listTables = async () => [{ name: 'items', type: 'table', rowEstimate: 2000 }];
+  session.listColumns = async () => [{ name: 'id', extra: '' }];
+  let timerFired = false;
+  setTimeout(() => { timerFired = true; }, 0);
+  const result = await session.writeBackup(
+    { database: 'sample', tables: ['items'], includeStructure: false },
+    async () => {}
+  );
+  assert.equal(result.rows, 2000);
+  assert.equal(timerFired, true);
+});
+
 function routineSession() {
   const session = new DatabaseSession({});
   session.connection = {};

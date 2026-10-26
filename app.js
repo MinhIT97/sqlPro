@@ -5,6 +5,7 @@ let mode = 'data';
 let historyRows = [];
 let savedQueries = [];
 let activeTransfer = null;
+let transferView = null;
 let transferTaskSeq = 0;
 const rowOriginalHashes = new WeakMap();
 
@@ -154,17 +155,20 @@ function taskProgressHtml(operation, target) {
       : operation === 'export' ? 'Đã ghi tệp'
         : operation === 'import' ? 'Đã đọc tệp' : 'Đang xử lý';
   const cancellable = operation !== 'drop-table';
-  const percent = operation === 'restore' || operation === 'import' ? 'value="0" max="100"' : '';
+  const percent = operation === 'backup' || operation === 'restore' || operation === 'import' ? 'value="0" max="100"' : '';
   return `
     <div class="transfer-progress transfer-${operation}" data-transfer-running="${operation}" role="status" aria-live="polite">
       <div class="task-heading"><span class="task-icon" aria-hidden="true">${icon}</span><div>
         <span class="task-eyebrow">TÁC VỤ DATABASE</span><h2>${title}</h2>
       </div><span class="task-running">Đang chạy</span></div>
       <div class="task-target" title="${esc(target)}">${esc(target)}</div>
+      ${operation === 'backup' || operation === 'restore' ? '<div class="task-object"><span>ĐANG XỬ LÝ</span><strong id="transferObject">Đang chuẩn bị…</strong></div>' : ''}
       <div class="task-steps"><span class="done">✓ Chuẩn bị</span><span class="active" id="taskCurrentStep">● Đang xử lý</span><span>○ Hoàn tất</span></div>
+      ${operation === 'backup' || operation === 'restore' ? '<div class="task-percent" id="transferPercent" aria-live="off">Đang ước tính tiến độ…</div>' : ''}
       <progress id="transferBar" ${percent} aria-label="Tiến độ ${title.toLowerCase()}"></progress>
       <div class="task-metrics"><div><span>TIẾN TRÌNH</span><strong id="transferDetail">Đang chuẩn bị…</strong></div>
         <div><span>${label.toUpperCase()}</span><strong id="transferSize">${operation === 'drop-table' ? 'Đang chờ máy chủ' : '0 B'}</strong></div></div>
+      ${operation === 'backup' || operation === 'restore' ? '<div class="task-log-section"><div class="task-log-heading">Nhật ký tác vụ <span id="transferLogCount"></span></div><div class="task-log" id="transferLog" role="log" aria-label="Nhật ký backup và restore"></div></div>' : ''}
       <div class="task-footer"><span>Giữ SqlPro mở cho đến khi tác vụ hoàn tất.</span><span id="taskElapsed">00:00</span>
         ${cancellable ? '<button type="button" class="task-cancel-btn" data-cancel-transfer>Hủy tác vụ</button>' : ''}
       </div>
@@ -173,10 +177,10 @@ function taskProgressHtml(operation, target) {
 
 function startTaskClock() {
   clearTimeout(window.__sqlproTaskTimer);
-  const startedAt = Date.now();
+  const startedAt = mode === 'transfer' && transferView ? transferView.startedAt : Date.now();
   const tick = () => {
     const elapsed = $('#taskElapsed');
-    if (!$('#modal [data-transfer-running]') || !elapsed) return;
+    if (!($('#modal [data-transfer-running]') || $('#workspace [data-transfer-running]')) || !elapsed) return;
     const seconds = Math.floor((Date.now() - startedAt) / 1000);
     elapsed.textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
     window.__sqlproTaskTimer = setTimeout(tick, 1000);
@@ -225,6 +229,13 @@ function showTransferProgress(operation, database, context = {}) {
     profileId: context.profileId || null,
     canceling: false
   };
+  if (operation === 'backup' || operation === 'restore') {
+    transferView = { ...activeTransfer, startedAt: Date.now(), progress: null, state: 'running', note: context.note || '', logs: [] };
+    closeModal();
+    renderTransferTab();
+    void view('transfer');
+    return;
+  }
   modal(`
     ${taskProgressHtml(operation, database)}
     ${context.note ? `<p class="hint">${esc(context.note)}</p>` : ''}
@@ -232,6 +243,124 @@ function showTransferProgress(operation, database, context = {}) {
   const cancelButton = document.querySelector('[data-cancel-transfer]');
   if (cancelButton) cancelButton.addEventListener('click', cancelActiveTransfer);
   startTaskClock();
+}
+
+function renderTransferTab() {
+  const tab = $('#transferTab');
+  if (!tab) return;
+  tab.hidden = !transferView;
+  if (!transferView) return;
+  const title = transferView.operation === 'backup' ? 'Sao lưu' : 'Phục hồi';
+  const symbol = transferView.state === 'running' ? '●' : transferView.state === 'success' ? '✓' : '⚠';
+  const connectionName = app.connections.find((connection) => connection.id === transferView.profileId)?.name || transferView.profileId || '';
+  tab.textContent = `${symbol} ${title} · ${transferView.database}`;
+  tab.title = `${title} ${connectionName} / ${transferView.database}`;
+  tab.classList.toggle('selected', mode === 'transfer');
+  tab.classList.toggle('running', transferView.state === 'running');
+}
+
+function renderTransferView() {
+  if (!transferView) {
+    renderEmptyTable('Chưa có tác vụ sao lưu hoặc phục hồi.');
+    return;
+  }
+  const transfer = transferView;
+  $('#workspace').innerHTML = transfer.state === 'running'
+    ? `${taskProgressHtml(transfer.operation, transfer.database)}
+      ${transfer.note ? `<p class="hint">${esc(transfer.note)}</p>` : ''}
+      <p class="hint">Tác vụ chạy bằng kết nối riêng. Bạn có thể chuyển sang tab SQL Editor và quay lại tab này để xem tiến độ.</p>`
+    : `<div class="transfer-result transfer-${transfer.state}" role="status">
+        <h2>${esc(transfer.title)}</h2>${transfer.resultHtml}
+        <div class="task-log-section"><div class="task-log-heading">Nhật ký tác vụ <span id="transferLogCount"></span></div><div class="task-log" id="transferLog" role="log" aria-label="Nhật ký backup và restore"></div></div>
+        <div class="actions"><button type="button" id="transferClose">Đóng tab tác vụ</button></div>
+      </div>`;
+  renderTransferLog();
+  if (transfer.state === 'running') {
+    $('#workspace [data-cancel-transfer]')?.addEventListener('click', cancelActiveTransfer);
+    if (transfer.progress) updateTransferProgress(transfer.progress);
+    startTaskClock();
+  } else {
+    $('#workspace [data-transfer-open-db]')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const profileId = button.dataset.transferProfile;
+        const database = button.dataset.transferOpenDb;
+        if (profileId !== app.connection?.id) await connectTo(profileId, { database });
+        else await selectDatabase(database);
+      } catch (error) {
+        toast(error.message, 'error');
+        button.disabled = false;
+      }
+    });
+    $('#transferClose')?.addEventListener('click', () => {
+      transferView = null;
+      renderTransferTab();
+      void view(app.database ? 'backups' : 'data');
+    });
+  }
+}
+
+function transferEventLabel(event, operation) {
+  const name = typeof event.objectName === 'string' ? event.objectName : '';
+  if (operation === 'backup') {
+    const labels = {
+      'table-structure': 'Sao lưu cấu trúc bảng', 'table-data': 'Sao lưu dữ liệu bảng',
+      view: 'Sao lưu view', procedure: 'Sao lưu procedure', function: 'Sao lưu function',
+      trigger: 'Sao lưu trigger', event: 'Sao lưu event', finishing: 'Đang hoàn tất tệp backup'
+    };
+    const label = labels[event.stage] || 'Đang sao lưu';
+    return name ? `${label}: ${name}` : label;
+  }
+  const command = typeof event.command === 'string' ? event.command : 'SQL';
+  const action = event.phase === 'scan' ? 'Kiểm tra' : 'Thực thi';
+  return name ? `${action} ${command} trên ${name}` : `${action} tệp SQL`;
+}
+
+function renderTransferLog() {
+  const log = $('#transferLog');
+  if (!log || !transferView) return;
+  const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 30;
+  log.innerHTML = (transferView.logs || []).map((entry) => `<div class="task-log-entry"><time>${esc(entry.time)}</time><span>${esc(entry.text)}</span></div>`).join('')
+    || '<div class="task-log-empty">Đang chờ nhật ký tiến trình…</div>';
+  const count = $('#transferLogCount');
+  if (count) count.textContent = `${transferView.logs?.length || 0} mục gần nhất`;
+  if (nearBottom) log.scrollTop = log.scrollHeight;
+}
+
+function recordTransferLogs(progress) {
+  if (!transferView || transferView.state !== 'running' || transferView.lastLoggedProgress === progress) return;
+  transferView.lastLoggedProgress = progress;
+  const events = [];
+  if (progress.operation === 'restore' && progress.phase !== transferView.lastPhase) {
+    transferView.lastPhase = progress.phase;
+    events.push({ phase: progress.phase });
+  }
+  if (Array.isArray(progress.events) && progress.events.length) events.push(...progress.events);
+  else if (progress.operation === 'backup' && progress.stage && progress.objectName) {
+    events.push({ stage: progress.stage, objectName: progress.objectName });
+  }
+  let changed = false;
+  for (const event of events) {
+    const key = [event.phase || '', event.stage || '', event.command || '', event.objectName || ''].join(':');
+    if (key === transferView.lastLogKey) continue;
+    transferView.lastLogKey = key;
+    transferView.logs.push({ time: new Date().toLocaleTimeString('vi-VN', { hour12: false }), text: transferEventLabel(event, progress.operation) });
+    if (transferView.logs.length > 200) transferView.logs.shift();
+    changed = true;
+  }
+  if (changed && mode === 'transfer') renderTransferLog();
+}
+
+function finishBackgroundTransfer(state, title, resultHtml, taskId) {
+  if (!transferView || transferView.taskId !== taskId) return;
+  transferView.state = state;
+  transferView.title = title;
+  transferView.resultHtml = resultHtml;
+  activeTransfer = null;
+  clearTimeout(window.__sqlproTaskTimer);
+  renderTransferTab();
+  if (mode === 'transfer') renderTransferView();
 }
 
 function showTableDropProgress(database, tableName) {
@@ -244,7 +373,12 @@ function updateTransferProgress(progress) {
   if (!activeTransfer || activeTransfer.operation !== progress.operation) return;
   if (progress.taskId && activeTransfer.taskId && progress.taskId !== activeTransfer.taskId) return;
   if (progress.profileId && activeTransfer.profileId && progress.profileId !== activeTransfer.profileId) return;
-  const running = $('#modal [data-transfer-running]');
+  if (transferView?.state === 'running' && transferView.taskId === activeTransfer.taskId) {
+    transferView.progress = progress;
+    recordTransferLogs(progress);
+  }
+  const running = mode === 'transfer' && transferView
+    ? $('#workspace [data-transfer-running]') : $('#modal [data-transfer-running]');
   if (!running || running.dataset.transferRunning !== progress.operation) return;
   const detail = $('#transferDetail');
   const size = $('#transferSize');
@@ -253,7 +387,35 @@ function updateTransferProgress(progress) {
   if (progress.operation === 'backup') {
     detail.textContent = `${Number(progress.rows || 0).toLocaleString()} dòng · ${Number(progress.objects || 0).toLocaleString()} đối tượng`;
     size.textContent = `Đã ghi ${formatBytes(progress.bytes)}`;
-    if (step) step.textContent = progress.rows ? '● Đang xuất dữ liệu' : '● Đang xuất cấu trúc';
+    const stageLabels = {
+      'table-structure': 'Cấu trúc bảng',
+      'table-data': 'Dữ liệu bảng',
+      view: 'View',
+      procedure: 'Procedure',
+      function: 'Function',
+      trigger: 'Trigger',
+      event: 'Event'
+    };
+    const currentObject = $('#transferObject');
+    if (currentObject) {
+      const stage = stageLabels[progress.stage];
+      const name = typeof progress.objectName === 'string' ? progress.objectName : '';
+      const index = Number(progress.objectIndex) || 0;
+      const total = Number(progress.objectTotal) || 0;
+      currentObject.textContent = progress.stage === 'finishing' ? 'Đang hoàn tất tệp backup…'
+        : stage && name ? `${stage}: ${name}${index && total ? ` (${index}/${total})` : ''}`
+          : 'Đang chuẩn bị danh sách bảng…';
+      currentObject.title = currentObject.textContent;
+    }
+    const percent = Number(progress.percent);
+    if (Number.isFinite(percent) && percent >= 0) {
+      const value = Math.max(0, Math.min(99, Math.floor(percent)));
+      if (bar) bar.value = value;
+      const percentLabel = $('#transferPercent');
+      if (percentLabel) percentLabel.textContent = `~${value}% · ước tính theo số dòng của MySQL`;
+    }
+    if (step) step.textContent = progress.stage === 'finishing' ? '● Đang hoàn tất'
+      : progress.stage === 'table-data' ? '● Đang xuất dữ liệu' : '● Đang xuất cấu trúc';
   } else if (progress.operation === 'export') {
     detail.textContent = `${Number(progress.rows || 0).toLocaleString()} dòng đã xuất`;
     size.textContent = `Đã ghi ${formatBytes(progress.bytes)}`;
@@ -268,10 +430,24 @@ function updateTransferProgress(progress) {
     if (bar) bar.value = progress.totalBytes ? Math.min(100, Math.round(progress.bytes / progress.totalBytes * 100)) : 0;
     if (step) step.textContent = '● Đang nhập dữ liệu';
   } else {
-    detail.textContent = `${Number(progress.executed || 0).toLocaleString()} câu lệnh đã chạy${progress.skipped ? ` · ${progress.skipped} bỏ qua` : ''}`;
-    size.textContent = `${formatBytes(progress.bytes)} / ${formatBytes(progress.totalBytes)}`;
-    if (bar) bar.value = progress.totalBytes ? Math.min(100, Math.round(progress.bytes / progress.totalBytes * 100)) : 0;
-    if (step) step.textContent = '● Đang chạy SQL';
+    const scanning = progress.phase === 'scan';
+    detail.textContent = scanning
+      ? `${Number(progress.statements || 0).toLocaleString()} câu lệnh đã kiểm tra${progress.skipped ? ` · ${progress.skipped} bỏ qua` : ''}`
+      : `${Number(progress.executed || 0).toLocaleString()} câu lệnh đã chạy${progress.skipped ? ` · ${progress.skipped} bỏ qua` : ''}`;
+    size.textContent = `${formatBytes(progress.bytes)} / ${formatBytes(progress.totalBytes)} · ${scanning ? 'lượt kiểm tra' : 'lượt phục hồi'}`;
+    if (bar) bar.value = progress.totalBytes
+      ? Math.min(scanning ? 50 : 99, Math.round((scanning ? 0 : 50) + progress.bytes / progress.totalBytes * 50)) : 0;
+    const percentLabel = $('#transferPercent');
+    if (percentLabel) percentLabel.textContent = `${bar?.value || 0}% tổng tiến trình · ${scanning ? 'kiểm tra tệp' : 'chạy SQL'} ${progress.totalBytes ? Math.min(100, Math.round(progress.bytes / progress.totalBytes * 100)) : 0}%`;
+    const currentObject = $('#transferObject');
+    if (currentObject) {
+      const name = typeof progress.currentObject === 'string' ? progress.currentObject : '';
+      const command = typeof progress.currentCommand === 'string' ? progress.currentCommand : 'SQL';
+      currentObject.textContent = name ? `${scanning ? 'Kiểm tra' : 'Thực thi'} ${command}: ${name}`
+        : scanning ? 'Đang kiểm tra tệp SQL…' : 'Đang chạy SQL…';
+      currentObject.title = currentObject.textContent;
+    }
+    if (step) step.textContent = scanning ? '● Đang kiểm tra tệp SQL' : '● Đang chạy SQL';
   }
 }
 
@@ -688,7 +864,7 @@ function persistState() {
       workspaceId: app.activeWorkspaceId,
       database: app.database,
       table,
-      mode,
+      mode: mode === 'transfer' ? 'backups' : mode,
       savedQuery: app.query?.sql ?? (sessionStorage.getItem('query') || ''),
       queryTabs: queryTabs.map((tab) => ({
         title: tab.title,
@@ -3435,10 +3611,11 @@ function closeQueryTab(index) {
 
 function updateChrome() {
   document.body.classList.toggle('query-mode', mode === 'query');
+  document.body.classList.toggle('transfer-mode', mode === 'transfer');
   const label = mode === 'query' ? 'QUERY' : mode === 'history' ? 'WORKSPACE' : mode === 'data' ? 'TABLE' : mode.toUpperCase();
-  const title = mode === 'backups' ? 'Backups' : mode === 'query' ? 'SQL Editor' : mode === 'history' ? 'Lịch sử truy vấn' : (table || app.database || 'Workspace');
+  const title = mode === 'transfer' ? 'Tác vụ database' : mode === 'backups' ? 'Backups' : mode === 'query' ? 'SQL Editor' : mode === 'history' ? 'Lịch sử truy vấn' : (table || app.database || 'Workspace');
   $('#title').innerHTML = `${esc(title)} <span>${label}</span>`;
-  $('#eyebrow').textContent = `${(app.database || 'CHƯA CHỌN DATABASE').toUpperCase()} / ${mode === 'query' ? 'TRUY VẤN' : mode === 'history' ? 'LỊCH SỬ' : mode === 'backups' ? 'SAO LƯU' : 'BẢNG'}`;
+  $('#eyebrow').textContent = `${(app.database || 'CHƯA CHỌN DATABASE').toUpperCase()} / ${mode === 'query' ? 'TRUY VẤN' : mode === 'history' ? 'LỊCH SỬ' : mode === 'backups' ? 'SAO LƯU' : mode === 'transfer' ? 'TÁC VỤ' : 'BẢNG'}`;
   const subtitles = {
     data: table ? `Bảng ${table} trong ${app.database}.` : 'Chọn một bảng để xem dữ liệu thật.',
     structure: table ? `Cấu trúc cột của ${app.database}.${table}.` : 'Chọn một bảng để xem cấu trúc.',
@@ -3446,25 +3623,31 @@ function updateChrome() {
     relations: table ? `Quan hệ khóa ngoại của ${app.database}.${table}.` : 'Chọn một bảng để xem quan hệ.',
     query: 'Soạn và chạy truy vấn thật trên kết nối đang mở.',
     history: 'Các truy vấn đã chạy trong phiên làm việc.',
-    backups: `Các bản sao lưu của database ${app.database || ''}.`
+    backups: `Các bản sao lưu của database ${app.database || ''}.`,
+    transfer: 'Theo dõi tác vụ sao lưu hoặc phục hồi đang chạy.'
   };
   $('#subtitle').textContent = subtitles[mode] || '';
   $('#crumbDb').textContent = app.database || '—';
   $('#crumbServer').textContent = app.connection ? `${app.serverType === 'mariadb' ? 'MARIADB' : 'MYSQL'}${app.server ? ` ${app.server}` : ''}` : 'CHƯA KẾT NỐI';
-  $('#tabName').textContent = mode === 'backups' ? 'Backups' : (table || '—');
-  $('#dataTab').classList.toggle('selected', mode !== 'query');
+  $('#tabName').textContent = mode === 'backups' ? 'Backups' : mode === 'transfer' ? 'Tác vụ' : (table || '—');
+  $('#dataTab').classList.toggle('selected', mode !== 'query' && mode !== 'transfer');
   renderQueryTabs();
-  $('#subnav').style.display = ['query', 'history', 'backups'].includes(mode) ? 'none' : 'flex';
+  renderTransferTab();
+  $('#subnav').style.display = ['query', 'history', 'backups', 'transfer'].includes(mode) ? 'none' : 'flex';
   [...$('#subnav').children].forEach((button, index) => {
     button.classList.toggle('current', ['data', 'structure', 'indexes', 'relations'][index] === mode);
   });
-  document.title = `${mode === 'query' ? 'SQL Editor' : mode === 'history' ? 'Lịch sử' : mode === 'backups' ? 'Backups' : (table || 'Workspace')} — ${app.database || 'SqlPro'} — SqlPro`;
+  document.title = `${mode === 'query' ? 'SQL Editor' : mode === 'history' ? 'Lịch sử' : mode === 'backups' ? 'Backups' : mode === 'transfer' ? 'Tác vụ' : (table || 'Workspace')} — ${app.database || 'SqlPro'} — SqlPro`;
 }
 
 async function view(nextMode) {
   if (mode === 'query' && nextMode !== 'query') syncActiveQuery();
   mode = nextMode;
   updateChrome();
+  if (nextMode === 'transfer') {
+    renderTransferView();
+    return;
+  }
   if (!app.connection) {
     renderWelcome();
     return;
@@ -6777,8 +6960,14 @@ function backupDatabase() {
     <label class="checkline"><input type="checkbox" id="backupStripDefiner"> Bỏ DEFINER khỏi view/routine/event để phục hồi bằng user hiện tại</label>
     <label>Đối tượng cần sao lưu</label>
     <div class="optionbox">
-      <label class="checkline"><input type="checkbox" id="backupAll" checked> Chọn tất cả bảng và view</label>
-      <div class="backup-tables">
+      <label class="checkline"><input type="checkbox" id="backupAll" checked> Chọn tất cả bảng và view (kể cả mục đang ẩn)</label>
+      <div class="backup-search-row">
+        <input type="search" id="backupTableSearch" placeholder="Tìm bảng hoặc view…" aria-label="Tìm bảng hoặc view" autocomplete="off">
+        <button type="button" id="backupSelectVisible">Chọn kết quả</button>
+        <button type="button" id="backupDeselectVisible">Bỏ chọn kết quả</button>
+      </div>
+      <div class="backup-search-count" id="backupTableCount" role="status" aria-live="polite"></div>
+      <div class="backup-tables" id="backupTableList">
         ${objects.map((entry) => `
           <label class="checkline">
             <input type="checkbox" class="backup-table" value="${esc(entry.name)}" checked>
@@ -6786,6 +6975,7 @@ function backupDatabase() {
           </label>
         `).join('')}
       </div>
+      <div class="subtle backup-search-empty" id="backupTableEmpty" hidden>Không tìm thấy bảng hoặc view phù hợp.</div>
     </div>
     <div class="optionbox">
       <label class="checkline"><input type="checkbox" id="backupAllRoutines" checked disabled> Chọn tất cả routine và function</label>
@@ -6807,15 +6997,36 @@ function backupDatabase() {
 
   const all = $('#backupAll');
   const boxes = [...document.querySelectorAll('.backup-table')];
+  const search = $('#backupTableSearch');
+  const visibleBoxes = () => boxes.filter((box) => !box.closest('label').hidden);
   const syncAll = () => {
     const checked = boxes.filter((box) => box.checked).length;
     all.checked = checked === boxes.length;
     all.indeterminate = checked > 0 && checked < boxes.length;
+    $('#backupTableCount').textContent = `Hiển thị ${visibleBoxes().length}/${boxes.length} · Đã chọn ${checked}`;
   };
+  search.addEventListener('input', () => {
+    const term = search.value.trim().toLocaleLowerCase();
+    boxes.forEach((box) => {
+      box.closest('label').hidden = !box.value.toLocaleLowerCase().includes(term);
+    });
+    $('#backupTableEmpty').hidden = visibleBoxes().length > 0;
+    syncAll();
+  });
   all.addEventListener('change', () => {
     boxes.forEach((box) => { box.checked = all.checked; });
+    syncAll();
   });
   boxes.forEach((box) => box.addEventListener('change', syncAll));
+  $('#backupSelectVisible').addEventListener('click', () => {
+    visibleBoxes().forEach((box) => { box.checked = true; });
+    syncAll();
+  });
+  $('#backupDeselectVisible').addEventListener('click', () => {
+    visibleBoxes().forEach((box) => { box.checked = false; });
+    syncAll();
+  });
+  syncAll();
   $('#backupStructure').addEventListener('change', () => {
     $('#backupDrop').disabled = !$('#backupStructure').checked;
   });
@@ -6902,15 +7113,11 @@ function backupDatabase() {
     setStatus('Đang sao lưu…');
     try {
       const result = await call(desktop.db.backup(payload));
-      activeTransfer = null;
       if (result.canceled) {
-        closeModal();
         setStatus('Đã hủy sao lưu');
-        modal(`
-          <h2>Đã hủy sao lưu</h2>
+        finishBackgroundTransfer('canceled', 'Đã hủy sao lưu', `
           <p>Tệp tạm đã được xóa. Trước khi hủy, SqlPro đã đọc ${Number(result.rows || 0).toLocaleString()} dòng và ${Number(result.objects || 0).toLocaleString()} đối tượng (${formatBytes(result.bytes || 0)}).</p>
-          <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
-        `);
+        `, taskId);
         return;
       }
       const parts = [];
@@ -6923,22 +7130,17 @@ function backupDatabase() {
       await refreshBackupList(payload.database, profileId);
       openTreeGroups.add('backups');
       renderSidebar();
-      modal(`
-        <h2>Sao lưu hoàn tất</h2>
+      finishBackgroundTransfer('success', 'Sao lưu hoàn tất', `
         <p>Đã sao lưu ${parts.join(', ')} (${Number(result.rows || 0).toLocaleString()} dòng) · ${formatBytes(result.bytes)}.</p>
         ${(result.warnings || []).map((message) => `<div class="hint" role="status">${esc(message)}</div>`).join('')}
         <label>Đường dẫn tệp đã lưu</label>
         <input value="${esc(result.filePath)}" readonly aria-label="Đường dẫn tệp sao lưu">
-        <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
-      `);
+      `, taskId);
       setStatus(`Sao lưu hoàn tất • ${formatBytes(result.bytes)}`);
     } catch (error) {
-      activeTransfer = null;
-      modal(`
-        <h2>Sao lưu thất bại</h2>
+      finishBackgroundTransfer('error', 'Sao lưu thất bại', `
         <div class="errorbox">${esc(error.message)}</div>
-        <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
-      `);
+      `, taskId);
       setStatus('Sao lưu thất bại');
     }
   });
@@ -7069,18 +7271,13 @@ function restoreDatabase(backupId = null) {
         createDatabaseIfNotExists: isNew || !app.databases.includes(targetDb),
         copyToTargetCatalog: shouldCopyCatalog
       }));
-      activeTransfer = null;
       if (result.canceled) {
-        closeModal();
         setStatus('Đã hủy phục hồi');
-        modal(`
-          <h2>Đã hủy phục hồi</h2>
+        finishBackgroundTransfer('canceled', 'Đã hủy phục hồi', `
           <p>Đã chạy ${Number(result.executed || 0).toLocaleString()} câu lệnh trước khi hủy. Các thay đổi đã áp dụng <strong>không được tự động hoàn tác</strong>.</p>
-          <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
-        `);
+        `, taskId);
         return;
       }
-      closeModal();
       const verification = result.verification;
       const verificationFailed = verification?.status === 'failed';
       const verificationUnverified = verification?.status === 'unverified';
@@ -7091,44 +7288,25 @@ function restoreDatabase(backupId = null) {
       setStatus(`Phục hồi hoàn tất • ${result.statements} câu lệnh${verificationFailed ? ' • có cảnh báo' : ''}`);
       if (app.connection?.id === sourceProfileId) {
         await refreshDatabases();
-        if (targetDb !== sourceDb) {
-          await selectDatabase(targetDb);
-        } else {
-          const current = table;
-          try {
-            app.tables = await call(desktop.db.tables(app.database, sourceProfileId));
-          } catch {
-            // keep the previous list if metadata cannot be refreshed
-          }
+        if (app.database === targetDb) {
+          app.tables = await call(desktop.db.tables(targetDb, sourceProfileId));
           renderSidebar();
-          if (current && app.tables.some((entry) => entry.name === current)) {
-            table = current;
-            await loadData();
-          } else {
-            table = null;
-            app.rows = [];
-            app.columns = [];
-            await view('data');
-          }
+          if (mode === 'data' && table && app.tables.some((entry) => entry.name === table)) await loadData();
+          if (mode === 'backups') await refreshBackupList(targetDb, sourceProfileId);
         }
       }
       persistState();
-      modal(`
-        <h2>${verificationFailed ? 'Phục hồi đã chạy nhưng cần kiểm tra' : verificationUnverified ? 'Phục hồi hoàn tất (chưa kiểm chứng đầy đủ)' : 'Phục hồi hoàn tất'}</h2>
+      finishBackgroundTransfer(verificationFailed ? 'error' : 'success', verificationFailed ? 'Phục hồi đã chạy nhưng cần kiểm tra' : verificationUnverified ? 'Phục hồi hoàn tất (chưa kiểm chứng đầy đủ)' : 'Phục hồi hoàn tất', `
         <p>Đã chạy ${result.statements} câu lệnh${result.skipped ? `, bỏ qua ${result.skipped}` : ''} vào <strong>${esc(targetDb)}</strong>.</p>
         ${restoreVerificationHtml(verification)}
         ${result.copiedBackup ? `<p class="subtle">Đã lưu bản sao lưu vào danh mục của <strong>${esc(targetDb)}</strong>.</p>` : ''}
-        <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
-      `);
+      `, taskId);
     } catch (error) {
-      activeTransfer = null;
       const partial = error.partial;
-      modal(`
-        <h2>Phục hồi thất bại</h2>
+      finishBackgroundTransfer('error', 'Phục hồi thất bại', `
         <div class="errorbox">${esc(error.message)}</div>
         ${partial ? `<p class="hint">Đã chạy ${Number(partial.executed || 0).toLocaleString()} câu lệnh${partial.skipped ? `, bỏ qua ${partial.skipped}` : ''} trước khi lỗi. Các thay đổi đã áp dụng không được tự động hoàn tác.</p>` : '<div class="hint">Một số câu lệnh trước lỗi có thể đã được áp dụng. Kiểm tra database trước khi chạy lại tệp.</div>'}
-        <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
-      `);
+      `, taskId);
       setStatus('Phục hồi thất bại');
       if (app.connection?.id === sourceProfileId) {
         try {
@@ -7339,15 +7517,11 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
           createDatabaseIfNotExists: true,
           copyToTargetCatalog: doCatalog
         }));
-        activeTransfer = null;
         if (restoreResult.canceled) {
-          closeModal();
           setStatus('Đã hủy dán bản sao lưu');
-          modal(`
-            <h2>Đã hủy dán bản sao lưu</h2>
+          finishBackgroundTransfer('canceled', 'Đã hủy dán bản sao lưu', `
             <p>Đã chạy ${Number(restoreResult.executed || 0).toLocaleString()} câu lệnh trước khi hủy. Các thay đổi đã áp dụng <strong>không được tự động hoàn tác</strong>.</p>
-            <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
-          `);
+          `, taskId);
           return;
         }
       } else if (doCatalog) {
@@ -7361,8 +7535,7 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
         }));
       }
 
-      closeModal();
-      activeTransfer = null;
+      if (!doRestore) closeModal();
       const pastedFailed = restoreResult?.verification?.status === 'failed';
       toast(`Đã dán bản sao lưu sang "${finalTargetDb}"${pastedFailed ? ' nhưng cần kiểm tra dữ liệu' : ' thành công!'}`, pastedFailed ? 'error' : 'info');
       setStatus(`Dán hoàn tất sang ${finalTargetDb}${pastedFailed ? ' • có cảnh báo' : ''}`);
@@ -7372,35 +7545,33 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
         if (app.database === finalTargetDb) await refreshBackupList(finalTargetDb);
       }
 
-      modal(`
-        <h2>${pastedFailed ? 'Dán bản sao lưu đã chạy nhưng cần kiểm tra' : 'Dán bản sao lưu thành công'}</h2>
+      const outcomeHtml = `
         <p>Đã dán thành công bản sao lưu từ <strong>${esc(copied.sourceConnectionName)} › ${esc(copied.sourceDatabase)}</strong> sang <strong>${esc(targetConnName)} › ${esc(finalTargetDb)}</strong>.</p>
         ${restoreResult ? `<p>Đã chạy ${restoreResult.statements} câu lệnh${restoreResult.skipped ? `, bỏ qua ${restoreResult.skipped}` : ''}.</p>` : ''}
         ${restoreVerificationHtml(restoreResult?.verification)}
         ${(doCatalog || restoreResult?.copiedBackup) ? `<p class="subtle">Bản sao lưu đã được lưu vào danh mục của <strong>${esc(finalTargetDb)}</strong>.</p>` : ''}
         <div class="actions">
-          <button onclick="closeModal()">Đóng</button>
-          <button class="primary" id="btnSwitchToPastedDb">Mở Database "${esc(finalTargetDb)}"</button>
+          <button class="primary" data-transfer-open-db="${esc(finalTargetDb)}" data-transfer-profile="${esc(targetConnId)}">Mở Database "${esc(finalTargetDb)}"</button>
         </div>
-      `);
+      `;
+      if (doRestore) finishBackgroundTransfer(pastedFailed ? 'error' : 'success', pastedFailed ? 'Dán bản sao lưu đã chạy nhưng cần kiểm tra' : 'Dán bản sao lưu thành công', outcomeHtml, taskId);
+      else modal(`<h2>Dán bản sao lưu thành công</h2>${outcomeHtml}<div class="actions"><button onclick="closeModal()">Đóng</button></div>`);
 
-      $('#btnSwitchToPastedDb')?.addEventListener('click', async () => {
+      $('#modal [data-transfer-open-db]')?.addEventListener('click', async () => {
         closeModal();
         if (targetConnId !== app.connection?.id) {
-          await openProfileConnection(targetConnId);
+          await connectTo(targetConnId);
         }
         await selectDatabase(finalTargetDb);
       });
     } catch (error) {
-      activeTransfer = null;
-      closeModal();
       const partial = error.partial;
-      modal(`
-        <h2>Dán bản sao lưu thất bại</h2>
+      const errorHtml = `
         <div class="errorbox">${esc(error.message)}</div>
         ${partial ? `<p class="hint">Đã chạy ${Number(partial.executed || 0).toLocaleString()} câu lệnh${partial.skipped ? `, bỏ qua ${partial.skipped}` : ''} trước khi lỗi. Các thay đổi đã áp dụng không được tự động hoàn tác.</p>` : ''}
-        <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
-      `);
+      `;
+      if (doRestore) finishBackgroundTransfer('error', 'Dán bản sao lưu thất bại', errorHtml, taskId);
+      else { closeModal(); modal(`<h2>Dán bản sao lưu thất bại</h2>${errorHtml}<div class="actions"><button onclick="closeModal()">Đóng</button></div>`); }
       setStatus('Dán bản sao lưu thất bại');
     }
   });
@@ -7572,15 +7743,11 @@ function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn
           createDatabaseIfNotExists: true,
           copyToTargetCatalog: doCatalog
         }));
-        activeTransfer = null;
         if (restoreResult.canceled) {
-          closeModal();
           setStatus('Đã hủy sao chép');
-          modal(`
-            <h2>Đã hủy sao chép</h2>
+          finishBackgroundTransfer('canceled', 'Đã hủy sao chép', `
             <p>Đã chạy ${Number(restoreResult.executed || 0).toLocaleString()} câu lệnh trước khi hủy. Các thay đổi đã áp dụng <strong>không được tự động hoàn tác</strong>.</p>
-            <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
-          `);
+          `, taskId);
           return;
         }
       } else if (doCatalog) {
@@ -7594,8 +7761,7 @@ function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn
         }));
       }
 
-      closeModal();
-      activeTransfer = null;
+      if (!doRestore) closeModal();
       const copiedFailed = restoreResult?.verification?.status === 'failed';
       toast(`Đã sao chép sang database "${targetDb}"${copiedFailed ? ' nhưng cần kiểm tra dữ liệu' : ' thành công!'}`, copiedFailed ? 'error' : 'info');
       setStatus(`Sao chép hoàn tất sang ${targetDb}${copiedFailed ? ' • có cảnh báo' : ''}`);
@@ -7603,35 +7769,33 @@ function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn
         await refreshDatabases();
       }
 
-      modal(`
-        <h2>${copiedFailed ? 'Sao chép đã chạy nhưng cần kiểm tra' : 'Sao chép hoàn tất'}</h2>
+      const outcomeHtml = `
         <p>Đã sao chép thành công bản sao lưu từ <strong>${esc(sourceConnName)} › ${esc(sourceDb)}</strong> sang <strong>${esc(targetConnName)} › ${esc(targetDb)}</strong>.</p>
         ${restoreResult ? `<p>Đã chạy ${restoreResult.statements} câu lệnh${restoreResult.skipped ? `, bỏ qua ${restoreResult.skipped}` : ''}.</p>` : ''}
         ${restoreVerificationHtml(restoreResult?.verification)}
         ${(doCatalog || restoreResult?.copiedBackup) ? `<p class="subtle">Bản sao lưu đã được lưu vào danh mục của <strong>${esc(targetDb)}</strong>.</p>` : ''}
         <div class="actions">
-          <button onclick="closeModal()">Đóng</button>
-          <button class="primary" id="btnSwitchToTargetDb">Mở Database "${esc(targetDb)}"</button>
+          <button class="primary" data-transfer-open-db="${esc(targetDb)}" data-transfer-profile="${esc(targetConnId)}">Mở Database "${esc(targetDb)}"</button>
         </div>
-      `);
+      `;
+      if (doRestore) finishBackgroundTransfer(copiedFailed ? 'error' : 'success', copiedFailed ? 'Sao chép đã chạy nhưng cần kiểm tra' : 'Sao chép hoàn tất', outcomeHtml, taskId);
+      else modal(`<h2>Sao chép hoàn tất</h2>${outcomeHtml}<div class="actions"><button onclick="closeModal()">Đóng</button></div>`);
 
-      $('#btnSwitchToTargetDb')?.addEventListener('click', async () => {
+      $('#modal [data-transfer-open-db]')?.addEventListener('click', async () => {
         closeModal();
         if (targetConnId !== app.connection?.id) {
-          await openProfileConnection(targetConnId);
+          await connectTo(targetConnId);
         }
         await selectDatabase(targetDb);
       });
     } catch (error) {
-      activeTransfer = null;
-      closeModal();
       const partial = error.partial;
-      modal(`
-        <h2>Sao chép thất bại</h2>
+      const errorHtml = `
         <div class="errorbox">${esc(error.message)}</div>
         ${partial ? `<p class="hint">Đã chạy ${Number(partial.executed || 0).toLocaleString()} câu lệnh${partial.skipped ? `, bỏ qua ${partial.skipped}` : ''} trước khi lỗi. Các thay đổi đã áp dụng không được tự động hoàn tác.</p>` : ''}
-        <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
-      `);
+      `;
+      if (doRestore) finishBackgroundTransfer('error', 'Sao chép thất bại', errorHtml, taskId);
+      else { closeModal(); modal(`<h2>Sao chép thất bại</h2>${errorHtml}<div class="actions"><button onclick="closeModal()">Đóng</button></div>`); }
       setStatus('Sao chép thất bại');
     }
   });
@@ -7640,7 +7804,7 @@ function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn
 async function copyDatabaseAction(dbName, dbConnId = app.connection?.id) {
   if (!app.connection) return;
   if (dbConnId && dbConnId !== app.connection.id) {
-    await openProfileConnection(dbConnId);
+    await connectTo(dbConnId);
   }
   await selectDatabase(dbName);
   await refreshBackupList(dbName);

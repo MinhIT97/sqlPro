@@ -134,6 +134,10 @@ SqlPro giữ tối đa 8 phiên kết nối MySQL/SSH gần đây trong khi ứn
 
 Chọn database trong thanh bên rồi bấm nhóm **Backups** để mở trang quản lý. Trang này liệt kê tên, ngày tạo và dung lượng; có nút **Tạo bản sao lưu**, **Phục hồi**, **Xóa bản sao lưu**, **Xuất tệp SQL** và **Làm mới**. Chọn một bản trong danh sách trước khi dùng các thao tác đó. SqlPro tự lưu tệp `.sql` vào thư mục dữ liệu ứng dụng (`backups/<kết nối>/<database>/`), đặt tên theo thời gian và hiển thị ngay dưới nhóm Backups. Menu **Tệp → Sao lưu database… / Phục hồi database…** vẫn khả dụng; phục hồi từ menu cho phép chọn tệp `.sql` bên ngoài.
 
+Khi bắt đầu sao lưu hoặc phục hồi, tiến độ mở trong tab **Tác vụ database**. Tab hiển thị giai đoạn, đối tượng đang xử lý, phần trăm ước tính và nhật ký 200 mốc gần nhất; nhật ký vẫn được ghi khi bạn chuyển sang SQL Editor hoặc bảng khác. Tác vụ dùng kết nối riêng; bạn có thể quay lại tab để xem tiến độ, hủy hoặc đọc kết quả. Kết quả hoàn tất và lỗi không bật hộp thoại chặn công việc đang làm; tránh sửa dữ liệu ở database đích trong lúc phục hồi.
+
+Khi sao chép bản backup giữa các kết nối, SqlPro ghi vào tệp tạm và chỉ hiển thị bản mới sau khi ghi hoàn tất. Trước khi phục hồi, SqlPro quét tệp SQL rồi kiểm tra lại đúng tệp sẽ đọc; nếu tệp bị thay thế hoặc thay đổi trong khoảng này, tác vụ dừng trước khi ghi vào database. Vì các câu DDL của MySQL có thể tự commit, hủy hoặc gặp lỗi giữa lúc phục hồi vẫn có thể để lại thay đổi đã áp dụng; hãy phục hồi vào database thử trước khi thay dữ liệu quan trọng.
+
 Nhấp chuột phải vào nhóm **Backups** hoặc một bản backup trong cây để mở menu ngữ cảnh: tạo mới, phục hồi, xóa, xuất SQL, sao chép tên, mở thư mục chứa tệp và làm mới. Các lệnh cần một bản backup sẽ bị vô hiệu khi chưa chọn bản nào.
 
 - Sao lưu ra tệp `.sql` gồm `CREATE TABLE`, `CREATE VIEW`, trigger (gắn với các bảng được chọn), procedure, function, event và `INSERT`; có thể chọn từng đối tượng, chỉ lấy cấu trúc hoặc kèm `DROP … IF EXISTS`.

@@ -128,6 +128,7 @@ class SqlScriptParser {
   constructor() {
     this.delimiter = ';';
     this.buffer = '';
+    this.bufferHasContent = false;
     this.state = 'normal';
     this.escaped = false;
     this.blockStar = false;
@@ -137,7 +138,12 @@ class SqlScriptParser {
   }
 
   isClean() {
-    return this.state === 'normal' && this.buffer.trim() === '';
+    return this.state === 'normal' && !this.bufferHasContent;
+  }
+
+  append(character) {
+    this.buffer += character;
+    if (!this.bufferHasContent && /\S/.test(character)) this.bufferHasContent = true;
   }
 
   push(chunk) {
@@ -195,6 +201,7 @@ class SqlScriptParser {
         this.state = 'normal';
         const statement = this.buffer.trim();
         this.buffer = '';
+        this.bufferHasContent = false;
         if (statement) statements.push(statement);
         return;
       }
@@ -203,7 +210,7 @@ class SqlScriptParser {
       case 'lineComment':
         if (character === '\n') {
           this.state = 'normal';
-          this.buffer += '\n';
+          this.append('\n');
         }
         return;
       case 'blockComment':
@@ -214,18 +221,18 @@ class SqlScriptParser {
         if (this.blockStar && character === '/') {
           this.blockStar = false;
           this.state = 'normal';
-          this.buffer += ' ';
+          this.append(' ');
           return;
         }
         this.blockStar = false;
         return;
       case 'versionComment':
-        this.buffer += character;
+        this.append(character);
         if (this.buffer.endsWith('*/')) this.state = 'normal';
         return;
       case 'single':
       case 'double':
-        this.buffer += character;
+        this.append(character);
         if (this.escaped) {
           this.escaped = false;
           return;
@@ -237,12 +244,13 @@ class SqlScriptParser {
         if (character === (this.state === 'single' ? "'" : '"')) this.state = 'normal';
         return;
       case 'backtick':
-        this.buffer += character;
+        this.append(character);
         if (character === '`') this.state = 'normal';
         return;
       case 'dash':
         if (character === '-') {
           this.buffer = this.buffer.slice(0, -1);
+          this.bufferHasContent = this.buffer.trim() !== '';
           this.state = 'lineComment';
           return;
         }
@@ -259,11 +267,14 @@ class SqlScriptParser {
         return;
       case 'star':
         if (character === '!') {
-          this.buffer += '*!';
+          this.append('*!');
           this.state = 'versionComment';
           return;
         }
-        if (this.buffer.endsWith('/')) this.buffer = this.buffer.slice(0, -1);
+        if (this.buffer.endsWith('/')) {
+          this.buffer = this.buffer.slice(0, -1);
+          this.bufferHasContent = this.buffer.trim() !== '';
+        }
         this.state = 'blockComment';
         this.blockStar = false;
         return;
@@ -272,7 +283,7 @@ class SqlScriptParser {
     }
 
     if (character === '-' ) {
-      this.buffer += character;
+      this.append(character);
       this.state = 'dash';
       return;
     }
@@ -281,25 +292,27 @@ class SqlScriptParser {
       return;
     }
     if (character === '/') {
-      this.buffer += character;
+      this.append(character);
       this.state = 'slash';
       return;
     }
     if (character === "'" || character === '"') {
-      this.buffer += character;
+      this.append(character);
       this.state = character === "'" ? 'single' : 'double';
       return;
     }
     if (character === '`') {
-      this.buffer += character;
+      this.append(character);
       this.state = 'backtick';
       return;
     }
 
-    this.buffer += character;
-    if (this.delimiter && this.buffer.endsWith(this.delimiter)) {
+    this.append(character);
+    if (this.delimiter && character === this.delimiter[this.delimiter.length - 1]
+        && this.buffer.endsWith(this.delimiter)) {
       const statement = this.buffer.slice(0, -this.delimiter.length).trim();
       this.buffer = '';
+      this.bufferHasContent = false;
       if (statement) statements.push(statement);
     }
   }
@@ -745,12 +758,11 @@ function assertStatementScope(statement, targetDatabase, statementNumber) {
   return result;
 }
 
-function countInsertRows(statement) {
-  const sql = scrubSql(statement).trim();
+function countInsertRows(statement, scrubbedStatement = null) {
+  const sql = (scrubbedStatement === null ? scrubSql(statement) : scrubbedStatement).trim();
   if (!/^(?:INSERT|REPLACE)\b/i.test(sql)) return { rows: 0, reliable: true };
-  const upper = sql.toUpperCase();
-  const setMatch = /\bSET\b/.exec(upper);
-  const valuesMatch = /\bVALUES\b/.exec(upper);
+  const setMatch = /\bSET\b/i.exec(sql);
+  const valuesMatch = /\bVALUES\b/i.exec(sql);
   if (setMatch && (!valuesMatch || setMatch.index < valuesMatch.index)) return { rows: 1, reliable: true };
   if (!valuesMatch) return { rows: null, reliable: false };
   let depth = 0;

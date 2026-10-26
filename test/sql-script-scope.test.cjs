@@ -148,4 +148,5 @@ test('countInsertRows đếm tuple VALUES, SET và đánh dấu INSERT SELECT kh
   assert.deepEqual(countInsertRows('INSERT INTO t (a) SELECT a FROM source'), { rows: null, reliable: false });
   assert.deepEqual(countInsertRows('REPLACE INTO t VALUES (1), (2)'), { rows: 2, reliable: true });
   assert.deepEqual(countInsertRows('INSERT INTO t () VALUES ()'), { rows: 1, reliable: true });
+  assert.deepEqual(countInsertRows("INSERT INTO t (a) VALUES ('x),(y'), ('z')", 'INSERT INTO t (a) VALUES (?), (?)'), { rows: 2, reliable: true });
 });

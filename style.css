@@ -608,13 +608,25 @@ dialog:has(.transfer-progress){width:520px;max-width:calc(100vw - 32px);padding:
 .task-running{margin-left:auto;padding:5px 9px;border-radius:20px;background:#e9f7ef;color:#187958;font-size:10px;font-weight:700;white-space:nowrap}
 .task-running:before{content:'';display:inline-block;width:6px;height:6px;margin-right:5px;border-radius:50%;background:#1b9b72;animation:taskPulse 1.4s ease-in-out infinite}
 .task-target{margin:18px 0 0;padding:10px 12px;border:1px solid #e4ece9;border-radius:7px;background:#fff;color:#415568;font:12px/1.4 'Cascadia Code',Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;user-select:text}
+.task-object{display:flex;align-items:baseline;gap:10px;min-width:0;margin:12px 0 -7px;color:#829892;font-size:10px}
+.task-object span{flex-shrink:0;font-size:9px;font-weight:700;letter-spacing:1px}
+.task-object strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#284347;font-size:11px;font-weight:600;user-select:text}
 .task-steps{display:flex;justify-content:space-between;gap:7px;margin:20px 0 12px;color:#9aa9a5;font-size:11px}
 .task-steps .done{color:#238564}.task-steps .active{color:#087f72;font-weight:700}
+.task-percent{margin:-3px 0 7px;color:#56706b;font-size:11px;font-weight:600;text-align:right;font-variant-numeric:tabular-nums}
 .transfer-progress progress{display:block;width:100%;height:9px;margin:0 0 17px;accent-color:#087f72;border-radius:20px;overflow:hidden}
 .task-metrics{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .task-metrics>div{min-width:0;padding:12px 13px;border:1px solid #e5ece9;border-radius:8px;background:#fff}
 .task-metrics span{display:block;margin-bottom:7px;color:#8a9b9a;font-size:9px;font-weight:700;letter-spacing:1px}
 .task-metrics strong{display:block;color:#284347;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-log-section{margin-top:15px}
+.task-log-heading{display:flex;justify-content:space-between;gap:10px;margin-bottom:7px;color:#526b67;font-size:11px;font-weight:700}
+.task-log-heading span{color:#8a9b9a;font-weight:500}
+.task-log{height:110px;overflow:auto;padding:8px 10px;border:1px solid #e5ece9;border-radius:7px;background:#fbfdfc;color:#405861;font:11px/1.65 'Cascadia Code',Consolas,monospace}
+.task-log-entry{display:flex;gap:10px;overflow-wrap:anywhere}
+.task-log-entry time{flex-shrink:0;color:#8a9b9a}
+.task-log-empty{color:#8a9b9a}
+.dark-theme .task-log{border-color:#334447;background:#1b2528;color:#d4e0df}
 .task-footer{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:17px;color:#839491;font-size:11px}
 .task-footer #taskElapsed{font-variant-numeric:tabular-nums;color:#45615d;font-weight:700;margin-left:auto}
 .task-cancel-btn{padding:5px 10px;border:1px solid #e3cdc8;border-radius:7px;background:#fff;color:#a54034;font-size:11px;font-weight:700;cursor:pointer}
@@ -670,7 +682,12 @@ dialog select{width:100%}
 .dbactions button{flex:1;font-size:10px;padding:5px 6px;background:white}
 .backup-tables{max-height:220px;overflow:auto;padding-right:4px}
 .backup-tables .checkline{margin:4px 0}
+.backup-tables .checkline[hidden],.backup-search-empty[hidden]{display:none}
 .backup-tables .checkline span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.backup-search-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:10px 0 5px}
+.backup-search-row input{flex:1 1 180px;min-width:0}
+.backup-search-row button{font-size:10px;padding:7px 8px;white-space:nowrap}
+.backup-search-count,.backup-search-empty{font-size:10px;color:#82909c;margin:0 0 7px}
 .backup-manager{border:1px solid #dfe7e5;border-radius:9px;background:#fff;min-height:360px;overflow:hidden}
 .backup-manager-toolbar{display:flex;align-items:center;gap:8px;padding:12px;border-bottom:1px solid #e3eae8;flex-wrap:wrap}
 .backup-manager-toolbar button{font-size:11px;padding:7px 10px}
@@ -692,6 +709,14 @@ dialog select{width:100%}
 #queryTabs{display:flex;min-width:0;overflow-x:auto;scrollbar-width:none}
 #queryTabs::-webkit-scrollbar{display:none}
 #queryTabs .querytab{white-space:nowrap;flex:0 0 auto}
+.tabs .transfer-tab{white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis;flex:0 0 auto;color:#5b746c}
+.tabs .transfer-tab[hidden]{display:none}
+.tabs .transfer-tab.running{color:#087f72}
+.transfer-mode .transfer-progress,.transfer-mode .transfer-result{max-width:700px;margin:22px auto;border:1px solid #dfe9e5;border-radius:12px;box-shadow:0 10px 35px #1231;background:#fff}
+.transfer-mode .transfer-result{padding:24px 28px}
+.transfer-mode .transfer-result h2{margin:0 0 12px;font-size:19px}
+.transfer-mode .transfer-result p{line-height:1.6}
+.transfer-mode .transfer-result input{width:100%;margin:5px 0 12px}
 .querytab-target{display:block;max-width:190px;overflow:hidden;text-overflow:ellipsis;font-size:10px;opacity:.62;font-weight:400}
 .query-target-label{max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tabs .tabclose{display:inline-block;margin-left:4px;padding:0 2px;border-radius:3px;color:#a5afb9}

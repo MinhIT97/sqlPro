@@ -4,6 +4,7 @@ const { app, BrowserWindow, Menu, dialog, ipcMain, screen, shell } = require('el
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
 const store = require('./store.cjs');
 const sync = require('./sync.cjs');
@@ -290,6 +291,8 @@ function buildMenu() {
 
 function createWindow() {
   const options = getWindowOptions();
+  const appPage = path.join(__dirname, '..', 'index.html');
+  const appUrl = pathToFileURL(appPage).href;
   mainWindow = new BrowserWindow({
     width: options.width,
     height: options.height,
@@ -311,14 +314,14 @@ function createWindow() {
     }
   });
 
-  mainWindow.loadFile(path.join(__dirname, '..', 'index.html'));
+  mainWindow.loadFile(appPage);
   mainWindow.once('ready-to-show', () => {
     if (options.maximized) mainWindow.maximize();
     mainWindow.show();
   });
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith('file://')) event.preventDefault();
+    if (url !== appUrl) event.preventDefault();
   });
   mainWindow.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown' || input.alt || (!input.control && !input.meta)) return;
@@ -688,7 +691,6 @@ handle('account:restore-recovery', (id) => {
 
 handle('db:connect', async (profileId, options = {}) => {
   if (typeof profileId !== 'string' || !profileId) throw new Error('Kết nối không hợp lệ.');
-  if (activeDatabaseTransfer) throw new Error('Một tác vụ database đang chạy. Hãy đợi tác vụ hoàn tất.');
   const sshHostKey = options && typeof options === 'object' ? options.sshHostKey : null;
   const cached = openSessions.get(profileId);
   let reused = Boolean(cached && !cached.session.dead && cached.session.connection && cached.databases);

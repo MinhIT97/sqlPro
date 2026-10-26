@@ -7,6 +7,137 @@ const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSession } = require('../electron/database.cjs');
 
+test('quét tệp restore lớn trong worker để tiến trình chính vẫn phản hồi', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-restore-yield-'));
+  const filePath = path.join(folder, 'large.sql');
+  const statement = `INSERT INTO items VALUES ('${'x'.repeat(16000)}');\n`;
+  await fs.writeFile(filePath, statement.repeat(256));
+  const session = new DatabaseSession({});
+  let ticks = 0;
+  const timer = setInterval(() => { ticks += 1; }, 5);
+  try {
+    const result = await session.scanRestoreInventoryInWorker({
+      filePath,
+      database: 'sample',
+      totalBytes: (await fs.stat(filePath)).size,
+      dropExisting: false
+    });
+    assert.equal(result.inventory.statements, 256);
+    assert.equal(result.inventory.tables instanceof Map, true);
+    assert.ok(ticks > 0);
+  } finally {
+    clearInterval(timer);
+    await fs.rm(folder, { recursive: true, force: true });
+  }
+});
+
+test('có thể hủy worker đang quét restore', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-restore-worker-cancel-'));
+  const filePath = path.join(folder, 'large.sql');
+  await fs.writeFile(filePath, `INSERT INTO items VALUES ('${'x'.repeat(16000)}');\n`.repeat(256));
+  const session = new DatabaseSession({});
+  const task = { canceled: false };
+  try {
+    await assert.rejects(session.scanRestoreInventoryInWorker({
+      filePath,
+      database: 'sample',
+      totalBytes: (await fs.stat(filePath)).size,
+      dropExisting: false,
+      task,
+      onProgress: () => {
+        task.canceled = true;
+        Atomics.store(task.scanCancelFlag, 0, 1);
+      }
+    }), { code: 'RESTORE_CANCELED' });
+    assert.equal(task.scanCancelFlag, null);
+  } finally {
+    await fs.rm(folder, { recursive: true, force: true });
+  }
+});
+
+test('restore không ghi vào database nếu tệp SQL đổi sau khi quét', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-restore-changed-'));
+  const filePath = path.join(folder, 'backup.sql');
+  await fs.writeFile(filePath, 'CREATE TABLE `items` (`id` int);\n');
+  const session = new DatabaseSession({});
+  session.connection = {};
+  const queries = [];
+  session.raw = async (sql) => { queries.push(sql); return { rows: [] }; };
+  session.scanRestoreInventoryInWorker = async () => {
+    await fs.writeFile(filePath, 'CREATE TABLE `items` (`id` int, `name` text);\n');
+    return { inventory: { tables: new Map(), warnings: [] } };
+  };
+  try {
+    await assert.rejects(session.restoreDatabase({
+      database: 'sample',
+      filePath,
+      createDatabaseIfNotExists: true
+    }), { code: 'RESTORE_FILE_CHANGED' });
+    assert.deepEqual(queries, []);
+  } finally {
+    await fs.rm(folder, { recursive: true, force: true });
+  }
+});
+
+test('restore đọc đúng tệp đã kiểm tra nếu đường dẫn bị thay sau khi mở', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Windows có thể khóa tệp đang mở, không thể mô phỏng thay thế đường dẫn.');
+    return;
+  }
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-restore-replaced-'));
+  const filePath = path.join(folder, 'backup.sql');
+  const replacementPath = path.join(folder, 'replacement.sql');
+  await fs.writeFile(filePath, 'CREATE TABLE `original` (`id` int);\n');
+  await fs.writeFile(replacementPath, 'CREATE TABLE `replacement` (`id` int);\n');
+  const session = new DatabaseSession({});
+  session.connection = {};
+  session.metadata = new Map();
+  session.scanRestoreInventoryInWorker = async () => ({ inventory: {
+    tables: new Map(), warnings: [], rowCountsReliable: true
+  } });
+  const queries = [];
+  session.raw = async (sql) => {
+    queries.push(sql);
+    if (sql.startsWith('SELECT @@FOREIGN_KEY_CHECKS')) {
+      await fs.rename(replacementPath, filePath);
+      return { rows: [{ foreignKeys: 1, sqlMode: '' }] };
+    }
+    return { rows: [] };
+  };
+  session.useDatabase = async () => {};
+  session.verifyRestore = async () => ({ status: 'verified' });
+  try {
+    await session.restoreDatabase({ database: 'sample', filePath });
+    assert.ok(queries.some((sql) => sql.includes('CREATE TABLE `original`')));
+    assert.equal(queries.some((sql) => sql.includes('CREATE TABLE `replacement`')), false);
+  } finally {
+    await fs.rm(folder, { recursive: true, force: true });
+  }
+});
+
+test('restore báo bảng đang kiểm tra và đang thực thi để ghi nhật ký', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-restore-log-'));
+  const filePath = path.join(folder, 'backup.sql');
+  await fs.writeFile(filePath, 'CREATE TABLE `items` (`id` int);\nINSERT INTO `items` VALUES (1);\n');
+  const session = new DatabaseSession({});
+  session.connection = {};
+  session.metadata = new Map();
+  session.raw = async (sql) => sql.startsWith('SELECT @@FOREIGN_KEY_CHECKS')
+    ? { rows: [{ foreignKeys: 1, sqlMode: '' }] } : { rows: [] };
+  session.useDatabase = async () => {};
+  session.verifyRestore = async () => ({ status: 'verified' });
+  const progress = [];
+  try {
+    await session.restoreDatabase({ database: 'sample', filePath }, (entry) => progress.push(entry));
+    assert.ok(progress.some((entry) => entry.phase === 'scan'
+      && entry.events.some((event) => event.objectName === 'items')));
+    assert.ok(progress.some((entry) => entry.phase === 'execute'
+      && entry.events.some((event) => event.command === 'INSERT' && event.objectName === 'items')));
+  } finally {
+    await fs.rm(folder, { recursive: true, force: true });
+  }
+});
+
 test('restore khôi phục FOREIGN_KEY_CHECKS và SQL_MODE khi một lệnh bị lỗi', async () => {
   const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-restore-'));
   const filePath = path.join(folder, 'backup.sql');

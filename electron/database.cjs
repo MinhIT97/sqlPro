@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { Worker } = require('node:worker_threads');
 const mysql = require('mysql2');
 const { Client: SshClient } = require('ssh2');
 const { SqlScriptParser, splitSqlStatements, stripLeadingComments, createTarget, skipReason, assertStatementScope, countInsertRows } = require('./sql-script.cjs');
@@ -22,6 +23,9 @@ const MAX_PAGE_SIZE = 500;
 const BACKUP_INSERT_ROWS = 200;
 const BACKUP_INSERT_BYTES = 1024 * 1024;
 const FILE_WRITE_CHUNK_BYTES = 1024 * 1024;
+const RESTORE_READ_CHUNK_BYTES = 128 * 1024;
+const RESTORE_SCAN_CHUNK_BYTES = 1024 * 1024;
+const yieldToOtherTasks = () => new Promise((resolve) => setImmediate(resolve));
 const IMPORT_BATCH_ROWS = 200;
 const IMPORT_MAX_PARAMS = 10000;
 const PREVIEW_ROW_LIMIT = 20;
@@ -62,6 +66,22 @@ function quoteId(name) {
 
 function tableRef(database, table) {
   return `${quoteId(database)}.${quoteId(table)}`;
+}
+
+const RESTORE_IDENTIFIER = '(?:`(?:[^`]|``)+`|[A-Za-z0-9_$]+)';
+const RESTORE_TARGET_PATTERN = new RegExp(
+  `^(?:(?:INSERT|REPLACE)\\s+(?:(?:LOW_PRIORITY|DELAYED|HIGH_PRIORITY|IGNORE)\\s+)*(?:INTO\\s+)?|(?:DROP|ALTER|TRUNCATE)\\s+(?:TABLE|VIEW|TRIGGER|PROCEDURE|FUNCTION|EVENT)\\s+(?:IF\\s+EXISTS\\s+)?)` +
+  `(?:${RESTORE_IDENTIFIER}\\s*\\.\\s*)?(${RESTORE_IDENTIFIER})`, 'i'
+);
+
+function restoreStatementObject(statement) {
+  const sql = statement.trimStart();
+  const created = createTarget(sql);
+  if (created) return created.name;
+  const match = RESTORE_TARGET_PATTERN.exec(sql);
+  if (!match) return '';
+  const name = match[1];
+  return name.startsWith('`') ? name.slice(1, -1).replace(/``/g, '`') : name;
 }
 
 function stripDefinerClause(ddl) {
@@ -2402,6 +2422,19 @@ class DatabaseSession {
       let objects = 0;
       let triggerCount = 0;
       let lastReport = 0;
+      const estimatedRows = includeData ? dataTables.reduce((sum, entry) => {
+        const estimate = Number(entry.rowEstimate);
+        return sum + (Number.isFinite(estimate) && estimate > 0 ? estimate : 1);
+      }, 0) : 0;
+      const estimatedObjects = (includeStructure ? selected.length + routineDdl.length + eventDdl.length : 0)
+        + (includeData ? dataTables.length : 0);
+      const estimatedWork = estimatedRows + estimatedObjects;
+      let reportedPercent = 0;
+      let currentStage = 'prepare';
+      let currentObject = '';
+      let currentIndex = 0;
+      let currentTotal = 0;
+      let pendingEvents = [];
 
       const throwIfCanceled = () => {
         if (!task.canceled) return;
@@ -2413,7 +2446,25 @@ class DatabaseSession {
         const now = Date.now();
         if (!force && now - lastReport < 300) return;
         lastReport = now;
-        if (typeof onProgress === 'function') onProgress({ operation: 'backup', bytes, rows, objects });
+        const estimate = estimatedWork ? Math.floor((rows + objects) / estimatedWork * 100) : 0;
+        reportedPercent = Math.max(reportedPercent, Math.min(99, estimate));
+        const events = pendingEvents;
+        pendingEvents = [];
+        if (typeof onProgress === 'function') onProgress({
+          operation: 'backup', bytes, rows, objects, percent: reportedPercent,
+          stage: currentStage, objectName: currentObject, objectIndex: currentIndex, objectTotal: currentTotal,
+          events
+        });
+      };
+      const setCurrent = (stage, name = '', index = 0, total = 0) => {
+        const changedStage = currentStage !== stage;
+        currentStage = stage;
+        currentObject = name;
+        currentIndex = index;
+        currentTotal = total;
+        pendingEvents.push({ stage, objectName: name, objectIndex: index, objectTotal: total });
+        if (pendingEvents.length > 200) pendingEvents.shift();
+        report(changedStage);
       };
       const emit = async (text) => {
         throwIfCanceled();
@@ -2441,8 +2492,9 @@ class DatabaseSession {
       await emit(`${header}\n`);
 
       if (includeStructure) {
-        for (const entry of dataTables) {
+        for (const [index, entry] of dataTables.entries()) {
           throwIfCanceled();
+          setCurrent('table-structure', entry.name, index + 1, dataTables.length);
           const created = await this.raw(`SHOW CREATE TABLE ${tableRef(database, entry.name)}`);
           const ddl = showCreateDdl(created.result, `table ${entry.name}`);
           await emit(`-- Table ${quoteId(entry.name)}${dropTables ? ' (drop first)' : ''}\n`);
@@ -2454,8 +2506,9 @@ class DatabaseSession {
       }
 
       if (includeData) {
-        for (const entry of dataTables) {
+        for (const [index, entry] of dataTables.entries()) {
           throwIfCanceled();
+          setCurrent('table-data', entry.name, index + 1, dataTables.length);
           const columns = (await this.listColumns(database, entry.name))
             .filter((column) => !/(virtual|stored) generated/i.test(column.extra));
           if (!columns.length) continue;
@@ -2485,6 +2538,7 @@ class DatabaseSession {
             batchBytes = 0;
             await emit(`INSERT INTO ${quoteId(entry.name)} (${names.join(', ')}) VALUES\n  ${values};\n`);
             report();
+            await yieldToOtherTasks();
           };
           try {
             for await (const row of query.stream()) {
@@ -2513,8 +2567,9 @@ class DatabaseSession {
         let delimiter = '$$';
         while (routineDdl.some(({ ddl }) => ddl.includes(delimiter))) delimiter += '$';
         await emit(`DELIMITER ${delimiter}\n`);
-        for (const { entry, ddl } of routineDdl) {
+        for (const [index, { entry, ddl }] of routineDdl.entries()) {
           throwIfCanceled();
+          setCurrent(entry.type, entry.name, index + 1, routineDdl.length);
           await emit(`-- ${entry.type === 'function' ? 'Function' : 'Procedure'} ${quoteId(entry.name)}\n`);
           if (dropTables) await emit(`DROP ${entry.type.toUpperCase()} IF EXISTS ${quoteId(entry.name)}${delimiter}\n`);
           await emit(`${ddl}${ddl.endsWith(delimiter) ? '' : delimiter}\n\n`);
@@ -2525,8 +2580,9 @@ class DatabaseSession {
       }
 
       if (includeStructure) {
-        for (const entry of views) {
+        for (const [index, entry] of views.entries()) {
           throwIfCanceled();
+          setCurrent('view', entry.name, index + 1, views.length);
           const created = await this.raw(`SHOW CREATE VIEW ${tableRef(database, entry.name)}`);
           let ddl = showCreateDdl(created.result, `view ${entry.name}`);
           if (stripDefiner) ddl = stripDefinerClause(ddl);
@@ -2554,6 +2610,7 @@ class DatabaseSession {
           await emit(`DELIMITER ${delimiter}\n`);
           for (const [index, trigger] of triggers.entries()) {
             throwIfCanceled();
+            setCurrent('trigger', trigger.name, index + 1, triggers.length);
             const statement = bodies[index];
             await emit(`-- Trigger ${quoteId(trigger.name)} on ${quoteId(trigger.tableName)}\n`);
             if (dropTables) await emit(`DROP TRIGGER IF EXISTS ${quoteId(trigger.name)}${delimiter}\n`);
@@ -2570,8 +2627,9 @@ class DatabaseSession {
         let delimiter = '$$';
         while (eventDdl.some(({ ddl }) => ddl.includes(delimiter))) delimiter += '$';
         await emit(`DELIMITER ${delimiter}\n`);
-        for (const { entry, ddl } of eventDdl) {
+        for (const [index, { entry, ddl }] of eventDdl.entries()) {
           throwIfCanceled();
+          setCurrent('event', entry.name, index + 1, eventDdl.length);
           await emit(`-- Event ${quoteId(entry.name)}\n`);
           if (dropTables) await emit(`DROP EVENT IF EXISTS ${quoteId(entry.name)}${delimiter}\n`);
           await emit(`${ddl}${ddl.endsWith(delimiter) ? '' : delimiter}\n\n`);
@@ -2581,6 +2639,7 @@ class DatabaseSession {
         await emit('DELIMITER ;\n\n');
       }
 
+      setCurrent('finishing');
       await emit([
         'SET SQL_MODE=@OLD_SQL_MODE;',
         'SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;',
@@ -2616,7 +2675,47 @@ class DatabaseSession {
     }
   }
 
-  async scanRestoreInventory({ filePath, database, totalBytes, dropExisting, onProgress, task }) {
+  async scanRestoreInventoryInWorker({ filePath, database, totalBytes, dropExisting, onProgress, task }) {
+    const cancelFlag = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+    const worker = new Worker(path.join(__dirname, 'restore-scan-worker.cjs'), {
+      workerData: { filePath, database, totalBytes, dropExisting, cancelFlag: cancelFlag.buffer }
+    });
+    if (task) {
+      task.scanCancelFlag = cancelFlag;
+      if (task.canceled) Atomics.store(cancelFlag, 0, 1);
+    }
+    try {
+      return await new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (error, result) => {
+          if (settled) return;
+          settled = true;
+          if (error) reject(error);
+          else resolve(result);
+        };
+        worker.on('message', (message) => {
+          if (message?.type === 'progress') {
+            try { onProgress?.(message.progress); } catch (error) { finish(error); }
+          } else if (message?.type === 'done') {
+            finish(null, message.result);
+          } else if (message?.type === 'error') {
+            const error = new Error(message.error?.message || 'Không quét được tệp SQL.');
+            Object.assign(error, message.error);
+            finish(error);
+          }
+        });
+        worker.once('error', (error) => finish(error));
+        worker.once('exit', (code) => {
+          if (!settled) finish(new Error(`Worker quét SQL dừng bất ngờ (mã ${code}).`));
+        });
+      });
+    } finally {
+      if (task?.scanCancelFlag === cancelFlag) task.scanCancelFlag = null;
+      await worker.terminate();
+    }
+  }
+
+  async scanRestoreInventory({ filePath, database, totalBytes, dropExisting, onProgress, task, readChunkBytes = RESTORE_READ_CHUNK_BYTES }) {
     const inventory = {
       tables: new Map(),
       rowCountsReliable: true,
@@ -2625,6 +2724,10 @@ class DatabaseSession {
       statements: 0,
       skipped: 0
     };
+    let currentObject = '';
+    let currentCommand = '';
+    let currentKey = '';
+    let pendingEvents = [];
     const limit = (message) => {
       if (!inventory.rowCountLimitations.includes(message)) inventory.rowCountLimitations.push(message);
     };
@@ -2656,6 +2759,15 @@ class DatabaseSession {
       const analysis = assertStatementScope(sql, database, inventory.statements);
       const command = analysis.command;
       const target = createTarget(sql);
+      const objectName = target?.name || analysis.refs[0]?.table || '';
+      const key = objectName ? `${command}:${objectName}` : '';
+      if (key && key !== currentKey) {
+        currentKey = key;
+        currentObject = objectName;
+        currentCommand = command;
+        pendingEvents.push({ phase: 'scan', command, objectName });
+        if (pendingEvents.length > 200) pendingEvents.shift();
+      }
       if (command === 'CREATE') {
         if (target && target.type === 'table') {
           const ifNotExists = /\bIF\s+NOT\s+EXISTS\b/i.test(analysis.sql);
@@ -2677,7 +2789,7 @@ class DatabaseSession {
         const ref = analysis.refs[0];
         if (!ref) return;
         const entry = entryFor(ref.table);
-        const counted = countInsertRows(sql);
+        const counted = countInsertRows(sql, analysis.sql);
         const head = analysis.sql.slice(0, 80);
         if (command === 'REPLACE') unverifiable(entry, 'REPLACE có thể gộp dòng nên không thể đối chiếu số dòng.');
         else if (/\bIGNORE\b/i.test(head)) unverifiable(entry, 'INSERT IGNORE có thể bỏ dòng nên không thể đối chiếu số dòng.');
@@ -2713,13 +2825,22 @@ class DatabaseSession {
       }
     };
     const parser = new SqlScriptParser();
-    const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
+    const stream = fs.createReadStream(filePath, { encoding: 'utf8', highWaterMark: readChunkBytes });
     let bytes = 0;
     let lastReport = 0;
     const canceled = () => {
       const error = fail('Đã hủy phục hồi.', 'RESTORE_CANCELED');
       error.partial = { statements: inventory.statements, executed: 0, skipped: inventory.skipped, phase: 'scan' };
       return error;
+    };
+    const report = () => {
+      const events = pendingEvents;
+      pendingEvents = [];
+      onProgress?.({
+        operation: 'restore', phase: 'scan', bytes, totalBytes,
+        statements: inventory.statements, executed: 0, skipped: inventory.skipped,
+        currentObject, currentCommand, events
+      });
     };
     for await (const chunk of stream) {
       if (task && task.canceled) throw canceled();
@@ -2728,21 +2849,13 @@ class DatabaseSession {
       const now = Date.now();
       if (now - lastReport >= 300) {
         lastReport = now;
-        if (typeof onProgress === 'function') {
-          onProgress({
-            operation: 'restore',
-            phase: 'scan',
-            bytes,
-            totalBytes,
-            statements: inventory.statements,
-            executed: 0,
-            skipped: inventory.skipped
-          });
-        }
+        report();
       }
+      await yieldToOtherTasks();
     }
     for (const statement of parser.end()) processStatement(statement);
     if (task && task.canceled) throw canceled();
+    report();
     return { inventory, bytes };
   }
 
@@ -2897,6 +3010,7 @@ class DatabaseSession {
       typeof settings.taskId === 'string' ? settings.taskId : null,
       () => {
         task.canceled = true;
+        if (task.scanCancelFlag) Atomics.store(task.scanCancelFlag, 0, 1);
         this.dead = true;
         try {
           this.connection?.destroy();
@@ -2923,7 +3037,7 @@ class DatabaseSession {
     const stat = await fs.promises.stat(filePath);
     if (!stat.isFile()) throw fail('Đường dẫn phục hồi không phải là tệp.', 'INVALID_FILE');
 
-    const { inventory } = await this.scanRestoreInventory({
+    const { inventory } = await this.scanRestoreInventoryInWorker({
       filePath,
       database,
       totalBytes: stat.size,
@@ -2932,29 +3046,57 @@ class DatabaseSession {
       task
     });
 
-    if (createDatabaseIfNotExists) {
-      await this.raw(`CREATE DATABASE IF NOT EXISTS ${quoteId(database)} DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+    const stream = fs.createReadStream(filePath, { encoding: 'utf8', highWaterMark: RESTORE_READ_CHUNK_BYTES });
+    try {
+      await new Promise((resolve, reject) => {
+        stream.once('open', resolve);
+        stream.once('error', reject);
+      });
+      const currentStat = fs.fstatSync(stream.fd);
+      if (currentStat.dev !== stat.dev || currentStat.ino !== stat.ino ||
+          currentStat.size !== stat.size || currentStat.mtimeMs !== stat.mtimeMs ||
+          currentStat.ctimeMs !== stat.ctimeMs) {
+        throw fail('Tệp SQL đã thay đổi trong khi kiểm tra; hãy thử phục hồi lại.', 'RESTORE_FILE_CHANGED');
+      }
+    } catch (error) {
+      stream.destroy();
+      throw error;
     }
 
     const startedAt = Date.now();
-    const previous = await this.raw('SELECT @@FOREIGN_KEY_CHECKS AS foreignKeys, @@SQL_MODE AS sqlMode');
-    const previousForeignKeys = Number(previous.rows[0]?.foreignKeys) === 0 ? 0 : 1;
-    const previousSqlMode = String(previous.rows[0]?.sqlMode ?? '');
-    await this.useDatabase(database);
-    await this.raw('SET FOREIGN_KEY_CHECKS=0');
+    let previousForeignKeys;
+    let previousSqlMode;
+    try {
+      if (createDatabaseIfNotExists) {
+        await this.raw(`CREATE DATABASE IF NOT EXISTS ${quoteId(database)} DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+      }
+      const previous = await this.raw('SELECT @@FOREIGN_KEY_CHECKS AS foreignKeys, @@SQL_MODE AS sqlMode');
+      previousForeignKeys = Number(previous.rows[0]?.foreignKeys) === 0 ? 0 : 1;
+      previousSqlMode = String(previous.rows[0]?.sqlMode ?? '');
+      await this.useDatabase(database);
+      await this.raw('SET FOREIGN_KEY_CHECKS=0');
+    } catch (error) {
+      stream.destroy();
+      throw error;
+    }
 
     const parser = new SqlScriptParser();
-    const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
     let bytes = 0;
     let statements = 0;
     let executed = 0;
     let skipped = 0;
     let lastReport = 0;
+    let currentObject = '';
+    let currentCommand = '';
+    let currentKey = '';
+    let pendingEvents = [];
     const report = (force = false) => {
       const now = Date.now();
       if (!force && now - lastReport < 300) return;
       lastReport = now;
       if (typeof onProgress === 'function') {
+        const events = pendingEvents;
+        pendingEvents = [];
         onProgress({
           operation: 'restore',
           phase: 'execute',
@@ -2963,7 +3105,10 @@ class DatabaseSession {
           statements,
           executed,
           skipped,
-          warnings: inventory.warnings.length
+          warnings: inventory.warnings.length,
+          currentObject,
+          currentCommand,
+          events
         });
       }
     };
@@ -3008,6 +3153,18 @@ class DatabaseSession {
         skipped += 1;
         return;
       }
+      const statementSql = stripLeadingComments(sql);
+      const objectName = restoreStatementObject(statementSql);
+      const command = /^([A-Za-z]+)/.exec(statementSql)?.[1]?.toUpperCase() || '';
+      const key = objectName ? `${command}:${objectName}` : '';
+      if (key && key !== currentKey) {
+        currentKey = key;
+        currentObject = objectName;
+        currentCommand = command;
+        pendingEvents.push({ phase: 'execute', command, objectName });
+        if (pendingEvents.length > 200) pendingEvents.shift();
+        report();
+      }
       try {
         if (dropExisting) {
           const target = createTarget(sql);
@@ -3047,6 +3204,7 @@ class DatabaseSession {
         bytes += Buffer.byteLength(chunk);
         for (const statement of parser.push(chunk)) await execute(statement);
         report();
+        await yieldToOtherTasks();
       }
       for (const statement of parser.end()) await execute(statement);
       throwIfCanceled();

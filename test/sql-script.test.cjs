@@ -2,7 +2,19 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { splitSqlStatements, stripLeadingComments, createTarget } = require('../electron/sql-script.cjs');
+const { SqlScriptParser, splitSqlStatements, stripLeadingComments, createTarget } = require('../electron/sql-script.cjs');
+
+test('tách INSERT lớn qua nhiều chunk rồi nhận DELIMITER tiếp theo', () => {
+  const parser = new SqlScriptParser();
+  const values = Array.from({ length: 8000 }, () => `('${'x'.repeat(120)}')`).join(',\n  ');
+  const sql = `INSERT INTO items VALUES\n  ${values};\nDELIMITER $$\nSELECT 2$$\n`;
+  const midpoint = Math.floor(sql.length / 2);
+  const statements = [...parser.push(sql.slice(0, midpoint)), ...parser.push(sql.slice(midpoint)), ...parser.end()];
+  assert.equal(statements.length, 2);
+  assert.match(statements[0], /^INSERT INTO items VALUES/);
+  assert.match(statements[0], /\('x+'\)$/);
+  assert.equal(statements[1], 'SELECT 2');
+});
 
 test('tách nhiều statement theo dấu chấm phẩy', () => {
   assert.deepEqual(

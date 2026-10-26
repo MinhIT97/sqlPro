@@ -56,3 +56,48 @@ test('copyBackup sao chép bản sao lưu sang database khác', async () => {
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test('copyBackup dọn bản sao chưa hoàn tất và không công bố nó trong catalog', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-catalog-partial-'));
+  const sourceDir = backupDirectory(root, 'source', 'database');
+  const targetDir = backupDirectory(root, 'target', 'database');
+  const id = backupName();
+  const originalCopyFile = fs.copyFile;
+  try {
+    await fs.mkdir(sourceDir, { recursive: true });
+    await fs.writeFile(path.join(sourceDir, id), 'CREATE TABLE example (id int);');
+    fs.copyFile = async (_source, destination) => {
+      await fs.writeFile(destination, 'incomplete');
+      throw new Error('copy interrupted');
+    };
+    await assert.rejects(copyBackup(root, 'source', 'target', 'database', 'database', id), /copy interrupted/);
+    assert.deepEqual(await listBackups(root, 'target', 'database'), []);
+    assert.deepEqual(await fs.readdir(targetDir), []);
+  } finally {
+    fs.copyFile = originalCopyFile;
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('resolveBackup từ chối symbolic link thay cho tệp sao lưu', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-catalog-link-'));
+  try {
+    const directory = backupDirectory(root, 'source', 'database');
+    await fs.mkdir(directory, { recursive: true });
+    const external = path.join(root, 'external.sql');
+    await fs.writeFile(external, 'SELECT 1;');
+    const id = backupName();
+    try {
+      await fs.symlink(external, path.join(directory, id));
+    } catch (error) {
+      if (error.code === 'EPERM' || error.code === 'ENOTSUP') {
+        t.skip('Hệ thống tệp không hỗ trợ symbolic link.');
+        return;
+      }
+      throw error;
+    }
+    await assert.rejects(resolveBackup(root, 'source', 'database', id), /Không tìm thấy tệp sao lưu/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

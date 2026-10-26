@@ -96,6 +96,8 @@ test('backup uses and cancels its own session without touching the SQL editor se
   assert.equal(r.sessions.length, 2);
   const worker = r.sessions[1];
   assert.equal(worker.activeTask.id, 'backup-1');
+  assert.equal((await r.call('db:connect', 'p2')).ok, true);
+  assert.equal(r.sessions.length, 3);
   assert.equal((await r.call('db:cancel-task', { profileId: 'p1', taskId: 'backup-1' })).data.canceled, true);
   assert.equal((await pending).data.canceled, true);
   assert.deepEqual(worker.canceled, ['backup-1']);

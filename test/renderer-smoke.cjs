@@ -107,6 +107,8 @@ const routineEvents = [
   { name: 'e_one', status: 'ENABLED', type: 'RECURRING', onCompletion: 'NOT PRESERVE', intervalValue: '1', intervalField: 'DAY', starts: null, ends: null, lastExecuted: null, definer: 'root@%', comment: '' }
 ];
 const backupCalls = [];
+let pendingBackup = null;
+let holdBackup = false;
 handle('db:routines', () => ok(routines));
 handle('db:events', () => ok(routineEvents));
 handle('db:show-create', (payload) => ok({
@@ -118,10 +120,12 @@ handle('db:show-create', (payload) => ok({
 }));
 handle('db:backup', (payload) => {
   backupCalls.push(payload);
-  return ok({
+  const result = ok({
     canceled: false, id: '20261023120000-smoke.sql', filePath: '/tmp/20261023120000-smoke.sql',
     tables: 1, views: 0, triggers: 0, procedures: 1, functions: 1, events: 1, rows: 1, bytes: 128
   });
+  if (holdBackup) return new Promise((resolve) => { pendingBackup = () => resolve(result); });
+  return result;
 });
 handle('db:list-backups', () => ok([]));
 handle('file:save-text', () => ({ canceled: false }));
@@ -541,11 +545,20 @@ app.whenReady().then(async () => {
 
   await check('backup includes routines, events and the strip-DEFINER option', async () => {
     const before = calls.filter((call) => call.name === 'db:backup').length;
+    holdBackup = true;
     await evaluate('backupDatabase()');
     await until("Boolean(document.querySelector('#backupRoutineList .backup-routine'))");
     await until("Boolean(document.querySelector('#backupEventList .backup-event'))");
     assert.equal(await evaluate("document.querySelectorAll('#backupRoutineList .backup-routine').length"), 2);
     assert.equal(await evaluate("document.querySelectorAll('#backupEventList .backup-event').length"), 1);
+    await evaluate("$('#backupTableSearch').value='TABLE_1'; $('#backupTableSearch').dispatchEvent(new Event('input', { bubbles: true }))");
+    assert.equal(await evaluate("document.querySelectorAll('#backupTableList .backup-table').length"), tables.length);
+    assert.equal(await evaluate("[...document.querySelectorAll('#backupTableList .backup-table')].filter(box => !box.closest('label').hidden).length"), 5);
+    await evaluate("$('#backupDeselectVisible').click()");
+    assert.equal(await evaluate("[...document.querySelectorAll('#backupTableList .backup-table')].filter(box => !box.closest('label').hidden && box.checked).length"), 0);
+    assert.equal(await evaluate("[...document.querySelectorAll('#backupTableList .backup-table')].filter(box => box.closest('label').hidden && box.checked).length"), tables.length - 5);
+    await evaluate("$('#backupTableSearch').value=''; $('#backupTableSearch').dispatchEvent(new Event('input', { bubbles: true })); $('#backupAll').click()");
+    assert.equal(await evaluate("document.querySelectorAll('#backupTableList .backup-table:checked').length"), tables.length);
     await evaluate("$('#backupStripDefiner').checked=true; $('#backupGo').click()");
     await untilNode(() => calls.filter((call) => call.name === 'db:backup').length > before);
     const payload = calls.filter((call) => call.name === 'db:backup').at(-1).args[0];
@@ -559,8 +572,23 @@ app.whenReady().then(async () => {
     assert.equal(payload.includeStructure, true);
     assert.equal(payload.includeData, true);
     assert.match(payload.taskId, /^backup-/);
-    await until("$('#modal').textContent.includes('Sao lưu hoàn tất')");
-    assert.match(await evaluate("$('#modal').textContent"), /1 procedure, 1 function, 1 event/);
+    await until("mode === 'transfer' && $('#workspace').textContent.includes('Đang sao lưu database')");
+    assert.equal(await evaluate("$('#modal').open"), false);
+    await captureReview('backup-task');
+    await evaluate("view('query')");
+    assert.equal(await evaluate('mode'), 'query');
+    const queryBefore = calls.filter((call) => call.name === 'db:query').length;
+    await evaluate("newQuery('SELECT 1', { profileId: 'test', database: 'test' }); runQuery()");
+    assert.ok(calls.filter((call) => call.name === 'db:query').length > queryBefore);
+    assert.equal(await evaluate('transferView.state'), 'running');
+    pendingBackup();
+    pendingBackup = null;
+    holdBackup = false;
+    await until("transferView?.state === 'success'");
+    assert.equal(await evaluate('mode'), 'query');
+    assert.equal(await evaluate("$('#modal').open"), false);
+    await evaluate("view('transfer')");
+    assert.match(await evaluate("$('#workspace').textContent"), /1 procedure, 1 function, 1 event/);
   });
   const typedColumns = [
     { name: 'id', type: 'int', nullable: 'NO', key: 'PRI', extra: '' },

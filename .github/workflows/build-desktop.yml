@@ -18,16 +18,22 @@ jobs:
           - os: ubuntu-24.04
             command: pack:linux
             artifact: sqlpro-ubuntu
+            checksum: SHA256SUMS-linux.txt
           - os: windows-latest
             command: pack:windows
             artifact: sqlpro-windows
+            checksum: SHA256SUMS-windows.txt
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+      - name: Verify package versions and release tag
+        run: node scripts/check-release-version.cjs
       - run: npm ci
       - run: npm run check
       - name: Renderer smoke test (Linux)
@@ -37,6 +43,8 @@ jobs:
         if: runner.os == 'Windows'
         run: npm run test:renderer
       - run: npm run ${{ matrix.command }}
+      - name: Generate and verify SHA-256 checksums
+        run: node scripts/release-checksums.cjs release/${{ matrix.checksum }}
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -51,9 +59,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Re-verify package versions and release tag
+        run: node scripts/check-release-version.cjs
       - uses: actions/download-artifact@v4
         with:
           path: dist
+      - name: Verify downloaded artifact checksums
+        run: |
+          node scripts/release-checksums.cjs --verify dist/sqlpro-ubuntu/SHA256SUMS-linux.txt
+          node scripts/release-checksums.cjs --verify dist/sqlpro-windows/SHA256SUMS-windows.txt
       - uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

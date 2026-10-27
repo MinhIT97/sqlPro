@@ -63,3 +63,16 @@ test('supported encrypted Navicat imports still decode only in memory without lo
   assert.equal(imported.connections[0].password, marker);
   assert.equal(imported.connections.length, 1);
 });
+
+test('new Navicat imports require TLS certificate verification unless the file explicitly disables it', () => {
+  const base = { Hostname: 'db.example', Username: 'fixture', UseSSL: true };
+  const parser = parserFixture(() => JSON.stringify({ Connections: [
+    { ...base, Name: 'implicit' },
+    { ...base, Name: 'explicit-off', SSL: { VerifyCA: false } },
+    { ...base, Name: 'explicit-on', SSL: { VerifyCA: true } }
+  ] }));
+  const imported = parser.parseNavicatFile('fixture.json').connections;
+  assert.equal(imported.find((entry) => entry.name === 'implicit').ssl.verify, true);
+  assert.equal(imported.find((entry) => entry.name === 'explicit-off').ssl.verify, false);
+  assert.equal(imported.find((entry) => entry.name === 'explicit-on').ssl.verify, true);
+});

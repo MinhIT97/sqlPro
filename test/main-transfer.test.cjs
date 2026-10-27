@@ -64,7 +64,7 @@ function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }
     finish: (value) => finish(value)
   };
 }
-const tick = () => new Promise((resolve) => setImmediate(resolve));
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 const waitFor = async (predicate) => {
   for (let attempt = 0; attempt < 200; attempt += 1) {
     if (predicate()) return;
@@ -113,12 +113,13 @@ test('import và restore dùng phiên riêng, không đụng transaction của S
   const parent = r.sessions[0];
   parent.inTransaction = true;
   parent.autocommit = false;
-  assert.equal(JSON.stringify((await r.call('db:session-state', 'p1')).data), JSON.stringify({
+  const { profileId, connected, inTransaction, autocommit } = (await r.call('db:session-state', 'p1')).data;
+  assert.deepEqual({ profileId, connected, inTransaction, autocommit }, {
     profileId: 'p1',
     connected: true,
     inTransaction: true,
     autocommit: false
-  }));
+  });
   assert.equal(JSON.stringify((await r.call('db:disconnect', 'p1')).data), JSON.stringify({
     disconnected: false,
     needsConfirmation: true,

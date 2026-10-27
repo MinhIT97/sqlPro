@@ -5,6 +5,105 @@ const assert = require('node:assert/strict');
 const { loadRenderer } = require('./helpers/renderer.cjs');
 
 const rowResult = () => ({ kind: 'rows', columns: [{ name: 'value', type: 'INT' }], rows: [[1]], durationMs: 1 });
+
+test('large wide results render only the viewport and reuse ordering across selection changes', () => {
+  const r = loadRenderer();
+  const html = r.evaluate(`app.query={sortCol:0,sortDir:'DESC'};
+    app.query.result={kind:'rows',columns:Array.from({length:40},(_,i)=>({name:'column_'+i})),
+    rows:Array.from({length:5000},(_,i)=>Array.from({length:40},()=>i)),durationMs:1};
+    singleQueryResultHtml(app.query.result)`);
+  assert.equal([...html.matchAll(/data-query-row=/g)].length, 80);
+  assert.equal([...html.matchAll(/data-col-idx=/g)].length, 3200);
+  assert.match(html, /aria-rowcount="5000"/);
+  assert.equal(r.evaluate(`const order=queryGridOrderedRows(app.query.result);
+    selectQueryGridRows(app.query.result,3); order===queryGridOrderedRows(app.query.result)`), true);
+});
+
+function selectionRenderer(outcome = { ok: true, data: { affectedRows: 1 } }) {
+  const requests = [];
+  let metadataCalls = 0;
+  const r = loadRenderer({ desktop: { db: {
+    columns: async () => {
+      metadataCalls += 1;
+      return { ok: true, data: [{ name: 'id', key: 'PRI' }, { name: 'name', key: '' }] };
+    },
+    deleteRows: async (payload) => { requests.push(structuredClone(payload)); return outcome; }
+  } } });
+  r.evaluate(`app.connection={id:'current'}; app.database='elsewhere'; table='other';
+    app.query={resultContext:{profileId:'original',database:'demo'}, sortCol:0,sortDir:'ASC',result:{
+      kind:'rows', columns:[
+        {name:'id',orgName:'id',orgTable:'users',db:'demo',type:'INT',flags:2},
+        {name:'name',orgName:'name',orgTable:'users',db:'demo',type:'VARCHAR'}
+      ], rows:[[2,'B'],[1,'A'],[3,'C'],[2,'B']],originalHashes:[{},{},{},{}]}};
+    queryTablePkCache.set('original.demo.users',['id']);
+    confirmAction=async()=>true; refreshQueryResultAfterWrite=()=>{};
+    showRowConflict=(error)=>messages.push({message:error.message,type:error.code});`);
+  return { ...r, requests, metadataCalls: () => metadataCalls };
+}
+
+test('grid ranges follow sorted display order, Ctrl toggles and each result keeps its own selection', () => {
+  const r = selectionRenderer();
+  r.evaluate(`selectQueryGridRows(app.query.result,1); selectQueryGridRows(app.query.result,3,{range:true});`);
+  assert.equal(r.evaluate('JSON.stringify(queryGridSelectedIndexes(app.query.result))'), '[1,0,3]');
+  r.evaluate('selectQueryGridRows(app.query.result,0,{toggle:true})');
+  assert.equal(r.evaluate('JSON.stringify(queryGridSelectedIndexes(app.query.result))'), '[1,3]');
+  r.evaluate("app.query.sortDir='DESC'");
+  assert.equal(r.evaluate('JSON.stringify(queryGridSelectedIndexes(app.query.result))'), '[3,1]');
+  assert.equal(r.evaluate('queryGridSelection({rows:[]}).rows.size'), 0);
+});
+
+test('copy selected rows emits one CSV header, JSON array and one SQL statement per row', () => {
+  const r = selectionRenderer();
+  assert.equal(r.evaluate("queryGridCopyText(app.query.result,[1,0],1,'csv-all')"), 'id,name\r\n1,A\r\n2,B');
+  assert.equal(r.evaluate("queryGridCopyText(app.query.result,[1,0],1,'tsv-fields')"), 'id\tname');
+  assert.equal(r.evaluate("queryGridCopyText(app.query.result,[1,0],1,'cell')"), '1\tA\r\n2\tB');
+  assert.deepEqual(JSON.parse(r.evaluate("queryGridCopyText(app.query.result,[1,0],1,'json')")), [{ id: 1, name: 'A' }, { id: 2, name: 'B' }]);
+  const inserts = r.evaluate("queryGridCopyText(app.query.result,[1,0],1,'insert')");
+  assert.equal(inserts.split('\n').length, 2);
+  assert.match(inserts, /VALUES \(1, 'A'\);\nINSERT/);
+});
+
+test('bulk delete deduplicates primary keys, captures the result profile and updates rows only after success', async () => {
+  const r = selectionRenderer();
+  await r.evaluate('Promise.all([deleteQueryResultRows(app.query.result,[0,3]),deleteQueryResultRows(app.query.result,[0,3])])');
+  assert.equal(r.requests.length, 1);
+  assert.equal(r.metadataCalls(), 1);
+  assert.equal(r.requests[0].profileId, 'original');
+  assert.equal(r.requests[0].database, 'demo');
+  assert.deepEqual(r.requests[0].keysList, [{ id: 2 }]);
+  assert.deepEqual(r.requests[0].originalValues, [{ id: 2, name: 'B' }]);
+  assert.equal(r.evaluate('JSON.stringify(app.query.result.rows)'), '[[1,"A"],[3,"C"]]');
+  assert.equal(r.evaluate('app.query.result.originalHashes.length'), 2);
+  assert.equal(r.evaluate('queryGridSelection(app.query.result).rows.size'), 0);
+});
+
+test('bulk delete keeps rows and selection after cancellation, conflicts or unconfirmed affectedRows', async () => {
+  for (const outcome of [
+    { ok: false, error: { code: 'ROW_CONFLICT', message: 'Changed elsewhere' } },
+    { ok: true, data: { affectedRows: 0 } }
+  ]) {
+    const r = selectionRenderer(outcome);
+    r.evaluate('selectQueryGridRows(app.query.result,0)');
+    await r.evaluate('deleteQueryResultRows(app.query.result,[0,1])');
+    assert.equal(r.evaluate('app.query.result.rows.length'), 4);
+    assert.equal(r.evaluate('queryGridSelection(app.query.result).rows.size'), 1);
+    assert.equal(r.evaluate('queryGridSelection(app.query.result).deleting'), false);
+  }
+  const r = selectionRenderer();
+  r.evaluate('confirmAction=async()=>false');
+  await r.evaluate('deleteQueryResultRows(app.query.result,[0,1])');
+  assert.equal(r.requests.length, 0);
+  assert.equal(r.evaluate('app.query.result.rows.length'), 4);
+});
+
+test('bulk delete enforces the backend limit without splitting writes or retrying', async () => {
+  const r = selectionRenderer();
+  r.evaluate(`app.query.result.rows=Array.from({length:1001},(_,i)=>[i,'value'])`);
+  await r.evaluate('deleteQueryResultRows(app.query.result,app.query.result.rows.map((_,i)=>i))');
+  assert.equal(r.requests.length, 0);
+  assert.equal(r.evaluate('app.query.result.rows.length'), 1001);
+  assert.match(r.messages.at(-1).message, /1\.000/);
+});
 test('sorted renderer keeps original row IDs without calling indexOf for each row', () => {
   const r = loadRenderer();
   const html = r.evaluate(`(()=>{app.query={sortCol:0,sortDir:'DESC'};const rows=[[1],[3],[2]];rows.indexOf=()=>{throw new Error('quadratic lookup')};return singleQueryResultHtml({kind:'rows',columns:[{name:'id'}],rows,durationMs:1});})()`);
@@ -60,6 +159,49 @@ function setup(query = async () => ({ ok: true, data: rowResult() })) {
   renderer.evaluate("app.connections=[{id:'test', name:'Mock'}]; app.connection={id:'test', name:'Mock'}; app.database='test'; mode='query'; renderQueryTabs=()=>{};");
   return { ...renderer, requests, editor };
 }
+
+test('SQL editor Ctrl+Z/Ctrl+Y restore typed and formatted SQL per tab', () => {
+  const editor = {
+    value: 'select', selectionStart: 6, selectionEnd: 6,
+    setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; },
+    setAttribute() {}, removeAttribute() {}
+  };
+  const r = loadRenderer({ elements: new Map([['#sql', editor]]) });
+  r.evaluate("app.query={sql:'select'}; sqlEditorHistory(app.query, $('#sql'));");
+  editor.value = 'select 1';
+  editor.setSelectionRange(8, 8);
+  r.evaluate("recordSqlEditorChange($('#sql'), {before:{value:'select',start:6,end:6},inputType:'insertText'})");
+  const shortcut = (key, shiftKey = false) => {
+    let prevented = false;
+    r.context.shortcutEvent = { key, ctrlKey: true, metaKey: false, altKey: false, shiftKey,
+      preventDefault() { prevented = true; } };
+    r.evaluate("handleSqlEditorHistoryKeydown($('#sql'), shortcutEvent)");
+    assert.equal(prevented, true);
+  };
+  shortcut('z');
+  assert.equal(editor.value, 'select');
+  assert.equal(editor.selectionStart, 6);
+  shortcut('y');
+  assert.equal(editor.value, 'select 1');
+  r.evaluate('formatCurrentSql()');
+  assert.equal(editor.value, 'SELECT 1');
+  shortcut('z');
+  assert.equal(editor.value, 'select 1');
+  shortcut('z', true);
+  assert.equal(editor.value, 'SELECT 1');
+
+  r.evaluate("app.firstQuery=app.query; app.query={sql:'SELECT 2'};");
+  editor.value = 'SELECT 2';
+  editor.setSelectionRange(8, 8);
+  r.evaluate("sqlEditorHistory(app.query, $('#sql'))");
+  shortcut('z');
+  assert.equal(editor.value, 'SELECT 2');
+  r.evaluate('app.query=app.firstQuery');
+  editor.value = 'SELECT 1';
+  shortcut('z');
+  assert.equal(editor.value, 'select 1');
+  assert.equal(r.evaluate('app.query.sql'), 'select 1');
+});
 
 test('query: selected SQL is executed and saved as text without a DOM named global', async () => {
   const r = setup();
@@ -274,4 +416,59 @@ test('query results: getQueryColumnPkInfo recognizes primary key and allows upda
   assert.equal(info.colName, 'username');
   assert.equal(info.pkCols.length, 1);
   assert.equal(info.pkCols[0].index, 0);
+});
+
+test('query result copy formats preserve NULL, aliases and selected row values', () => {
+  const r = loadRenderer();
+  r.evaluate(`
+    app.database='demo'; app.connection={id:'p1'}; table='users'; app.primaryKey=['id'];
+    app.query={resultContext:{profileId:'p1',database:'demo'}};
+    app.query.result={kind:'rows',columns:[
+      {name:'id',orgName:'id',orgTable:'users',db:'demo',type:'INT',flags:2},
+      {name:'label',orgName:'name',orgTable:'users',db:'demo',type:'VARCHAR'},
+      {name:'note',orgName:'note',orgTable:'users',db:'demo',type:'VARCHAR'}
+    ],rows:[[7,'A, "B"',null]]};
+  `);
+  assert.equal(r.evaluate("queryResultCopyText(app.query.result,0,1,'cell')"), 'A, "B"');
+  assert.equal(r.evaluate("queryResultCopyText(app.query.result,0,1,'field')"), 'label');
+  assert.equal(r.evaluate("queryResultCopyText(app.query.result,0,1,'csv-all')"), 'id,label,note\r\n7,"A, ""B""",\\N');
+  assert.equal(r.evaluate("queryResultCopyText(app.query.result,0,1,'tsv-data')"), '7\t"A, ""B"""\t\\N');
+  assert.deepEqual(JSON.parse(r.evaluate("queryResultCopyText(app.query.result,0,1,'json')")),
+    { id: 7, label: 'A, "B"', note: null });
+  assert.equal(r.evaluate("queryResultCopyText(app.query.result,0,1,'insert')"),
+    "INSERT INTO `demo`.`users` (`id`, `name`, `note`) VALUES (7, 'A, \"B\"', NULL);");
+  assert.equal(r.evaluate("queryResultCopyText(app.query.result,0,1,'update')"),
+    "UPDATE `demo`.`users` SET `name` = 'A, \"B\"', `note` = NULL WHERE `id` = 7 LIMIT 1;");
+});
+
+test('query result write actions stay disabled for joins and incomplete BLOB previews', () => {
+  const r = loadRenderer();
+  r.evaluate(`app.database='demo'; app.query={resultContext:{database:'demo',profileId:'p1'}};`);
+  r.evaluate(`app.query.result={kind:'rows',columns:[
+    {name:'id',orgName:'id',orgTable:'users',type:'INT',flags:2},
+    {name:'name',orgName:'name',orgTable:'teams',type:'VARCHAR'}
+  ],rows:[[1,'Ops']]};`);
+  assert.equal(r.evaluate('queryResultTableTarget(app.query.result)'), null);
+  assert.equal(r.evaluate("queryResultStatement(app.query.result,0,'insert')"), null);
+  r.evaluate(`app.query.result.columns[1]={name:'data',orgName:'data',orgTable:'users',type:'BLOB'};
+    app.query.result.rows[0][1]='0x0102… (64 bytes)';`);
+  assert.equal(r.evaluate("queryResultStatement(app.query.result,0,'update')"), null);
+  assert.equal(r.evaluate("queryResultCopyText(app.query.result,0,1,'json')").includes('0x0102'), true);
+});
+
+test('query result UPDATE requires every column of a composite primary key', () => {
+  const r = loadRenderer();
+  r.evaluate(`app.database='demo'; app.connection={id:'p1'}; table='line_items';
+    app.primaryKey=['order_id','line_id'];
+    app.query={resultContext:{database:'demo',profileId:'p1'}};
+    app.query.result={kind:'rows',columns:[
+      {name:'order_id',orgName:'order_id',orgTable:'line_items',db:'demo',type:'INT',flags:2},
+      {name:'value',orgName:'value',orgTable:'line_items',db:'demo',type:'VARCHAR'}
+    ],rows:[[12,'sample']]};`);
+  assert.equal(r.evaluate("queryResultStatement(app.query.result,0,'update')"), null);
+  r.evaluate(`app.query.result.columns.splice(1,0,
+    {name:'line_id',orgName:'line_id',orgTable:'line_items',db:'demo',type:'INT',flags:2});
+    app.query.result.rows[0].splice(1,0,4);`);
+  assert.match(r.evaluate("queryResultStatement(app.query.result,0,'update')"),
+    /WHERE `order_id` = 12 AND `line_id` = 4 LIMIT 1/);
 });

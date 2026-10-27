@@ -155,7 +155,7 @@ function taskProgressHtml(operation, target) {
       : operation === 'export' ? 'Đã ghi tệp'
         : operation === 'import' ? 'Đã đọc tệp' : 'Đang xử lý';
   const cancellable = operation !== 'drop-table';
-  const percent = operation === 'backup' || operation === 'restore' || operation === 'import' ? 'value="0" max="100"' : '';
+  const percent = operation === 'backup' || operation === 'restore' || operation === 'import' ? 'max="100"' : '';
   return `
     <div class="transfer-progress transfer-${operation}" data-transfer-running="${operation}" role="status" aria-live="polite">
       <div class="task-heading"><span class="task-icon" aria-hidden="true">${icon}</span><div>
@@ -208,8 +208,16 @@ function cancelActiveTransfer() {
   }
   return call(desktop.db.cancelTask(transfer.profileId, transfer.taskId))
     .then((result) => {
-      if (result && result.canceled) toast('Đã yêu cầu hủy tác vụ. SqlPro sẽ dừng ở ranh giới an toàn.');
-      else toast('Tác vụ đã dừng trước khi yêu cầu hủy được xử lý.');
+      if (result && result.canceled) {
+        toast('Đã gửi yêu cầu hủy. Tab tác vụ chỉ chuyển sang trạng thái đã hủy khi main xác nhận tác vụ đã dừng.');
+        return;
+      }
+      transfer.canceling = false;
+      if (button) {
+        button.disabled = false;
+        button.textContent = 'Hủy tác vụ';
+      }
+      toast('Tác vụ đã dừng trước khi yêu cầu hủy được xử lý.');
     })
     .catch((error) => {
       transfer.canceling = false;
@@ -368,10 +376,20 @@ function showTableDropProgress(database, tableName) {
   startTaskClock();
 }
 
+function setProgressValue(bar, value) {
+  if (!bar) return;
+  if (Number.isFinite(value)) {
+    bar.value = Math.max(0, Math.min(100, value));
+    return;
+  }
+  if (typeof bar.removeAttribute === 'function') bar.removeAttribute('value');
+  else bar.value = 0;
+}
+
 function updateTransferProgress(progress) {
   if (!progress || !['backup', 'restore', 'import', 'export'].includes(progress.operation)) return;
   if (!activeTransfer || activeTransfer.operation !== progress.operation) return;
-  if (progress.taskId && activeTransfer.taskId && progress.taskId !== activeTransfer.taskId) return;
+  if (activeTransfer.taskId && progress.taskId !== activeTransfer.taskId) return;
   if (progress.profileId && activeTransfer.profileId && progress.profileId !== activeTransfer.profileId) return;
   if (transferView?.state === 'running' && transferView.taskId === activeTransfer.taskId) {
     transferView.progress = progress;
@@ -408,11 +426,14 @@ function updateTransferProgress(progress) {
       currentObject.title = currentObject.textContent;
     }
     const percent = Number(progress.percent);
-    if (Number.isFinite(percent) && percent >= 0) {
+    const percentLabel = $('#transferPercent');
+    if (progress.percent !== null && progress.percent !== undefined && Number.isFinite(percent) && percent >= 0) {
       const value = Math.max(0, Math.min(99, Math.floor(percent)));
-      if (bar) bar.value = value;
-      const percentLabel = $('#transferPercent');
+      setProgressValue(bar, value);
       if (percentLabel) percentLabel.textContent = `~${value}% · ước tính theo số dòng của MySQL`;
+    } else {
+      setProgressValue(bar, null);
+      if (percentLabel) percentLabel.textContent = 'Tiến độ ước tính: chưa đủ dữ liệu';
     }
     if (step) step.textContent = progress.stage === 'finishing' ? '● Đang hoàn tất'
       : progress.stage === 'table-data' ? '● Đang xuất dữ liệu' : '● Đang xuất cấu trúc';
@@ -427,7 +448,7 @@ function updateTransferProgress(progress) {
     const duplicates = Number(progress.duplicates || 0);
     detail.textContent = `${Number(progress.rows || 0).toLocaleString()} dòng đã đọc · ${written.toLocaleString()} đã ghi${duplicates ? ` · ${duplicates.toLocaleString()} trùng` : ''}`;
     size.textContent = `${formatBytes(progress.bytes)} / ${formatBytes(progress.totalBytes)}`;
-    if (bar) bar.value = progress.totalBytes ? Math.min(100, Math.round(progress.bytes / progress.totalBytes * 100)) : 0;
+    setProgressValue(bar, progress.totalBytes ? Math.min(100, Math.round(progress.bytes / progress.totalBytes * 100)) : null);
     if (step) step.textContent = '● Đang nhập dữ liệu';
   } else {
     const scanning = progress.phase === 'scan';
@@ -435,10 +456,18 @@ function updateTransferProgress(progress) {
       ? `${Number(progress.statements || 0).toLocaleString()} câu lệnh đã kiểm tra${progress.skipped ? ` · ${progress.skipped} bỏ qua` : ''}`
       : `${Number(progress.executed || 0).toLocaleString()} câu lệnh đã chạy${progress.skipped ? ` · ${progress.skipped} bỏ qua` : ''}`;
     size.textContent = `${formatBytes(progress.bytes)} / ${formatBytes(progress.totalBytes)} · ${scanning ? 'lượt kiểm tra' : 'lượt phục hồi'}`;
-    if (bar) bar.value = progress.totalBytes
-      ? Math.min(scanning ? 50 : 99, Math.round((scanning ? 0 : 50) + progress.bytes / progress.totalBytes * 50)) : 0;
+    const totalBytes = Number(progress.totalBytes) || 0;
+    if (totalBytes > 0) {
+      setProgressValue(bar, Math.min(scanning ? 50 : 99, Math.round((scanning ? 0 : 50) + progress.bytes / totalBytes * 50)));
+    } else {
+      setProgressValue(bar, null);
+    }
     const percentLabel = $('#transferPercent');
-    if (percentLabel) percentLabel.textContent = `${bar?.value || 0}% tổng tiến trình · ${scanning ? 'kiểm tra tệp' : 'chạy SQL'} ${progress.totalBytes ? Math.min(100, Math.round(progress.bytes / progress.totalBytes * 100)) : 0}%`;
+    if (percentLabel) {
+      percentLabel.textContent = totalBytes > 0
+        ? `~${bar?.value || 0}% tổng tiến trình · ước tính theo dung lượng tệp · ${scanning ? 'đã kiểm tra' : 'đã chạy'} ${Math.min(100, Math.round(progress.bytes / totalBytes * 100))}% tệp`
+        : `Tiến độ không xác định · ${scanning ? 'đang kiểm tra' : 'đang chạy SQL'} tệp`;
+    }
     const currentObject = $('#transferObject');
     if (currentObject) {
       const name = typeof progress.currentObject === 'string' ? progress.currentObject : '';
@@ -455,6 +484,63 @@ function setStatus(text) {
   $('#status').textContent = text;
 }
 
+function connectionTlsStatus(profile, tls = null) {
+  if (!profile) return '';
+  const ssl = profile.ssl || {};
+  if (tls && tls.active === true) {
+    const label = tls.version || tls.cipher || 'TLS';
+    return `${ssl.verify === true ? 'TLS ✓' : '⚠ TLS chưa xác thực'} (${label})`;
+  }
+  if (tls && tls.active === false && tls.unknown !== true) {
+    return ssl.enabled ? '⚠ TLS cấu hình nhưng phiên không mã hóa' : 'Không TLS';
+  }
+  if (ssl.enabled) return ssl.verify === true ? 'TLS ✓' : '⚠ TLS chưa xác thực';
+  return profile.ssh?.enabled ? 'SSH · Không TLS' : 'Không TLS';
+}
+
+function connectionTransportBadge(profile) {
+  if (!profile) return '';
+  if (profile.ssl?.enabled) return profile.ssl.verify === true ? 'TLS ✓' : '⚠ TLS chưa xác thực';
+  return profile.ssh?.enabled ? 'SSH · Không TLS' : 'Không TLS';
+}
+
+function connectionSecuritySummary(profile, tls = null) {
+  if (!profile) return '';
+  const ssl = profile.ssl || {};
+  const ssh = profile.ssh || {};
+  const notes = [];
+  if (tls && tls.active === true) {
+    const cipher = [tls.version, tls.cipher].filter(Boolean).join('/');
+    notes.push(`Phiên hiện tại dùng TLS${cipher ? ` (${cipher})` : ''}${ssl.verify === true ? ' và đã xác thực chứng chỉ' : ', nhưng chưa xác thực chứng chỉ máy chủ'}.`);
+  } else if (tls && tls.active === false && tls.unknown !== true && ssl.enabled) {
+    notes.push('Đã cấu hình TLS nhưng phiên hiện tại không báo cáo mã hóa.');
+  } else if (ssl.enabled) {
+    notes.push(ssl.verify === true
+      ? 'TLS có xác thực chứng chỉ máy chủ.'
+      : 'TLS đang tắt xác thực chứng chỉ: kết nối có thể bị nghe lén hoặc giả mạo máy chủ.');
+  } else {
+    notes.push('Kết nối MySQL không dùng TLS: mật khẩu và dữ liệu có thể bị đọc trên đường truyền.');
+  }
+  if (ssh.enabled) {
+    const local = ['localhost', '127.0.0.1', '::1'].includes(String(profile.host || '').toLowerCase());
+    notes.push(local
+      ? 'SSH tunnel chỉ bảo vệ đoạn từ máy này tới SSH host; SqlPro không thể xác minh MySQL chỉ nghe loopback, không có proxy chuyển tiếp, hoặc đoạn nội bộ được mã hóa.'
+      : `SSH tunnel chỉ bảo vệ đoạn từ máy này tới SSH host; đoạn từ SSH host tới MySQL (${profile.host || 'đích'}) phụ thuộc địa chỉ và cấu hình thực tế, không mặc định an toàn toàn tuyến.`);
+  }
+  if (profile.allowCleartextPassword === true) {
+    notes.push(ssl.enabled && ssl.verify === true
+      ? 'mysql_clear_password sẽ được gửi trong TLS đã xác thực chứng chỉ.'
+      : 'mysql_clear_password chỉ được cho phép nhờ đích loopback trên máy SSH với host key đã xác minh; cấu hình mạng thực tế của máy đó không thể xác minh từ SqlPro.');
+  }
+  return notes.join(' ');
+}
+
+function activeSessionTls() {
+  return app.sessionState && app.sessionState.profileId === app.connection?.id
+    ? app.sessionState.tls || null
+    : null;
+}
+
 function setConnectionState(kind, detail = '') {
   const dot = $('#connDot');
   const label = $('#connState');
@@ -462,19 +548,23 @@ function setConnectionState(kind, detail = '') {
   if (kind === 'connected') {
     dot.style.background = '#24a68b';
     label.textContent = detail || 'Đã kết nối';
-    serverInfo.textContent = `${app.serverType.toUpperCase()} ${app.server || ''} • ${app.database || 'chưa chọn database'}`;
+    serverInfo.textContent = `${app.serverType.toUpperCase()} ${app.server || ''} • ${app.database || 'chưa chọn database'} • ${connectionTlsStatus(app.connection, activeSessionTls())}`;
+    serverInfo.title = connectionSecuritySummary(app.connection, activeSessionTls());
   } else if (kind === 'connecting') {
     dot.style.background = '#c9a227';
     label.textContent = 'Đang kết nối…';
     serverInfo.textContent = 'Đang kết nối…';
+    serverInfo.title = '';
   } else if (kind === 'error') {
     dot.style.background = '#c24b4b';
     label.textContent = detail || 'Lỗi kết nối';
     serverInfo.textContent = 'Chưa kết nối';
+    serverInfo.title = '';
   } else {
     dot.style.background = '#c9d3db';
     label.textContent = detail || 'Chưa kết nối';
     serverInfo.textContent = 'Chưa kết nối';
+    serverInfo.title = '';
   }
 }
 
@@ -487,10 +577,22 @@ async function call(promise) {
     if (response.error?.fingerprint) error.fingerprint = response.error.fingerprint;
     if (response.error?.expectedFingerprint) error.expectedFingerprint = response.error.expectedFingerprint;
     if (response.error?.partial) error.partial = response.error.partial;
+    if (response.error?.impact) error.impact = response.error.impact;
+    if (response.error?.preflight) error.preflight = response.error.preflight;
     if (response.error?.conflict) error.conflict = response.error.conflict;
     throw error;
   }
   return response.data;
+}
+
+async function writeClipboardText(text) {
+  if (desktop?.writeClipboardText) return desktop.writeClipboardText(String(text));
+  return navigator.clipboard.writeText(String(text));
+}
+
+async function readClipboardText() {
+  if (desktop?.readClipboardText) return desktop.readClipboardText();
+  return navigator.clipboard.readText();
 }
 
 function quoteId(name) {
@@ -809,15 +911,14 @@ function acceptSqlSuggestion(editor, index = sqlAutocomplete.selected) {
   const item = sqlAutocomplete.items[index];
   const context = sqlAutocomplete.context;
   if (!editor || !item || !context) return;
+  const before = sqlEditorSnapshot(editor);
   const insertText = String(item.insertText ?? item.label);
   editor.setRangeText(insertText, context.start, context.end, 'end');
   if (/\(\)$/.test(insertText)) {
     const caret = editor.selectionStart - 1;
     editor.setSelectionRange(caret, caret);
   }
-  app.query.sql = editor.value;
-  sessionStorage.setItem('query', editor.value);
-  persistState();
+  recordSqlEditorChange(editor, { before });
   closeSqlSuggestions();
   editor.focus();
 }
@@ -940,7 +1041,7 @@ async function showErDiagramModal() {
         </div>
         <div style="display:flex; align-items:center; gap:8px;">
           <button class="primary" id="exportErdPngBtn" style="padding:4px 10px; font-size:0.8em;">↧ Xuất PNG</button>
-          <button class="close-btn" onclick="closeModal()">✕</button>
+          <button class="close-btn" data-click="close-modal">✕</button>
         </div>
       </div>
       <div class="modal-body" style="padding:0; position:relative; overflow:auto; background:#0b0f19; height:72vh;">
@@ -1388,7 +1489,7 @@ function renderSidebar() {
           </button>
           <button class="more" data-menu="${esc(connection.id)}" title="Tùy chọn" aria-label="Tùy chọn kết nối ${esc(connection.name)}">···</button>
         </div>
-        <div class="connmeta" title="${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port}">${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port}${connection.ssh.enabled ? ' · SSH' : ''}</div>
+        <div class="connmeta" title="${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port} · ${esc(connectionSecuritySummary(connection))}">${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port}${connection.ssh?.enabled ? ' · SSH' : ''} · ${esc(connectionTransportBadge(connection))}</div>
         ${isExpanded ? `<div class="conn-children">${activeBranch}</div>` : ''}
       </div>
     `;
@@ -1397,8 +1498,8 @@ function renderSidebar() {
   list.innerHTML = connectionHtml || `
     <div class="empty small">
       ${term ? 'Không có kết nối phù hợp.' : `Workspace <strong>${esc(activeWorkspace().name)}</strong> chưa có kết nối.`}<br>
-      <button onclick="connection()">Kết nối mới</button>
-      <button onclick="importNavicat()">Nhập Navicat</button>
+      <button data-click="new-connection">Kết nối mới</button>
+      <button data-click="import-navicat">Nhập Navicat</button>
     </div>
   `;
   list.scrollTop = scrollTop;
@@ -1585,7 +1686,7 @@ async function openRoutineDetails(kind, name) {
       <h2>Không đọc được ${esc(kind)} ${esc(name)}</h2>
       <div class="errorbox">${esc(error.message)}</div>
       <p class="hint">Lỗi quyền truy cập được hiển thị riêng, không được coi là “chưa có đối tượng”.</p>
-      <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
+      <div class="actions"><button class="primary" data-click="close-modal">Đóng</button></div>
     `);
     return;
   }
@@ -1602,7 +1703,7 @@ async function openRoutineDetails(kind, name) {
     <div class="actions">
       <button class="danger" id="routineDrop" ${detail.sql ? '' : 'disabled'}>Xóa ${esc(kind)}</button>
       <span class="spacer"></span>
-      <button onclick="closeModal()">Đóng</button>
+      <button data-click="close-modal">Đóng</button>
       <button class="primary" id="routineEdit" ${detail.sql ? '' : 'disabled'}>Mở trong SQL Editor</button>
     </div>
   `, true);
@@ -1669,7 +1770,7 @@ function newRoutineModal(kind) {
     <label>Tên ${label.toLowerCase()}</label>
     <input id="newRoutineName" value="${kind === 'event' ? 'event_moi' : kind === 'function' ? 'function_moi' : 'procedure_moi'}" maxlength="64">
     <div class="actions">
-      <button onclick="closeModal()">Hủy</button>
+      <button data-click="close-modal">Hủy</button>
       <button class="primary" id="newRoutineGo">Mở SQL Editor</button>
     </div>
   `);
@@ -1724,7 +1825,7 @@ function saveQuery() {
     <label>Tên truy vấn</label>
     <input id="savedQueryName" value="${esc(suggested)}" maxlength="80">
     <div class="actions">
-      <button onclick="closeModal()">Hủy</button>
+      <button data-click="close-modal">Hủy</button>
       <button class="primary" id="savedQueryGo">Lưu</button>
     </div>
   `);
@@ -1771,7 +1872,7 @@ function renameSavedQuery(id) {
     <label>Tên mới</label>
     <input id="renameSavedQueryName" value="${esc(entry.name)}" maxlength="80">
     <div class="actions">
-      <button onclick="closeModal()">Hủy</button>
+      <button data-click="close-modal">Hủy</button>
       <button class="primary" id="renameSavedQueryGo">Đổi tên</button>
     </div>
   `);
@@ -1940,7 +2041,7 @@ function createDatabaseModal() {
       </div>
     </div>
     <div class="actions">
-      <button onclick="closeModal()">Hủy</button>
+      <button data-click="close-modal">Hủy</button>
       <button class="primary" id="btnSubmitCreateDb">Tạo Database</button>
     </div>
   `);
@@ -2063,7 +2164,7 @@ function createTableModal() {
           <span class="muted">Storage engine: InnoDB • Charset: utf8mb4</span>
         </div>
         <div class="actions">
-          <button onclick="closeModal()">Hủy</button>
+          <button data-click="close-modal">Hủy</button>
           <button class="primary" id="btnSaveNewTable">Tạo bảng</button>
         </div>
       </div>
@@ -2196,7 +2297,7 @@ async function dropTableAction(tableName) {
     modal(`
       <h2>Đã xóa bảng</h2>
       <p>Bảng <strong>${esc(database)}.${esc(targetTable)}</strong> đã được xóa.</p>
-      <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
+      <div class="actions"><button class="primary" data-click="close-modal">Đóng</button></div>
     `);
   } catch (err) {
     setStatus(`Xóa bảng ${targetTable} thất bại`);
@@ -2204,7 +2305,7 @@ async function dropTableAction(tableName) {
       <h2>Xóa bảng thất bại</h2>
       <p>${esc(database)}.${esc(targetTable)}</p>
       <div class="errorbox">${esc(err.message)}</div>
-      <div class="actions"><button class="primary" onclick="closeModal()">Đóng</button></div>
+      <div class="actions"><button class="primary" data-click="close-modal">Đóng</button></div>
     `);
   }
 }
@@ -2223,7 +2324,7 @@ async function showProcesslistModal() {
           <h3>🖥️ Quản Lý Tiến Trình <span class="modal-title-tag">Processlist</span></h3>
           <button class="refresh-header-btn" id="refreshProcesslistBtn" title="Làm mới danh sách tiến trình">↻ Làm mới</button>
         </div>
-        <button class="close-btn" onclick="closeModal()" title="Đóng (Esc)" aria-label="Đóng">✕</button>
+        <button class="close-btn" data-click="close-modal" title="Đóng (Esc)" aria-label="Đóng">✕</button>
       </div>
       <div class="modal-body">
         <div class="processlist-toolbar">
@@ -2246,7 +2347,7 @@ async function showProcesslistModal() {
         <div class="modal-footer-hint">
           <span>💡 <em>Nhấp vào câu lệnh SQL để sao chép nhanh vào bộ nhớ tạm.</em></span>
         </div>
-        <button class="secondary" onclick="closeModal()">Đóng (Esc)</button>
+        <button class="secondary" data-click="close-modal">Đóng (Esc)</button>
       </div>
     </div>
   `);
@@ -2375,7 +2476,7 @@ async function showProcesslistModal() {
           const sql = codeEl.dataset.fullSql;
           if (sql) {
             try {
-              await navigator.clipboard.writeText(sql);
+              await writeClipboardText(sql);
               toast('Đã sao chép câu lệnh SQL vào bộ nhớ tạm', 'success');
             } catch {}
           }
@@ -2431,7 +2532,7 @@ async function showServerVarsModal(defaultTab = 'variables') {
             <button class="vars-tab-btn ${defaultTab === 'status' ? 'active' : ''}" id="tabStatusBtn">Trạng thái máy chủ (STATUS)</button>
           </div>
         </div>
-        <button class="close-btn" onclick="closeModal()" title="Đóng (Esc)" aria-label="Đóng">✕</button>
+        <button class="close-btn" data-click="close-modal" title="Đóng (Esc)" aria-label="Đóng">✕</button>
       </div>
       <div class="modal-body">
         <div style="margin-bottom:12px; display:flex; gap:10px;">
@@ -2446,7 +2547,7 @@ async function showServerVarsModal(defaultTab = 'variables') {
         <div style="font-size:11px; color:#64748b;">
           <span>💡 <em>Chế độ xem thông tin cấu hình và trạng thái của server MySQL.</em></span>
         </div>
-        <button class="secondary" onclick="closeModal()">Đóng (Esc)</button>
+        <button class="secondary" data-click="close-modal">Đóng (Esc)</button>
       </div>
     </div>
   `);
@@ -2538,7 +2639,7 @@ async function runTableMaintenance(tableName, operation) {
       <div class="modal-card" style="max-width:620px;">
         <div class="modal-header">
           <h3>🛠️ Kết Quả Bảo Trì: ${esc(opName)} TABLE</h3>
-          <button class="close-btn" onclick="closeModal()">✕</button>
+          <button class="close-btn" data-click="close-modal">✕</button>
         </div>
         <div class="modal-body" style="padding:16px;">
           <p style="margin-bottom:12px; color:#9ca3af;">Đã thực thi trên bảng <strong>${esc(app.database)}.${esc(tableName)}</strong>:</p>
@@ -2564,7 +2665,7 @@ async function runTableMaintenance(tableName, operation) {
           </table>
         </div>
         <div class="modal-footer" style="text-align: right; margin-top: 16px;">
-          <button class="primary" onclick="closeModal()">Đóng</button>
+          <button class="primary" data-click="close-modal">Đóng</button>
         </div>
       </div>
     `);
@@ -2576,6 +2677,305 @@ async function runTableMaintenance(tableName, operation) {
   }
 }
 
+function queryResultTableTarget(result) {
+  if (result?.isExplain || !result?.columns?.length) return null;
+  const first = result.columns[0];
+  const targetTable = first.orgTable || first.table;
+  const database = first.db || app.query?.resultContext?.database || app.query?.database || app.database;
+  if (!targetTable || !database) return null;
+  if (result.columns.some((column) => (column.orgTable || column.table) !== targetTable
+    || (column.db && column.db !== database)
+    || (first.table && column.table && column.table !== first.table))) return null;
+  return { targetTable, database, profileId: app.query?.resultContext?.profileId || app.query?.profileId || app.connection?.id || null };
+}
+
+function queryResultPrimaryKeyIndexes(result, target) {
+  const cacheKey = `${target.profileId || ''}.${target.database}.${target.targetTable}`;
+  const cached = queryTablePkCache.get(cacheKey);
+  const currentTable = target.targetTable === table && target.database === app.database
+    && target.profileId === app.connection?.id ? app.primaryKey : null;
+  const keys = cached || currentTable || [];
+  if (!keys.length) return [];
+  const indexes = keys.map((key) => result.columns.findIndex((column) =>
+    (column.orgName || column.name).toLowerCase() === key.toLowerCase()
+    && (column.orgTable || column.table) === target.targetTable
+    && (!column.db || column.db === target.database)));
+  return indexes.every((index) => index >= 0) ? indexes : [];
+}
+
+function queryResultSqlValue(value, column) {
+  if (value === null || value === undefined) return 'NULL';
+  if (typeof value === 'number') return String(value);
+  if (/^(?:tinyblob|blob|mediumblob|longblob|binary|varbinary|bit)\b/i.test(column.type || '')
+    && /^0x[0-9a-f]*$/i.test(String(value))) return String(value);
+  return quoteSqlString(value);
+}
+
+function queryResultStatement(result, rowIndex, kind) {
+  const target = queryResultTableTarget(result);
+  const row = result?.rows?.[rowIndex];
+  if (!target || !row || result.columns.some((column) => !column.orgName || /\bgenerated\b/i.test(column.extra || ''))
+    || result.columns.some((column, index) => /… \(\d+ bytes\)$/.test(String(row[index])))) return null;
+  const names = result.columns.map((column) => column.orgName);
+  if (new Set(names.map((name) => name.toLowerCase())).size !== names.length) return null;
+  const tableName = `${quoteId(target.database)}.${quoteId(target.targetTable)}`;
+  const values = row.map((value, index) => queryResultSqlValue(value, result.columns[index]));
+  if (kind === 'insert') {
+    return `INSERT INTO ${tableName} (${names.map(quoteId).join(', ')}) VALUES (${values.join(', ')});`;
+  }
+  if (kind !== 'update') return null;
+  const keys = queryResultPrimaryKeyIndexes(result, target);
+  if (!keys.length || keys.some((index) => row[index] === null || row[index] === undefined)) return null;
+  const changes = names.map((name, index) => keys.includes(index) ? null : `${quoteId(name)} = ${values[index]}`).filter(Boolean);
+  if (!changes.length) return null;
+  const where = keys.map((index) => `${quoteId(names[index])} = ${values[index]}`).join(' AND ');
+  return `UPDATE ${tableName} SET ${changes.join(', ')} WHERE ${where} LIMIT 1;`;
+}
+
+function queryResultCopyText(result, rowIndex, colIndex, kind) {
+  const row = result?.rows?.[rowIndex];
+  if (!row || !result.columns?.[colIndex]) return null;
+  if (kind === 'cell') return row[colIndex] === null || row[colIndex] === undefined ? '' : String(row[colIndex]);
+  if (kind === 'field') return result.columns[colIndex].name;
+  if (kind === 'insert' || kind === 'update') return queryResultStatement(result, rowIndex, kind);
+  const names = ExportValues.uniqueColumnNames(result.columns.map((column) => column.name));
+  if (kind === 'json') {
+    const object = Object.create(null);
+    names.forEach((name, index) => { object[name] = row[index]; });
+    return JSON.stringify(object, null, 2);
+  }
+  const match = /^(tsv|csv)-(data|fields|all)$/.exec(kind);
+  if (!match) return null;
+  const delimiter = match[1] === 'tsv' ? '\t' : ',';
+  const fields = names.map((name) => ExportValues.csvField(name, delimiter)).join(delimiter);
+  const data = row.map((value) => ExportValues.csvField(value, delimiter)).join(delimiter);
+  return match[2] === 'fields' ? fields : match[2] === 'data' ? data : `${fields}\r\n${data}`;
+}
+
+const queryGridSelections = new WeakMap();
+const queryGridOrderCache = new WeakMap();
+
+function queryGridOrderedRows(result) {
+  const column = app.query.sortCol;
+  const direction = app.query.sortDir;
+  const cached = queryGridOrderCache.get(result);
+  if (cached && cached.rows === result.rows && cached.length === result.rows.length
+    && cached.column === column && cached.direction === direction) return cached.ordered;
+  const ordered = QueryResults.orderedRows(result.rows, column < result.columns.length ? column : null, direction);
+  queryGridOrderCache.set(result, { rows: result.rows, length: result.rows.length, column, direction, ordered });
+  return ordered;
+}
+
+function queryGridSelection(result) {
+  if (!queryGridSelections.has(result)) queryGridSelections.set(result, { rows: new Set(), anchor: null, focus: null });
+  return queryGridSelections.get(result);
+}
+
+function queryGridRowOrder(result) {
+  return queryGridOrderedRows(result).map(({ origIndex }) => origIndex);
+}
+
+function queryGridSelectedIndexes(result) {
+  const selected = queryGridSelection(result).rows;
+  return queryGridRowOrder(result).filter((index) => selected.has(index));
+}
+
+function selectQueryGridRows(result, index, { toggle = false, range = false, base = null, order = null } = {}) {
+  const selection = queryGridSelection(result);
+  if (!result.rows[index]) return;
+  if (range && selection.anchor !== null) {
+    const indexes = order || queryGridRowOrder(result);
+    const start = indexes.indexOf(selection.anchor);
+    const end = indexes.indexOf(index);
+    if (start < 0 || end < 0) return;
+    selection.rows = new Set(base || []);
+    indexes.slice(Math.min(start, end), Math.max(start, end) + 1).forEach((row) => selection.rows.add(row));
+  } else if (toggle) {
+    if (selection.rows.has(index)) selection.rows.delete(index);
+    else selection.rows.add(index);
+    selection.anchor = index;
+  } else {
+    selection.rows = new Set([index]);
+    selection.anchor = index;
+  }
+  selection.focus = index;
+}
+
+function updateQueryGridSelection(result) {
+  if (getActiveQueryResult() !== result) return;
+  const selected = queryGridSelection(result).rows;
+  document.querySelectorAll('#queryResult tr[data-query-row]').forEach((row) => {
+    const active = selected.has(Number(row.dataset.queryRow));
+    if (row.classList.contains('query-row-selected') !== active) {
+      row.classList.toggle('query-row-selected', active);
+      row.setAttribute('aria-selected', String(active));
+    }
+  });
+  const status = $('#queryResult [data-query-selection-count]');
+  if (status) status.textContent = `${selected.size.toLocaleString()} dòng đã chọn`;
+}
+
+function queryGridCopyText(result, indexes, colIndex, kind) {
+  if (!indexes.length) return null;
+  if (kind === 'field' || /^(tsv|csv)-fields$/.test(kind)) return queryResultCopyText(result, indexes[0], colIndex, kind);
+  if (kind === 'cell' && indexes.length === 1) return queryResultCopyText(result, indexes[0], colIndex, kind);
+  if (kind === 'json') {
+    const objects = indexes.map((index) => JSON.parse(queryResultCopyText(result, index, colIndex, kind)));
+    return indexes.length === 1 ? JSON.stringify(objects[0], null, 2) : JSON.stringify(objects, null, 2);
+  }
+  const format = kind === 'cell' ? 'tsv-data' : kind;
+  const texts = indexes.map((index, position) => queryResultCopyText(result, index, colIndex,
+    position > 0 ? format.replace(/-all$/, '-data') : format));
+  return texts.some((text) => text === null) ? null : texts.join(kind === 'insert' || kind === 'update' ? '\n' : '\r\n');
+}
+
+function setupQueryGridSelection(output) {
+  setupQueryGridViewport(output);
+  let drag = null;
+  let frame = null;
+  const isEditor = (target) => target.closest('input, textarea, select, button, [contenteditable="true"], .editing-cell');
+  const stopDrag = () => {
+    drag = null;
+    if (frame !== null) cancelAnimationFrame(frame);
+    frame = null;
+    document.removeEventListener('mousemove', moveDrag);
+    document.removeEventListener('mouseup', stopDrag);
+    window.removeEventListener('blur', stopDrag);
+  };
+  const drawDrag = () => {
+    frame = null;
+    if (!drag || !output.isConnected || getActiveQueryResult() !== drag.result) { stopDrag(); return; }
+    const { box, x, y } = drag;
+    const bounds = box.getBoundingClientRect();
+    const scroll = y < bounds.top + 24 ? -18 : y > bounds.bottom - 24 ? 18 : 0;
+    const oldScroll = box.scrollTop;
+    if (scroll) box.scrollTop += scroll;
+    const target = document.elementFromPoint(Math.max(bounds.left + 2, Math.min(x, bounds.right - 2)),
+      Math.max(bounds.top + 2, Math.min(y, bounds.bottom - 2)))?.closest('tr[data-query-row]');
+    if (target && box.contains(target)) {
+      const index = Number(target.dataset.queryRow);
+      if (index !== drag.last) {
+        drag.last = index;
+        selectQueryGridRows(drag.result, index, { range: true, base: drag.base, order: drag.order });
+        updateQueryGridSelection(drag.result);
+      }
+    }
+    if (scroll && oldScroll !== box.scrollTop) frame = requestAnimationFrame(drawDrag);
+  };
+  const moveDrag = (event) => {
+    if (!drag) return;
+    if (!(event.buttons & 1)) { stopDrag(); return; }
+    event.preventDefault();
+    drag.x = event.clientX;
+    drag.y = event.clientY;
+    if (frame === null) frame = requestAnimationFrame(drawDrag);
+  };
+  output.addEventListener('mousedown', (event) => {
+    if (event.button !== 0 || isEditor(event.target)) return;
+    const row = event.target.closest('tr[data-query-row]');
+    if (!row) return;
+    const result = getActiveQueryResult();
+    if (!result?.rows) return;
+    event.preventDefault();
+    stopDrag();
+    const box = row.closest('.tablebox');
+    box.focus({ preventScroll: true });
+    const index = Number(row.dataset.queryRow);
+    const toggle = event.ctrlKey || event.metaKey;
+    const selection = queryGridSelection(result);
+    const base = toggle ? new Set(selection.rows) : null;
+    const order = queryGridRowOrder(result);
+    selectQueryGridRows(result, index, { toggle, range: event.shiftKey, base, order });
+    updateQueryGridSelection(result);
+    if (event.detail > 1 || (toggle && !event.shiftKey)) return;
+    drag = { result, box, base, order, last: index, x: event.clientX, y: event.clientY };
+    document.addEventListener('mousemove', moveDrag, { passive: false });
+    document.addEventListener('mouseup', stopDrag);
+    window.addEventListener('blur', stopDrag);
+  });
+  output.addEventListener('keydown', (event) => {
+    if (isEditor(event.target) || !event.target.closest('[data-query-grid]')) return;
+    const result = getActiveQueryResult();
+    if (!result?.rows) return;
+    const selection = queryGridSelection(result);
+    const command = event.ctrlKey || event.metaKey;
+    const key = event.key.toLowerCase();
+    if (command && key === 'a') {
+      event.preventDefault(); event.stopPropagation();
+      const order = queryGridRowOrder(result);
+      selection.rows = new Set(order);
+      selection.anchor = order[0] ?? null;
+      selection.focus = order.at(-1) ?? null;
+      updateQueryGridSelection(result);
+    } else if (command && key === 'c' && selection.rows.size) {
+      event.preventDefault(); event.stopPropagation();
+      const text = queryGridCopyText(result, queryGridSelectedIndexes(result), 0, 'tsv-data');
+      void writeClipboardText(text).catch((error) => toast(error.message, 'error'));
+    } else if (event.key === 'Delete' && selection.rows.size) {
+      event.preventDefault(); event.stopPropagation();
+      void deleteQueryResultRows(result, queryGridSelectedIndexes(result));
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      selection.rows.clear(); selection.anchor = null; selection.focus = null;
+      updateQueryGridSelection(result);
+    } else if (['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault(); event.stopPropagation();
+      const order = queryGridRowOrder(result);
+      if (!order.length) return;
+      const current = order.indexOf(selection.focus);
+      const position = event.key === 'Home' ? 0 : event.key === 'End' ? order.length - 1
+        : Math.max(0, Math.min(order.length - 1, current < 0 ? 0 : current + (event.key === 'ArrowDown' ? 1 : -1)));
+      selectQueryGridRows(result, order[position], { range: event.shiftKey });
+      updateQueryGridSelection(result);
+      const box = output.querySelector('[data-query-grid]');
+      if (result.rows.length > 200 && box) {
+        box.scrollTop = Math.max(0, position * QUERY_GRID_ROW_HEIGHT * ((app.query.gridZoom || 100) / 100));
+        renderQueryGridWindow(box, result);
+      }
+      output.querySelector(`tr[data-query-row="${order[position]}"]`)?.scrollIntoView({ block: 'nearest' });
+    }
+  });
+}
+
+function queryResultContextMenuHtml({ source, cellEditable, tableTarget, rowEditable, canInsertSql, canUpdateSql, selectedCount = 1 }) {
+  const item = (action, label, enabled = true, icon = '') => `<button type="button" class="context-menu-item${enabled ? '' : ' disabled'}" data-query-action="${action}" ${enabled ? '' : 'disabled'}>${icon ? `<span class="c-icon">${icon}</span>` : ''}${label}</button>`;
+  return `
+    ${item('empty', 'Đặt chuỗi rỗng', cellEditable, '∅')}
+    ${item('null', 'Đặt NULL', cellEditable, '⊘')}
+    ${item('edit', `Sửa ô (${esc(source.name)})`, cellEditable, '✎')}
+    <div class="context-menu-divider"></div>
+    ${item('add', 'Thêm bản ghi…', Boolean(tableTarget), '+')}
+    ${item('delete', selectedCount > 1 ? `Xóa ${selectedCount.toLocaleString()} dòng đã chọn…` : 'Xóa bản ghi…', rowEditable, '⌫')}
+    <div class="context-menu-divider"></div>
+    ${item('cell', selectedCount > 1 ? `Sao chép ${selectedCount.toLocaleString()} dòng đã chọn` : 'Sao chép giá trị ô', true, '⧉')}
+    ${item('field', 'Sao chép tên cột', true, '⌑')}
+    ${item('paste', 'Dán vào ô sửa…', cellEditable, '⇥')}
+    <div class="context-submenu-wrap">
+      <button type="button" class="context-menu-item context-submenu-trigger" data-query-submenu aria-haspopup="true" aria-expanded="false">Copy As · Sao chép dạng… <span aria-hidden="true">›</span></button>
+      <div class="context-submenu" role="menu" aria-label="Định dạng sao chép">
+        ${item('insert', 'INSERT Statement', canInsertSql)}
+        ${item('update', 'UPDATE Statement', canUpdateSql)}
+        <div class="context-menu-divider"></div>
+        ${item('tsv-data', 'TSV · chỉ dữ liệu')}
+        ${item('tsv-fields', 'TSV · chỉ tên cột')}
+        ${item('tsv-all', 'TSV · tên cột và dữ liệu')}
+        ${item('csv-data', 'CSV · chỉ dữ liệu')}
+        ${item('csv-fields', 'CSV · chỉ tên cột')}
+        ${item('csv-all', 'CSV · tên cột và dữ liệu')}
+        ${item('json', 'JSON')}
+      </div>
+    </div>
+    <div class="context-menu-divider"></div>
+    <div class="context-submenu-wrap">
+      <button type="button" class="context-menu-item context-submenu-trigger" data-query-submenu aria-haspopup="true" aria-expanded="false">Thu phóng bảng <span aria-hidden="true">›</span></button>
+      <div class="context-submenu" role="menu" aria-label="Thu phóng bảng kết quả">
+        ${item('zoom-90', '90%')}
+        ${item('zoom-100', '100%')}
+        ${item('zoom-125', '125%')}
+      </div>
+    </div>`;
+}
+
 function setupContextMenu() {
   const menu = $('#contextMenu');
   if (!menu) return;
@@ -2583,6 +2983,7 @@ function setupContextMenu() {
   function closeMenu() {
     menu.classList.add('hidden');
     menu.innerHTML = '';
+    document.querySelectorAll('#queryResult tr.query-context-selected').forEach((row) => row.classList.remove('query-context-selected'));
   }
 
   document.addEventListener('click', (e) => {
@@ -2638,10 +3039,10 @@ function setupContextMenu() {
           const action = item.dataset.action;
           closeMenu();
           if (action === 'copy-cell') {
-            await navigator.clipboard.writeText(cellVal === null || cellVal === undefined ? '' : String(cellVal));
+            await writeClipboardText(cellVal === null || cellVal === undefined ? '' : String(cellVal));
             toast('Đã sao chép giá trị ô', 'success');
           } else if (action === 'copy-row-json') {
-            await navigator.clipboard.writeText(JSON.stringify(rowData, null, 2));
+            await writeClipboardText(JSON.stringify(rowData, null, 2));
             toast('Đã sao chép dòng dạng JSON', 'success');
           } else if (action === 'copy-row-insert') {
             const cols = Object.keys(rowData).map(quoteId).join(', ');
@@ -2651,7 +3052,7 @@ function setupContextMenu() {
               return quoteSqlString(v);
             }).join(', ');
             const insertSql = `INSERT INTO ${quoteId(table)} (${cols}) VALUES (${vals});`;
-            await navigator.clipboard.writeText(insertSql);
+            await writeClipboardText(insertSql);
             toast('Đã sao chép câu lệnh INSERT', 'success');
           } else if (action === 'set-cell-null') {
             const keys = {};
@@ -2705,57 +3106,89 @@ function setupContextMenu() {
       return;
     }
 
-    const queryTd = event.target.closest('#queryResult table tbody td');
-    if (queryTd && !queryTd.classList.contains('muted')) {
+    const queryTd = event.target.closest('#queryResult tr[data-query-row] td');
+    if (queryTd && !queryTd.classList.contains('editing-cell')) {
       const tr = queryTd.closest('tr[data-query-row]');
       if (!tr) return;
       event.preventDefault();
-      const colIdx = Number(queryTd.dataset.colIdx);
+      const colIdx = Number(queryTd.dataset.colIdx ?? 0);
       const rowIdx = Number(tr.dataset.queryRow);
-      const result = typeof getActiveQueryResult === 'function' ? getActiveQueryResult() : null;
-      if (!result || !result.rows || !result.rows[rowIdx] || isNaN(colIdx)) return;
-
-      const rowData = result.rows[rowIdx];
-      const colMeta = result.columns[colIdx];
-      const cellVal = rowData[colIdx];
-      const colName = colMeta ? colMeta.name : '';
-
-      menu.innerHTML = `
-        <div class="context-menu-item" data-action="edit-query-cell"><span class="c-icon">✏️</span> Sửa ô (${esc(colName)})</div>
-        <div class="context-menu-item" data-action="copy-cell"><span class="c-icon">📋</span> Sao chép ô (${esc(colName)})</div>
-        <div class="context-menu-item" data-action="copy-query-row-json"><span class="c-icon">📑</span> Sao chép dòng dạng JSON</div>
-        <div class="context-menu-item" data-action="copy-query-row-insert"><span class="c-icon">📥</span> Sao chép dòng dạng INSERT SQL</div>
-      `;
+      const result = getActiveQueryResult();
+      if (!result?.rows?.[rowIdx] || !Number.isInteger(colIdx) || !result.columns?.[colIdx]) return;
+      document.querySelectorAll('#queryResult tr.query-context-selected').forEach((row) => row.classList.remove('query-context-selected'));
+      tr.classList.add('query-context-selected');
+      if (!queryGridSelection(result).rows.has(rowIdx)) selectQueryGridRows(result, rowIdx);
+      updateQueryGridSelection(result);
+      queryTd.closest('.tablebox').focus({ preventScroll: true });
+      const selectedIndexes = queryGridSelectedIndexes(result);
+      const source = result.columns[colIdx];
+      const tableTarget = queryResultTableTarget(result);
+      const cellEditable = selectedIndexes.length === 1 && !queryTd.classList.contains('muted')
+        && !result.isExplain && Boolean(source.orgTable || source.table);
+      menu.innerHTML = queryResultContextMenuHtml({ source, cellEditable, tableTarget, rowEditable: false,
+        selectedCount: selectedIndexes.length,
+        canInsertSql: selectedIndexes.every((index) => Boolean(queryResultStatement(result, index, 'insert'))),
+        canUpdateSql: false });
+      const menuContent = menu.firstElementChild;
       positionMenu(event.clientX, event.clientY);
-
-      menu.querySelectorAll('.context-menu-item').forEach((item) => {
-        item.addEventListener('click', async () => {
-          const action = item.dataset.action;
-          closeMenu();
-          if (action === 'edit-query-cell') {
-            inlineEditQueryResultCell(queryTd);
-          } else if (action === 'copy-cell') {
-            await navigator.clipboard.writeText(cellVal === null || cellVal === undefined ? '' : String(cellVal));
-            toast('Đã sao chép giá trị ô', 'success');
-          } else if (action === 'copy-query-row-json') {
-            const obj = {};
-            result.columns.forEach((c, i) => { obj[c.name] = rowData[i]; });
-            await navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
-            toast('Đã sao chép dòng dạng JSON', 'success');
-          } else if (action === 'copy-query-row-insert') {
-            const tblName = colMeta?.orgTable || colMeta?.table || table || 'table_name';
-            const cols = result.columns.map((c) => quoteId(c.name)).join(', ');
-            const vals = rowData.map((v) => {
-              if (v === null || v === undefined) return 'NULL';
-              if (typeof v === 'number') return v;
-              return quoteSqlString(v);
-            }).join(', ');
-            const insertSql = `INSERT INTO ${quoteId(tblName)} (${cols}) VALUES (${vals});`;
-            await navigator.clipboard.writeText(insertSql);
-            toast('Đã sao chép câu lệnh INSERT', 'success');
+      menu.querySelectorAll('[data-query-submenu]').forEach((trigger) => {
+        const fitSubmenu = () => {
+          const submenu = trigger.nextElementSibling;
+          submenu.style.top = '-5px';
+          const bounds = submenu.getBoundingClientRect();
+          if (bounds.bottom > window.innerHeight - 8) {
+            submenu.style.top = `${-5 - (bounds.bottom - window.innerHeight + 8)}px`;
           }
+        };
+        trigger.parentElement.addEventListener('mouseenter', fitSubmenu);
+        trigger.addEventListener('click', (click) => {
+          click.stopPropagation();
+          const open = trigger.parentElement.classList.toggle('open');
+          trigger.setAttribute('aria-expanded', String(open));
+          if (open) fitSubmenu();
         });
       });
+      menu.querySelectorAll('[data-query-action]').forEach((item) => item.addEventListener('click', async () => {
+        const action = item.dataset.queryAction;
+        if (item.disabled) return;
+        closeMenu();
+        try {
+          if (action === 'edit') return void inlineEditQueryResultCell(queryTd);
+          if (action === 'paste') return void pasteQueryResultCell(queryTd);
+          if (action === 'empty' || action === 'null') return void setQueryResultCellValue(queryTd, action === 'null' ? null : '');
+          if (action === 'add') return void editRow(null, { result, ...tableTarget });
+          if (action === 'delete') return void deleteQueryResultRows(result, selectedIndexes);
+          if (action.startsWith('zoom-')) {
+            const zoom = Number(action.slice(5));
+            app.query.gridZoom = zoom;
+            $('#queryResult')?.style.setProperty('--query-grid-zoom', String(zoom / 100));
+            return;
+          }
+          const text = queryGridCopyText(result, selectedIndexes, colIdx, action);
+          if (text === null) throw new Error('Không thể tạo nội dung sao chép từ kết quả này.');
+          await writeClipboardText(text);
+          toast('Đã sao chép vào clipboard', 'success');
+        } catch (error) { toast(error.message || 'Không thể sao chép dữ liệu.', 'error'); }
+      }));
+      if (tableTarget && desktop?.db?.columns) {
+        void call(desktop.db.columns(tableTarget.database, tableTarget.targetTable, tableTarget.profileId)).then((columns) => {
+          if (menu.firstElementChild !== menuContent || menu.classList.contains('hidden') || !tr.classList.contains('query-context-selected')
+            || getActiveQueryResult() !== result) return;
+          const cacheKey = `${tableTarget.profileId || ''}.${tableTarget.database}.${tableTarget.targetTable}`;
+          queryTablePkCache.set(cacheKey, columns.filter((column) => column.key === 'PRI').map((column) => column.name));
+          const editable = queryResultPrimaryKeyIndexes(result, tableTarget).length > 0;
+          const deleteButton = menu.querySelector('[data-query-action="delete"]');
+          const updateButton = menu.querySelector('[data-query-action="update"]');
+          if (deleteButton) {
+            deleteButton.disabled = !editable;
+            deleteButton.classList.toggle('disabled', deleteButton.disabled);
+          }
+          if (updateButton) {
+            updateButton.disabled = !editable || !selectedIndexes.every((index) => queryResultStatement(result, index, 'update'));
+            updateButton.classList.toggle('disabled', updateButton.disabled);
+          }
+        }).catch(() => undefined);
+      }
       return;
     }
   });
@@ -2812,7 +3245,7 @@ function setupContextMenu() {
           if (act === 'open-table') selectTable(tableName, { mode: 'data' });
           else if (act === 'structure-table') selectTable(tableName, { mode: 'structure' });
           else if (act === 'query-table') newQuery(`SELECT * FROM ${quoteId(app.database)}.${quoteId(tableName)} LIMIT 100;`);
-          else if (act === 'copy-name') { navigator.clipboard.writeText(tableName); toast('Đã sao chép: ' + tableName); }
+          else if (act === 'copy-name') { writeClipboardText(tableName); toast('Đã sao chép: ' + tableName); }
           else if (act === 'truncate-table') truncateTableAction(tableName);
           else if (act === 'drop-table') dropTableAction(tableName);
           else if (act === 'optimize-table') runTableMaintenance(tableName, 'OPTIMIZE');
@@ -2877,8 +3310,11 @@ function setupContextMenu() {
     menu.classList.remove('hidden');
     const maxX = window.innerWidth - menu.offsetWidth - 10;
     const maxY = window.innerHeight - menu.offsetHeight - 10;
-    menu.style.left = Math.min(x, maxX) + 'px';
-    menu.style.top = Math.min(y, maxY) + 'px';
+    const left = Math.max(8, Math.min(x, maxX));
+    menu.style.left = left + 'px';
+    menu.style.top = Math.max(8, Math.min(y, maxY)) + 'px';
+    menu.classList.toggle('submenu-left', Boolean(menu.querySelector('.context-submenu'))
+      && left + menu.offsetWidth + 275 > window.innerWidth);
   }
 }
 
@@ -3148,6 +3584,7 @@ async function connectTo(id, options = {}) {
         table = savedView.table;
         mode = savedView.mode;
         setConnectionState('connected', 'Đã kết nối');
+        void refreshSessionState(id);
         renderSidebar();
         loadOpenObjectGroups();
         updateChrome();
@@ -3218,6 +3655,7 @@ async function connectTo(id, options = {}) {
   } catch (error) {
     openConnectionIds.delete(id);
     app.connection = null;
+    app.sessionState = null;
     app.server = '';
     app.databases = [];
     app.database = null;
@@ -3274,6 +3712,29 @@ async function selectDatabase(database, options = {}) {
   persistState();
 }
 
+function backupChecksumNote(entry) {
+  const checksum = entry?.verification?.checksum;
+  if (checksum === 'verified') return '✓ checksum khớp';
+  if (checksum === 'mismatch') return '⚠ checksum không khớp';
+  if (entry?.manifestError) return '⚠ manifest không đọc được';
+  if (entry?.legacy) return 'chưa có checksum';
+  return 'chưa xác minh';
+}
+
+function backupObjectSummary(entry) {
+  const result = entry?.result;
+  if (!result) return '';
+  const parts = [];
+  if (result.tables) parts.push(`${Number(result.tables).toLocaleString()} bảng`);
+  if (result.views) parts.push(`${Number(result.views).toLocaleString()} view`);
+  if (result.procedures) parts.push(`${Number(result.procedures).toLocaleString()} procedure`);
+  if (result.functions) parts.push(`${Number(result.functions).toLocaleString()} function`);
+  if (result.triggers) parts.push(`${Number(result.triggers).toLocaleString()} trigger`);
+  if (result.events) parts.push(`${Number(result.events).toLocaleString()} event`);
+  if (result.rows) parts.push(`${Number(result.rows).toLocaleString()} dòng`);
+  return parts.join(' · ');
+}
+
 async function refreshBackupList(database = app.database, connectionId = app.connection?.id) {
   if (!desktop?.db?.listBackups || !database) return;
   try {
@@ -3296,13 +3757,14 @@ function renderBackupsView() {
       <td>◴ &nbsp; ${esc(entry.name)}</td>
       <td>${esc(new Date(entry.createdAt).toLocaleString('vi-VN'))}</td>
       <td>${formatBytes(entry.bytes)}</td>
-      <td>—</td>
+      <td title="${esc(entry.checksum || '')}">${esc(backupChecksumNote(entry))}</td>
     </tr>`).join('');
   $('#workspace').innerHTML = `
     <section class="backup-manager" aria-label="Quản lý bản sao lưu">
       <div class="backup-manager-toolbar">
         <button data-backup-action="create" class="primary">＋ Tạo bản sao lưu</button>
         <button data-backup-action="restore" ${selected ? '' : 'disabled'}>↶ Phục hồi</button>
+        <button data-backup-action="verify" ${selected ? '' : 'disabled'}>✓ Xác minh checksum</button>
         <button data-backup-action="copy-backup" ${selected ? '' : 'disabled'}>⎘ Sao chép (Ctrl+C)</button>
         <button data-backup-action="paste-backup" ${app.copiedBackup ? '' : 'disabled'}>📋 Dán (Ctrl+V)</button>
         <button data-backup-action="copy-to-db" ${selected ? '' : 'disabled'}>⧉ Sao chép sang DB khác…</button>
@@ -3322,6 +3784,7 @@ function backupContextMenuHtml(hasSelection) {
   const canPaste = Boolean(app.copiedBackup);
   return `
     ${item('restore', '↶', 'Phục hồi bản sao lưu', !hasSelection)}
+    ${item('verify', '✓', 'Xác minh checksum', !hasSelection)}
     ${item('copy-backup', '⎘', 'Sao chép bản sao lưu (Ctrl+C)', !hasSelection)}
     ${item('paste-backup', '📋', 'Dán bản sao lưu vào đây (Ctrl+V)', !canPaste)}
     ${item('copy-to-db', '⧉', 'Sao chép sang Database khác…', !hasSelection)}
@@ -3340,13 +3803,45 @@ async function runBackupManagerAction(action) {
   if (action === 'create') return backupDatabase();
   if (action === 'restore-file') return restoreDatabase();
   if (action === 'restore' && app.selectedBackupId) return restoreDatabase(app.selectedBackupId);
+  if (action === 'verify' && app.selectedBackupId) {
+    try {
+      const id = app.selectedBackupId;
+      const result = await call(desktop.db.verifyBackup({
+        profileId: app.connection?.id || null,
+        database: app.database,
+        id
+      }));
+      const checksum = result.checksum ? String(result.checksum) : '';
+      const expected = result.expected ? String(result.expected) : '';
+      const heading = result.match === true
+        ? 'Checksum khớp'
+        : result.match === false
+          ? 'Checksum không khớp'
+          : 'Chưa có checksum để đối chiếu';
+      const detail = result.legacy
+        ? '<p class="hint">Bản sao lưu cũ chưa có manifest. Đây là SHA-256 của tệp hiện tại; hãy lưu lại giá trị này để đối chiếu thủ công ở lần sau.</p>'
+        : result.match === true
+          ? '<p class="hint">Tệp khớp checksum đã lưu. Đây chưa phải là bằng chứng đã phục hồi thử thành công.</p>'
+          : '<div class="errorbox" role="alert">Tệp có thể đã bị sửa hoặc hỏng. Không nên phục hồi cho đến khi kiểm tra lại nguồn tệp.</div>';
+      modal(`<h2>${esc(heading)}</h2>
+        <label>SHA-256 hiện tại</label>
+        <input value="${esc(checksum)}" readonly aria-label="SHA-256 hiện tại">
+        ${expected ? `<label>SHA-256 trong manifest</label><input value="${esc(expected)}" readonly aria-label="SHA-256 trong manifest">` : ''}
+        ${detail}
+        <div class="actions"><button data-click="close-modal">Đóng</button></div>`);
+      await refreshBackupList();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+    return;
+  }
   if (action === 'copy-backup' && app.selectedBackupId) return copySelectedBackupToClipboard(app.selectedBackupId);
   if (action === 'paste-backup' && app.copiedBackup) return pasteBackupModal();
   if (action === 'copy-to-db' && app.selectedBackupId) return copyBackupToDatabaseModal(app.selectedBackupId);
   if (action === 'refresh') return refreshBackupList();
   if (action === 'copy' && app.selectedBackupId) {
     try {
-      await navigator.clipboard.writeText(app.selectedBackupId);
+      await writeClipboardText(app.selectedBackupId);
       toast('Đã sao chép tên bản backup.');
     } catch (error) {
       toast(error.message, 'error');
@@ -3733,8 +4228,8 @@ function renderWelcome() {
       <h2>${hasConnections ? 'Chọn một kết nối để bắt đầu' : 'Kết nối database đầu tiên'}</h2>
       <p>SqlPro chạy truy vấn thật trên MySQL/MariaDB. Thông số kết nối tương thích Navicat, bao gồm SSH tunnel và SSL.</p>
       <div class="welcome-actions">
-        <button class="primary" onclick="connection()">＋ Kết nối mới</button>
-        <button onclick="importNavicat()">⇩ Nhập kết nối Navicat</button>
+        <button class="primary" data-click="new-connection">＋ Kết nối mới</button>
+        <button data-click="import-navicat">⇩ Nhập kết nối Navicat</button>
       </div>
       ${hasConnections ? '<div class="hint">Chọn kết nối ở thanh bên trái, hoặc nhấn Ctrl+N để tạo mới.</div>' : ''}
     </div>
@@ -3765,7 +4260,7 @@ function renderError(error) {
   $('#workspace').innerHTML = `
     <div class="empty">
       <div class="errorbox">${esc(error.message || 'Đã xảy ra lỗi.')}</div>
-      <button onclick="loadData()">Thử lại</button>
+      <button data-click="load-data">Thử lại</button>
     </div>
   `;
   setStatus(error.message || 'Lỗi');
@@ -4202,7 +4697,7 @@ function addColumnModal(targetTable) {
     <div class="modal-card" style="max-width:540px;">
       <div class="modal-header">
         <h3>➕ Thêm Cột Mới Vào Bảng "${esc(currentTable)}"</h3>
-        <button class="close-btn" onclick="closeModal()">✕</button>
+        <button class="close-btn" data-click="close-modal">✕</button>
       </div>
       <div class="modal-body" style="padding:16px;">
         <div class="form-group" style="margin-bottom:12px;">
@@ -4247,7 +4742,7 @@ function addColumnModal(targetTable) {
         </div>
       </div>
       <div class="modal-footer" style="text-align: right; margin-top: 16px;">
-        <button onclick="closeModal()">Hủy</button>
+        <button data-click="close-modal">Hủy</button>
         <button class="primary" id="confirmAddColBtn">➕ Thêm cột</button>
       </div>
     </div>
@@ -4304,7 +4799,7 @@ function modifyColumnModal(targetTable, colName) {
     <div class="modal-card" style="max-width:540px;">
       <div class="modal-header">
         <h3>✏️ Sửa Kiểu / Thuộc Tính Cột "${esc(colName)}"</h3>
-        <button class="close-btn" onclick="closeModal()">✕</button>
+        <button class="close-btn" data-click="close-modal">✕</button>
       </div>
       <div class="modal-body" style="padding:16px;">
         <div style="display:flex; gap:12px; margin-bottom:12px;">
@@ -4323,7 +4818,7 @@ function modifyColumnModal(targetTable, colName) {
         </div>
       </div>
       <div class="modal-footer" style="text-align: right; margin-top: 16px;">
-        <button onclick="closeModal()">Hủy</button>
+        <button data-click="close-modal">Hủy</button>
         <button class="primary" id="confirmModColBtn">Lưu thay đổi</button>
       </div>
     </div>
@@ -4373,7 +4868,7 @@ function renameColumnModal(targetTable, oldName) {
     <div class="modal-card" style="max-width:440px;">
       <div class="modal-header">
         <h3>🏷️ Đổi Tên Cột "${esc(oldName)}"</h3>
-        <button class="close-btn" onclick="closeModal()">✕</button>
+        <button class="close-btn" data-click="close-modal">✕</button>
       </div>
       <div class="modal-body" style="padding:16px;">
         <div class="form-group">
@@ -4382,7 +4877,7 @@ function renameColumnModal(targetTable, oldName) {
         </div>
       </div>
       <div class="modal-footer" style="text-align: right; margin-top: 16px;">
-        <button onclick="closeModal()">Hủy</button>
+        <button data-click="close-modal">Hủy</button>
         <button class="primary" id="confirmRenameColBtn">Đổi tên</button>
       </div>
     </div>
@@ -4429,7 +4924,7 @@ function createIndexModal(targetTable) {
     <div class="modal-card" style="max-width:540px;">
       <div class="modal-header">
         <h3>➕ Thêm Chỉ Mục (Index) Mới</h3>
-        <button class="close-btn" onclick="closeModal()">✕</button>
+        <button class="close-btn" data-click="close-modal">✕</button>
       </div>
       <div class="modal-body" style="padding:16px;">
         <div style="display:flex; gap:12px; margin-bottom:12px;">
@@ -4459,7 +4954,7 @@ function createIndexModal(targetTable) {
         </div>
       </div>
       <div class="modal-footer" style="text-align: right; margin-top: 16px;">
-        <button onclick="closeModal()">Hủy</button>
+        <button data-click="close-modal">Hủy</button>
         <button class="primary" id="confirmCreateIndexBtn">Tạo Index</button>
       </div>
     </div>
@@ -4524,7 +5019,7 @@ async function createRelationModal(targetTable) {
     <div class="modal-card" style="max-width:580px;">
       <div class="modal-header">
         <h3>➕ Thêm Khóa Ngoại (Foreign Key)</h3>
-        <button class="close-btn" onclick="closeModal()">✕</button>
+        <button class="close-btn" data-click="close-modal">✕</button>
       </div>
       <div class="modal-body" style="padding:16px;">
         <div style="margin-bottom:12px;">
@@ -4571,7 +5066,7 @@ async function createRelationModal(targetTable) {
         </div>
       </div>
       <div class="modal-footer" style="text-align: right; margin-top: 16px;">
-        <button onclick="closeModal()">Hủy</button>
+        <button data-click="close-modal">Hủy</button>
         <button class="primary" id="confirmCreateFkBtn">Tạo Khóa Ngoại</button>
       </div>
     </div>
@@ -4674,7 +5169,7 @@ function showDdl() {
   });
   const primary = app.primaryKey.length ? `,\n  PRIMARY KEY (${app.primaryKey.map(quoteId).join(', ')})` : '';
   const ddl = `CREATE TABLE ${quoteId(table)} (\n${lines.join(',\n')}${primary}\n);`;
-  modal(`<h2>DDL · ${esc(table)}</h2><p>SQL minh họa cấu trúc bảng.</p><pre class="mono ddl">${esc(ddl)}</pre><div class="actions"><button onclick="closeModal()">Đóng</button></div>`, true);
+  modal(`<h2>DDL · ${esc(table)}</h2><p>SQL minh họa cấu trúc bảng.</p><pre class="mono ddl">${esc(ddl)}</pre><div class="actions"><button data-click="close-modal">Đóng</button></div>`, true);
 }
 
 function openTableInEditor() {
@@ -4853,9 +5348,100 @@ function formatSql(sql) {
   return output.join('').trim();
 }
 
+const SQL_UNDO_MAX_STEPS = 100;
+const SQL_UNDO_MAX_CHARS = 2_000_000;
+
+function sqlEditorSnapshot(editor) {
+  return { value: editor.value, start: editor.selectionStart, end: editor.selectionEnd };
+}
+
+function sqlEditorHistory(tab, editor) {
+  if (!tab.sqlHistory) {
+    tab.sqlHistory = { past: [], current: sqlEditorSnapshot(editor), future: [], lastInput: null, beforeSelection: null };
+  }
+  return tab.sqlHistory;
+}
+
+function trimSqlEditorHistory(history) {
+  while (history.past.length > SQL_UNDO_MAX_STEPS) history.past.shift();
+  let size = history.past.reduce((total, item) => total + item.value.length, history.current.value.length);
+  while (size > SQL_UNDO_MAX_CHARS && history.past.length > 1) {
+    size -= history.past.shift().value.length;
+  }
+}
+
+function recordSqlEditorChange(editor, { before, inputType } = {}) {
+  const history = sqlEditorHistory(app.query, editor);
+  const previous = before || { ...history.current };
+  if (history.beforeSelection && !before) {
+    previous.start = history.beforeSelection.start;
+    previous.end = history.beforeSelection.end;
+  }
+  history.beforeSelection = null;
+  const next = sqlEditorSnapshot(editor);
+  if (previous.value !== next.value) {
+    const now = Date.now();
+    const grouping = ['insertText', 'deleteContentBackward', 'deleteContentForward'].includes(inputType)
+      && history.lastInput?.type === inputType
+      && now - history.lastInput.at < 650
+      && previous.start === previous.end
+      && previous.start === history.lastInput.caret;
+    if (!grouping) history.past.push(previous);
+    history.current = next;
+    history.future = [];
+    history.lastInput = inputType ? { type: inputType, at: now, caret: next.end } : null;
+    trimSqlEditorHistory(history);
+  } else {
+    history.current = next;
+  }
+  app.query.sql = editor.value;
+  sessionStorage.setItem('query', editor.value);
+  persistState();
+}
+
+function restoreSqlEditorSnapshot(editor, snapshot) {
+  editor.value = snapshot.value;
+  editor.setSelectionRange(snapshot.start, snapshot.end);
+  app.query.sql = snapshot.value;
+  sessionStorage.setItem('query', snapshot.value);
+  closeSqlSuggestions();
+  persistState();
+}
+
+function stepSqlEditorHistory(editor, direction) {
+  const history = sqlEditorHistory(app.query, editor);
+  const source = direction === 'undo' ? history.past : history.future;
+  const target = direction === 'undo' ? history.future : history.past;
+  if (!source.length) return false;
+  target.push(sqlEditorSnapshot(editor));
+  const snapshot = source.pop();
+  history.current = snapshot;
+  history.lastInput = null;
+  history.beforeSelection = null;
+  restoreSqlEditorSnapshot(editor, snapshot);
+  return true;
+}
+
+function handleSqlEditorHistoryKeydown(editor, event) {
+  if ((!event.ctrlKey && !event.metaKey) || event.altKey) return false;
+  const key = event.key.toLowerCase();
+  if (key === 'z') {
+    event.preventDefault();
+    stepSqlEditorHistory(editor, event.shiftKey ? 'redo' : 'undo');
+    return true;
+  }
+  if (key === 'y' && !event.shiftKey) {
+    event.preventDefault();
+    stepSqlEditorHistory(editor, 'redo');
+    return true;
+  }
+  return false;
+}
+
 function formatCurrentSql() {
   const editor = $('#sql');
   if (!editor) return;
+  const before = sqlEditorSnapshot(editor);
   const start = editor.selectionStart;
   const end = editor.selectionEnd;
   const hasSelection = start !== end;
@@ -4864,9 +5450,7 @@ function formatCurrentSql() {
     const formatted = formatSql(hasSelection ? editor.value.slice(start, end) : editor.value);
     if (hasSelection) editor.setRangeText(formatted, start, end, 'select');
     else editor.value = formatted;
-    app.query.sql = editor.value;
-    sessionStorage.setItem('query', editor.value);
-    persistState();
+    recordSqlEditorChange(editor, { before });
     toast(hasSelection ? 'Đã định dạng đoạn SQL được chọn ✨' : 'Đã định dạng toàn bộ câu lệnh SQL ✨', 'success');
   } catch (error) {
     toast(error.message, 'error');
@@ -4968,7 +5552,7 @@ function showShortcutsModal() {
     <div class="modal-card shortcuts-modal-card">
       <div class="modal-header">
         <h3>⌨️ Bảng Tra Cứu Phím Tắt SqlPro</h3>
-        <button class="close-btn" onclick="closeModal()">✕</button>
+        <button class="close-btn" data-click="close-modal">✕</button>
       </div>
       <div class="modal-body">
         <table class="shortcuts-table">
@@ -4990,6 +5574,10 @@ function showShortcutsModal() {
             <tr>
               <td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>F</kbd></td>
               <td><strong>Định dạng SQL (Beautifier)</strong> tự động căn lề chuẩn đẹp</td>
+            </tr>
+            <tr>
+              <td><kbd>Ctrl</kbd> + <kbd>Z</kbd> / <kbd>Ctrl</kbd> + <kbd>Y</kbd></td>
+              <td><strong>Hoàn tác / làm lại</strong> nội dung SQL trong tab hiện tại</td>
             </tr>
             <tr>
               <td><kbd>Ctrl</kbd> + <kbd>T</kbd></td>
@@ -5027,7 +5615,7 @@ function showShortcutsModal() {
         </table>
       </div>
       <div class="modal-footer" style="text-align: right; margin-top: 16px;">
-        <button class="primary" onclick="closeModal()">Đóng (Esc)</button>
+        <button class="primary" data-click="close-modal">Đóng (Esc)</button>
       </div>
     </div>
   `);
@@ -5063,15 +5651,27 @@ function renderQueryView() {
     </div>
     <div id="queryResult">${queryResultHtml()}</div>
   `;
+  $('#queryResult').style.setProperty('--query-grid-zoom', String((app.query.gridZoom || 100) / 100));
+  setupQueryGridSelection($('#queryResult'));
   const editor = $('#sql');
   editor.value = value;
-  editor.addEventListener('input', () => {
-    app.query.sql = editor.value;
-    sessionStorage.setItem('query', editor.value);
-    persistState();
+  if (app.query.sqlHistory?.current.value !== value) app.query.sqlHistory = null;
+  const history = sqlEditorHistory(app.query, editor);
+  editor.setSelectionRange(history.current.start, history.current.end);
+  editor.addEventListener('beforeinput', (event) => {
+    if (event.inputType === 'historyUndo' || event.inputType === 'historyRedo') {
+      event.preventDefault();
+      stepSqlEditorHistory(editor, event.inputType === 'historyUndo' ? 'undo' : 'redo');
+      return;
+    }
+    history.beforeSelection = { start: editor.selectionStart, end: editor.selectionEnd };
+  });
+  editor.addEventListener('input', (event) => {
+    recordSqlEditorChange(editor, { inputType: event.inputType });
     void refreshSqlSuggestions(editor);
   });
   editor.addEventListener('keydown', (event) => {
+    if (handleSqlEditorHistoryKeydown(editor, event)) return;
     if ((event.ctrlKey || event.metaKey) && event.shiftKey && (event.key === 'F' || event.key === 'f')) {
       event.preventDefault();
       formatCurrentSql();
@@ -5233,7 +5833,7 @@ async function getQueryColumnPkInfo(result, colIdx, profileId = app.query?.profi
   if (!targetTable) {
     return { editable: false, reason: 'Cột này không thuộc bảng dữ liệu cụ thể nào.' };
   }
-  const targetDb = colMeta.db || app.database;
+  const targetDb = colMeta.db || app.query?.resultContext?.database || app.query?.database || app.database;
   if (!targetDb) {
     return { editable: false, reason: 'Chưa xác định cơ sở dữ liệu.' };
   }
@@ -5293,6 +5893,45 @@ async function getQueryColumnPkInfo(result, colIdx, profileId = app.query?.profi
   };
 }
 
+async function queryResultWriteContext(result, rowIndex, colIdx, profileId) {
+  const row = result?.rows?.[rowIndex];
+  const source = result?.columns?.[colIdx];
+  if (!row || !source || (!source.orgTable && !source.table) || result.isExplain) {
+    throw new Error('Không xác định được bảng gốc để sửa bản ghi này.');
+  }
+  const info = await getQueryColumnPkInfo(result, colIdx, profileId);
+  if (!info?.editable) throw new Error(info?.reason || 'Kết quả này chỉ đọc.');
+  const columns = await call(desktop.db.columns(info.database, info.table, profileId));
+  return queryResultRowWriteContext(result, rowIndex, columns, info);
+}
+
+function queryResultRowWriteContext(result, rowIndex, columns, info) {
+  const row = result.rows[rowIndex];
+  if (!row) throw new Error('Bản ghi không còn trong kết quả truy vấn.');
+  const column = columns.find((entry) => entry.name === info.colName);
+  if (!column) throw new Error('Không xác định được cột gốc để chỉnh sửa.');
+  const primary = columns.filter((entry) => entry.key === 'PRI');
+  if (!primary.length) throw new Error('Bảng không có khóa chính nên không thể sửa trực tiếp.');
+  const keys = Object.create(null);
+  for (const key of primary) {
+    const index = result.columns.findIndex((entry) => (entry.orgName || entry.name) === key.name
+      && (entry.orgTable || entry.table) === info.table && (!entry.db || entry.db === info.database));
+    if (index === -1) throw new Error(`Kết quả thiếu khóa chính "${key.name}" của bảng "${info.table}".`);
+    keys[key.name] = row[index];
+  }
+  const original = {};
+  for (let index = 0; index < result.columns.length; index += 1) {
+    const sourceColumn = result.columns[index];
+    if ((sourceColumn.orgTable || sourceColumn.table) !== info.table) continue;
+    if (sourceColumn.db && sourceColumn.db !== info.database) continue;
+    const sourceName = sourceColumn.orgName || sourceColumn.name;
+    if (sourceName) Object.defineProperty(original, sourceName, {
+      value: result.originalHashes?.[rowIndex]?.[index] || row[index], enumerable: true, configurable: true, writable: true
+    });
+  }
+  return { info, column, keys, original, row, columns };
+}
+
 async function inlineEditQueryResultCell(td) {
   if (!td || td.classList.contains('editing-cell') || td.dataset.editorLoading) return;
   const colIdx = Number(td.dataset.colIdx);
@@ -5303,39 +5942,15 @@ async function inlineEditQueryResultCell(td) {
   if (!source || (!source.orgTable && !source.table)) { toast('Cột tính toán không có bảng gốc để chỉnh sửa.', 'error'); return; }
   const row = result.rows[Number(tr.dataset.queryRow)];
   if (!row) return;
-  const profileId = app.query?.profileId || app.connection?.id || null;
+  const profileId = app.query?.resultContext?.profileId || app.query?.profileId || app.connection?.id || null;
   td.dataset.editorLoading = '1';
   try {
-    const info = await getQueryColumnPkInfo(result, colIdx, profileId);
+    const { info, column, keys, original } = await queryResultWriteContext(result, Number(tr.dataset.queryRow), colIdx, profileId);
     if (td.isConnected === false || getActiveQueryResult() !== result) return;
-    if (!info?.editable) { toast(info?.reason || 'Kết quả này chỉ đọc.', 'error'); return; }
-    const columns = await call(desktop.db.columns(info.database, info.table, profileId));
-    if (td.isConnected === false || getActiveQueryResult() !== result) return;
-    const column = columns.find((entry) => entry.name === info.colName);
-    if (!column) { toast('Không xác định được cột gốc để chỉnh sửa.', 'error'); return; }
-    const keys = {};
-    const primary = columns.filter((entry) => entry.key === 'PRI');
-    if (!primary.length) { toast('Bảng không có khóa chính nên không thể sửa trực tiếp.', 'error'); return; }
-    for (const key of primary) {
-      const index = result.columns.findIndex((entry) => (entry.orgName || entry.name) === key.name
-        && (entry.orgTable || entry.table) === info.table && (!entry.db || entry.db === info.database));
-      if (index === -1) { toast(`Kết quả thiếu khóa chính "${key.name}" của bảng "${info.table}".`, 'error'); return; }
-      keys[key.name] = row[index];
-    }
-    const original = {};
-    for (let index = 0; index < result.columns.length; index += 1) {
-      const sourceColumn = result.columns[index];
-      if ((sourceColumn.orgTable || sourceColumn.table) !== info.table) continue;
-      if (sourceColumn.db && sourceColumn.db !== info.database) continue;
-      const sourceName = sourceColumn.orgName || sourceColumn.name;
-      if (sourceName) Object.defineProperty(original, sourceName, {
-        value: result.originalHashes?.[Number(tr.dataset.queryRow)]?.[index] || row[index], enumerable: true, configurable: true, writable: true
-      });
-    }
     startInlineValueEdit({
       td, column, value: row[colIdx],
       save: (value) => call(desktop.db.updateRow({ profileId, database: info.database, table: info.table, keys, values: { [column.name]: value }, original })),
-      onSaved: (value) => { row[colIdx] = value; },
+      onSaved: (value) => { row[colIdx] = value; queryGridOrderCache.delete(result); },
       reload: () => runQuery(),
       next: (previous) => {
         const next = previous ? td.previousElementSibling : td.nextElementSibling;
@@ -5346,28 +5961,191 @@ async function inlineEditQueryResultCell(td) {
   finally { delete td.dataset.editorLoading; }
 }
 
-function singleQueryResultHtml(result, compact = false) {
-  if (result.kind === 'ok') {
-    return `<div class="resulttitle">✓ Thành công · ${result.affectedRows} dòng bị ảnh hưởng${result.insertId !== null ? ` · insert id ${esc(result.insertId)}` : ''} · ${result.durationMs} ms</div>`;
+async function pasteQueryResultCell(td) {
+  let text;
+  try { text = await readClipboardText(); }
+  catch {
+    await inlineEditQueryResultCell(td);
+    toast('Không đọc được clipboard. Hãy dán bằng Ctrl+V trong ô đang sửa.');
+    return;
   }
-  if (result.kind !== 'rows') {
-    return '<div class="errorbox">Kết quả truy vấn không hợp lệ.</div>';
+  await inlineEditQueryResultCell(td);
+  const input = td.querySelector('.sql-value-inline input:not(.sql-value-picker), .sql-value-inline textarea');
+  const modes = td.querySelector('.sql-value-inline .sql-value-mode');
+  if (!input || !modes) {
+    toast('Hãy chọn giá trị bằng bộ điều khiển của cột này.', 'error');
+    return;
   }
-  const sortCol = app.query.sortCol;
-  const sortDir = app.query.sortDir === 'DESC' ? -1 : 1;
-  const header = `<tr><th></th>${result.columns.map((column, index) => {
-    const sorted = sortCol === index;
-    return `<th class="sortable${sorted ? (sortDir === 1 ? ' sorted-asc' : ' sorted-desc') : ''}" data-query-sort="${index}">${esc(column.name)} <small>${esc(column.type)}</small>${sorted ? `<span class="sort-arrow">${sortDir === 1 ? '▲' : '▼'}</span>` : ''}</th>`;
-  }).join('')}</tr>`;
-  const rows = QueryResults.orderedRows(result.rows, sortCol < result.columns.length ? sortCol : null, app.query.sortDir);
+  modes.value = 'value';
+  modes.dispatchEvent(new Event('change', { bubbles: true }));
+  input.value = text;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.focus();
+}
 
-  const hasPk = result.columns && result.columns.some((c) => (c.flags & 2) || c.key === 'PRI');
-  const hasTable = result.columns && result.columns.some((c) => c.table || c.orgTable);
-  const isEditable = !result.isExplain && (hasPk || (hasTable && Boolean(table) && app.primaryKey?.length));
+function refreshQueryResultAfterWrite(result) {
+  queryGridOrderCache.delete(result);
+  const output = $('#queryResult');
+  if (!output || getActiveQueryResult() !== result) return;
+  const previous = output.querySelector('.tablebox');
+  const scrollLeft = previous?.scrollLeft || 0;
+  const scrollTop = previous?.scrollTop || 0;
+  output.innerHTML = queryResultHtml();
+  const next = output.querySelector('.tablebox');
+  if (next) { next.scrollLeft = scrollLeft; next.scrollTop = scrollTop; }
+}
 
-  const body = rows.map(({ row, origIndex }, index) => {
+async function setQueryResultCellValue(td, value) {
+  const tr = td?.closest('tr[data-query-row]');
+  const rowIndex = Number(tr?.dataset.queryRow);
+  const colIdx = Number(td?.dataset.colIdx);
+  const result = getActiveQueryResult();
+  if (!tr || !result?.rows?.[rowIndex] || !result.columns?.[colIdx]) return;
+  const profileId = app.query?.resultContext?.profileId || app.query?.profileId || app.connection?.id || null;
+  try {
+    const { info, column, keys, original, row } = await queryResultWriteContext(result, rowIndex, colIdx, profileId);
+    if (getActiveQueryResult() !== result || td.isConnected === false) return;
+    requireRowUpdate(await call(desktop.db.updateRow({
+      profileId, database: info.database, table: info.table, keys,
+      values: { [column.name]: value }, original
+    })));
+    row[colIdx] = value;
+    if (result.originalHashes?.[rowIndex]) delete result.originalHashes[rowIndex][colIdx];
+    refreshQueryResultAfterWrite(result);
+    toast(value === null ? 'Đã đặt giá trị thành NULL' : 'Đã đặt giá trị thành chuỗi rỗng', 'success');
+  } catch (error) {
+    if (error.code === 'ROW_CONFLICT' || error.code === 'ROW_NOT_FOUND') showRowConflict(error);
+    else toast(error.message || 'Không cập nhật được ô.', 'error');
+  }
+}
+
+async function deleteQueryResultRow(result, rowIndex) {
+  return deleteQueryResultRows(result, [rowIndex]);
+}
+
+async function deleteQueryResultRows(result, rowIndexes) {
+  if (getActiveQueryResult() !== result) return;
+  const target = queryResultTableTarget(result);
+  if (!target) { toast('Kết quả cần thuộc một bảng và có đầy đủ khóa chính để xóa.', 'error'); return; }
+  const selection = queryGridSelection(result);
+  if (selection.deleting) return;
+  const indexes = [...new Set(rowIndexes)].filter((index) => Number.isInteger(index) && result.rows[index]);
+  if (!indexes.length) return;
+  selection.deleting = true;
+  try {
+    const columns = await call(desktop.db.columns(target.database, target.targetTable, target.profileId));
+    if (getActiveQueryResult() !== result) return;
+    queryTablePkCache.set(`${target.profileId || ''}.${target.database}.${target.targetTable}`,
+      columns.filter((column) => column.key === 'PRI').map((column) => column.name));
+    const primaryIndexes = queryResultPrimaryKeyIndexes(result, target);
+    if (!primaryIndexes.length) throw new Error('Kết quả cần có đầy đủ khóa chính để xóa bản ghi.');
+    const source = result.columns[primaryIndexes[0]];
+    const first = queryResultRowWriteContext(result, indexes[0], columns, {
+      database: target.database, table: target.targetTable, colName: source.orgName || source.name
+    });
+    const entries = new Map();
+    for (const index of indexes) {
+      const context = queryResultRowWriteContext(result, index, first.columns, first.info);
+      entries.set(JSON.stringify(context.keys), context);
+    }
+    const contexts = [...entries.values()];
+    // Keep a single guarded request, so a conflict rolls back the whole selection.
+    if (contexts.length > 1000) throw new Error('Chỉ có thể xóa tối đa 1.000 bản ghi mỗi lần. Hãy chọn ít dòng hơn.');
+    if (getActiveQueryResult() !== result) return;
+    const { info } = first;
+    const count = contexts.length;
+    const confirmed = await confirmAction(count === 1 ? 'Xóa bản ghi?' : `Xóa ${count.toLocaleString()} bản ghi?`,
+      `Xóa ${count.toLocaleString()} bản ghi khỏi ${info.database}.${info.table}? Thao tác này ghi ngay vào database.`, 'Xóa');
+    if (!confirmed || getActiveQueryResult() !== result) return;
+    const outcome = await call(desktop.db.deleteRows({
+      profileId: target.profileId, database: info.database, table: info.table,
+      keysList: contexts.map(({ keys }) => keys), originalValues: contexts.map(({ original }) => original)
+    }));
+    if (Number(outcome.affectedRows) !== count) throw new Error('Không xác nhận được đầy đủ bản ghi đã xóa. Hãy chạy lại truy vấn để kiểm tra database.');
+    const primary = first.columns.filter((column) => column.key === 'PRI');
+    const keyIndexes = primary.map((key) => result.columns.findIndex((column) =>
+      (column.orgName || column.name) === key.name && (column.orgTable || column.table) === info.table
+      && (!column.db || column.db === info.database)));
+    for (let index = result.rows.length - 1; index >= 0; index -= 1) {
+      const keys = Object.fromEntries(primary.map((key, offset) => [key.name, result.rows[index][keyIndexes[offset]]]));
+      if (!entries.has(JSON.stringify(keys))) continue;
+      result.rows.splice(index, 1);
+      result.originalHashes?.splice(index, 1);
+    }
+    selection.rows.clear(); selection.anchor = null; selection.focus = null;
+    refreshQueryResultAfterWrite(result);
+    toast(`Đã xóa ${count.toLocaleString()} bản ghi.`, 'success');
+  } catch (error) {
+    if (error.code === 'ROW_CONFLICT' || error.code === 'ROW_NOT_FOUND') showRowConflict(error);
+    else toast(error.message || 'Không xóa được bản ghi.', 'error');
+  } finally { selection.deleting = false; }
+}
+
+const QUERY_GRID_ROW_HEIGHT = 42;
+const QUERY_GRID_WINDOW = 80;
+const queryGridViewports = new WeakMap();
+
+function renderQueryGridWindow(box, result) {
+  if (!box?.isConnected || getActiveQueryResult() !== result) return;
+  const viewport = queryGridViewport(result);
+  viewport.top = box.scrollTop;
+  viewport.left = box.scrollLeft;
+  if (result.rows.length <= 200 || box.querySelector('.editing-cell')) return;
+  const start = Math.max(0, Math.min(result.rows.length - QUERY_GRID_WINDOW,
+    Math.floor(Math.max(0, box.scrollTop / (QUERY_GRID_ROW_HEIGHT * ((app.query.gridZoom || 100) / 100)) - 15) / 20) * 20));
+  if (viewport.start === start && box.dataset.windowStart === String(start)) return;
+  viewport.start = start;
+  box.dataset.windowStart = String(start);
+  box.querySelector('tbody').innerHTML = queryGridBodyHtml(result, start);
+}
+
+function setupQueryGridViewport(output) {
+  let frame = null;
+  const restore = () => {
+    const result = getActiveQueryResult();
+    const box = output.querySelector('[data-query-grid]');
+    if (!result || !box) return;
+    const viewport = queryGridViewport(result);
+    box.scrollTop = viewport.top;
+    box.scrollLeft = viewport.left;
+    box.dataset.windowStart = String(viewport.start);
+  };
+  restore();
+  const observer = new MutationObserver(() => {
+    if (!output.isConnected) { observer.disconnect(); return; }
+    restore();
+  });
+  observer.observe(output, { childList: true });
+  output.addEventListener('scroll', (event) => {
+    const box = event.target;
+    if (!box.matches?.('[data-query-grid]')) return;
+    const result = getActiveQueryResult();
+    if (!result) return;
+    const viewport = queryGridViewport(result);
+    viewport.top = box.scrollTop; viewport.left = box.scrollLeft;
+    if (frame !== null) return;
+    frame = requestAnimationFrame(() => {
+      frame = null;
+      renderQueryGridWindow(box, result);
+    });
+  }, true);
+}
+
+function queryGridViewport(result) {
+  if (!queryGridViewports.has(result)) queryGridViewports.set(result, { top: 0, left: 0, start: 0 });
+  return queryGridViewports.get(result);
+}
+
+function queryGridBodyHtml(result, start = 0) {
+  const rows = queryGridOrderedRows(result);
+  const selection = queryGridSelection(result);
+  const virtual = rows.length > 200;
+  const visible = virtual ? rows.slice(start, start + QUERY_GRID_WINDOW) : rows;
+  const spacer = (count) => count > 0 ? `<tr aria-hidden="true" class="query-grid-spacer"><td colspan="${result.columns.length + 1}" style="height:${count * QUERY_GRID_ROW_HEIGHT}px"></td></tr>` : '';
+  return (virtual ? spacer(start) : '') + visible.map(({ row, origIndex }, offset) => {
+    const index = start + offset;
     return `
-      <tr data-query-row="${origIndex}">
+      <tr data-query-row="${origIndex}" class="${selection.rows.has(origIndex) ? 'query-row-selected' : ''}" aria-selected="${selection.rows.has(origIndex)}">
         <td class="muted">${index + 1}</td>
         ${row.map((value, colIdx) => {
           const isNull = value === null || value === undefined;
@@ -5389,9 +6167,35 @@ function singleQueryResultHtml(result, compact = false) {
           }
           return `<td class="${isNull ? 'nullcell' : ''}" data-col="${esc(colMeta?.name || '')}" data-col-idx="${colIdx}" title="${esc(text.slice(0, 500))}">${cellDisplay}</td>`;
         }).join('')}
-      </tr>
-    `;
-  }).join('') || `<tr><td colspan="${result.columns.length + 1}" class="empty">Không có dòng nào.</td></tr>`;
+      </tr>`;
+  }).join('') + (virtual ? spacer(Math.max(0, rows.length - start - visible.length)) : '')
+    || `<tr><td colspan="${result.columns.length + 1}" class="empty">Không có dòng nào.</td></tr>`;
+}
+
+function singleQueryResultHtml(result, compact = false) {
+  if (result.kind === 'ok') {
+    return `<div class="resulttitle">✓ Thành công · ${result.affectedRows} dòng bị ảnh hưởng${result.insertId !== null ? ` · insert id ${esc(result.insertId)}` : ''} · ${result.durationMs} ms</div>`;
+  }
+  if (result.kind !== 'rows') {
+    return '<div class="errorbox">Kết quả truy vấn không hợp lệ.</div>';
+  }
+  const sortCol = app.query.sortCol;
+  const sortDir = app.query.sortDir === 'DESC' ? -1 : 1;
+  const header = `<tr><th></th>${result.columns.map((column, index) => {
+    const sorted = sortCol === index;
+    return `<th class="sortable${sorted ? (sortDir === 1 ? ' sorted-asc' : ' sorted-desc') : ''}" data-query-sort="${index}">${esc(column.name)} <small>${esc(column.type)}</small>${sorted ? `<span class="sort-arrow">${sortDir === 1 ? '▲' : '▼'}</span>` : ''}</th>`;
+  }).join('')}</tr>`;
+  const selection = queryGridSelection(result);
+
+  const hasPk = result.columns && result.columns.some((c) => (c.flags & 2) || c.key === 'PRI');
+  const hasTable = result.columns && result.columns.some((c) => c.table || c.orgTable);
+  const isEditable = !result.isExplain && (hasPk || (hasTable && Boolean(table) && app.primaryKey?.length));
+
+  const viewport = queryGridViewport(result);
+  const virtual = result.rows.length > 200;
+  const start = virtual ? Math.min(viewport.start, Math.max(0, result.rows.length - QUERY_GRID_WINDOW)) : 0;
+  const body = queryGridBodyHtml(result, start);
+  const colgroup = virtual ? `<colgroup><col style="width:48px">${result.columns.map(() => '<col style="width:170px">').join('')}</colgroup>` : '';
 
   const badgeHtml = isEditable
     ? '<span class="query-mode-badge editable" title="Kết quả có khóa chính — nhấp đúp vào ô để sửa trực tiếp và lưu vào CSDL">✎ Sửa trực tiếp: Bật</span>'
@@ -5404,14 +6208,15 @@ function singleQueryResultHtml(result, compact = false) {
         ${badgeHtml}
       </div>
       <div class="actions-right">
-        <button type="button" onclick="exportCurrentResult('csv')" title="Xuất kết quả truy vấn ra CSV">↧ Xuất CSV</button>
-        <button type="button" onclick="exportCurrentResult('json')" title="Xuất kết quả truy vấn ra JSON">↧ Xuất JSON</button>
+        <button type="button" data-click="export-result" data-format="csv" title="Xuất kết quả truy vấn ra CSV">↧ Xuất CSV</button>
+        <button type="button" data-click="export-result" data-format="json" title="Xuất kết quả truy vấn ra JSON">↧ Xuất JSON</button>
       </div>
     </div>`;
 
   return `
     ${compact ? '' : exportToolbar}
-    <div class="tablebox"><table><thead>${header}</thead><tbody>${body}</tbody></table></div>
+    <div class="tablebox query-selectable-grid${virtual ? ' query-virtual-grid' : ''}" data-query-grid tabindex="0" role="region" aria-label="Kết quả SQL. Ctrl+A chọn tất cả dòng, Ctrl+C sao chép, Shift và nhấp để chọn một khoảng."><table ${virtual ? `style="width:${48 + result.columns.length * 170}px"` : ''} role="grid" aria-rowcount="${result.rows.length}" aria-multiselectable="true" aria-label="Dữ liệu kết quả SQL">${colgroup}<thead>${header}</thead><tbody>${body}</tbody></table></div>
+    <div class="query-selection-status"><span data-query-selection-count aria-live="polite">${selection.rows.size.toLocaleString()} dòng đã chọn</span><span>Kéo chuột / Shift+nhấp · Ctrl+A chọn tất cả · Ctrl+C sao chép</span></div>
     ${compact ? `<div class="query-grid-status">${result.rows.length} dòng · ${result.durationMs} ms${result.truncated ? ' · đã giới hạn dữ liệu hiển thị' : ''}</div>` : ''}
     ${!compact && result.truncated ? `<div class="hint">${result.truncationReason === 'byte-limit' ? 'Dữ liệu hiển thị đã đạt giới hạn dung lượng.' : 'Kết quả hiển thị đã đạt giới hạn dòng.'} ${result.stoppedEarly ? 'Đã gửi yêu cầu dừng đọc phần còn lại.' : 'Phần còn lại được đọc bỏ để giữ phiên kết nối.'} Chọn xuất để lấy đầy đủ dữ liệu.</div>` : ''}
     ${!compact ? `
@@ -5744,19 +6549,20 @@ function renderHistoryView() {
   });
 }
 
-async function editRow(index) {
-  if (!desktop || !app.database || !table) return;
-  const profileId = app.connection?.id || null;
-  const database = app.database;
-  const targetTable = table;
-  const editing = Number.isInteger(index) && index >= 0 && index < app.rows.length;
+async function editRow(index, target = null) {
+  const profileId = target?.profileId || app.connection?.id || null;
+  const database = target?.database || app.database;
+  const targetTable = target?.targetTable || table;
+  if (!desktop || !database || !targetTable || !profileId) return;
+  const editing = !target && Number.isInteger(index) && index >= 0 && index < app.rows.length;
   const row = editing ? app.rows[index] : null;
-  let columns = app.columns;
+  let columns = target ? [] : app.columns;
   if (!columns.length) {
     try { columns = await call(desktop.db.columns(database, targetTable, profileId)); }
     catch (error) { toast(error.message, 'error'); return; }
   }
-  if ((app.connection?.id || null) !== profileId || app.database !== database || table !== targetTable) return;
+  if (target ? getActiveQueryResult() !== target.result
+    : (app.connection?.id || null) !== profileId || app.database !== database || table !== targetTable) return;
   const primary = columns.filter((column) => column.key === 'PRI').map((column) => column.name);
   if (editing && !primary.length) { toast('Bảng không có khóa chính nên không thể sửa trực tiếp.', 'error'); return; }
   const fields = columns.filter((column) => editing || !/auto_increment/i.test(column.extra || ''));
@@ -5802,9 +6608,10 @@ async function editRow(index) {
         const keys = Object.fromEntries(primary.map((name) => [name, row[name]]));
         requireRowUpdate(await call(desktop.db.updateRow({ profileId, database, table: targetTable, keys, values, original: originalRow(row) })));
       } else await call(desktop.db.insertRow({ profileId, database, table: targetTable, values }));
-      toast(editing ? 'Đã cập nhật bản ghi' : 'Đã thêm bản ghi');
+      toast(editing ? 'Đã cập nhật bản ghi'
+        : target ? 'Đã thêm bản ghi. Chạy lại SELECT nếu muốn cập nhật kết quả.' : 'Đã thêm bản ghi');
       if (form.isConnected) closeModal();
-      if ((app.connection?.id || null) === profileId && app.database === database && table === targetTable) await loadData();
+      if (!target && (app.connection?.id || null) === profileId && app.database === database && table === targetTable) await loadData();
     } catch (error) {
       if (error.code === 'ROW_CONFLICT' || error.code === 'ROW_NOT_FOUND') {
         showRowConflict(error, {
@@ -6149,7 +6956,7 @@ async function accountModal() {
     modal(`
       <h2>Tài khoản &amp; đồng bộ</h2>
       <p>Tính năng đồng bộ chỉ khả dụng trong bản desktop của SqlPro.</p>
-      <div class="actions"><button type="button" onclick="closeModal()">Đóng</button></div>
+      <div class="actions"><button type="button" data-click="close-modal">Đóng</button></div>
     `);
     return;
   }
@@ -6526,6 +7333,7 @@ function connection(profile) {
   const existing = profile || null;
   let trustedHostKey = existing?.ssh?.knownHostKey;
   const p = existing || {};
+  const verifyChecked = existing ? p.ssl?.verify === true : true;
   const savedPassword = existing ? existing.hasPassword : false;
   const savedSslPassphrase = existing ? existing.hasSslPassphrase : false;
   const savedSshPassword = existing ? existing.hasSshPassword : false;
@@ -6559,7 +7367,8 @@ function connection(profile) {
       </div>
       <label class="checkline"><input type="checkbox" id="connSsl" ${p.ssl?.enabled ? 'checked' : ''}> Dùng SSL/TLS</label>
       <div id="sslFields" class="optionbox ${p.ssl?.enabled ? '' : 'hidden'}">
-        <label class="checkline"><input type="checkbox" id="connSslVerify" ${p.ssl?.verify ? 'checked' : ''}> Xác thực chứng chỉ máy chủ</label>
+        <label class="checkline"><input type="checkbox" id="connSslVerify" ${verifyChecked ? 'checked' : ''}> Xác thực chứng chỉ máy chủ</label>
+        <div id="connTlsWarning" class="securitywarning hidden" role="status"></div>
         <label>CA cert (tùy chọn, nếu chứng chỉ máy chủ không được hệ thống tin cậy)</label><input id="connSslCa" value="${esc(p.ssl?.ca || '')}">
         <div class="formrow">
           <div><label>Client cert (chỉ khi máy chủ yêu cầu)</label><input id="connSslCert" value="${esc(p.ssl?.cert || '')}"></div>
@@ -6570,6 +7379,7 @@ function connection(profile) {
       </div>
       <label class="checkline"><input type="checkbox" id="connCleartextPassword" ${p.allowCleartextPassword ? 'checked' : ''}> Cho phép xác thực mysql_clear_password</label>
       <div class="muted" style="font-size:11px;margin:0 0 12px 22px">Chỉ dùng khi máy chủ yêu cầu. Cần TLS đã xác thực hoặc SSH tunnel tới MySQL trên chính máy SSH (MySQL host localhost/127.0.0.1/::1).</div>
+      <div id="connCleartextWarning" class="securitywarning hidden" role="status"></div>
       <label class="checkline"><input type="checkbox" id="connSsh" ${p.ssh?.enabled ? 'checked' : ''}> Kết nối qua SSH tunnel</label>
       <div id="sshFields" class="optionbox ${p.ssh?.enabled ? '' : 'hidden'}">
         <div class="formrow">
@@ -6591,6 +7401,7 @@ function connection(profile) {
           <label>Passphrase</label><input id="sshPassphrase" type="password" placeholder="${savedPassphrase ? 'Để trống = giữ passphrase đã lưu' : 'Passphrase (nếu có)'}">
         </div>
         <div class="muted" style="font-size:11px">MySQL host ở trên là đích nhìn từ máy SSH. SSH host là máy trung gian SqlPro kết nối tới. Host key SSH được xác minh SHA-256 ở lần kết nối đầu tiên; thay đổi khóa sẽ bị chặn cho tới khi bạn xác nhận.</div>
+        <div id="connSshWarning" class="securitywarning hidden" role="status"></div>
       </div>
       <div class="successbox hidden" id="connSuccess"></div>
       <div class="errorbox hidden" id="connError"></div>
@@ -6648,23 +7459,75 @@ function connection(profile) {
 
     errorBox.classList.remove('hidden');
   };
+  const updateSecurityHints = () => {
+    const setHint = (selector, text) => {
+      const element = $(selector);
+      if (!element) return;
+      element.textContent = text || '';
+      element.classList.toggle('hidden', !text);
+    };
+    const sslEnabled = $('#connSsl').checked;
+    const verify = $('#connSslVerify').checked;
+    const sshEnabled = $('#connSsh').checked;
+    const cleartext = $('#connCleartextPassword').checked;
+    const host = $('#connHost').value.trim() || 'host';
+    const localTarget = ['localhost', '127.0.0.1', '::1'].includes(host.toLowerCase());
+
+    let tlsWarning = '';
+    if (sslEnabled && !verify) {
+      const legacy = Boolean(existing && p.ssl?.legacyUnverified);
+      tlsWarning = legacy
+        ? '⚠ Cấu hình TLS này được lưu từ phiên bản cũ và chưa từng bật xác thực chứng chỉ. SqlPro giữ nguyên cách kết nối hiện tại để không làm gián đoạn công việc. Để nâng cấp, bật "Xác thực chứng chỉ máy chủ" và cung cấp CA nếu máy chủ dùng CA riêng.'
+        : '⚠ TLS đang tắt xác thực chứng chỉ: SqlPro không kiểm tra chứng chỉ máy chủ nên kết nối có thể bị nghe lén hoặc giả mạo. Hãy bật "Xác thực chứng chỉ máy chủ" và cung cấp CA khi cần.';
+    }
+    setHint('#connTlsWarning', tlsWarning);
+
+    let sshWarning = '';
+    if (sshEnabled) {
+      sshWarning = localTarget
+        ? 'SSH tunnel chỉ bảo vệ đoạn từ máy này tới SSH host. MySQL đích là loopback nhìn từ SSH host, nhưng SqlPro không thể xác minh MySQL chỉ nghe loopback, không có proxy chuyển tiếp, hoặc đoạn nội bộ được mã hóa.'
+        : `SSH tunnel chỉ bảo vệ đoạn từ máy này tới SSH host. Đoạn từ SSH host tới MySQL (${host}) phụ thuộc địa chỉ đích và cấu hình thực tế; không mặc định an toàn toàn tuyến.`;
+      if (!sslEnabled) sshWarning += ' MySQL hiện không được TLS bảo vệ trên đoạn SSH host → MySQL.';
+    }
+    setHint('#connSshWarning', sshWarning);
+
+    let cleartextWarning = '';
+    if (cleartext) {
+      if (sslEnabled && verify) {
+        cleartextWarning = 'mysql_clear_password sẽ được gửi trong TLS đã xác thực chứng chỉ.';
+      } else if (sshEnabled && localTarget) {
+        cleartextWarning = '⚠ Chỉ được phép vì MySQL đích là loopback trên máy SSH và host key SSH phải được xác minh. SqlPro không thể xác minh cấu hình mạng thực tế của máy SSH hoặc rằng không có proxy chuyển tiếp.';
+      } else {
+        cleartextWarning = '⚠ Cấu hình này sẽ bị chặn: mysql_clear_password cần TLS đã xác thực chứng chỉ hoặc SSH tunnel tới MySQL loopback trên chính máy SSH với host key đã xác minh.';
+      }
+    }
+    setHint('#connCleartextWarning', cleartextWarning);
+  };
+
   const toggleOptions = () => {
     $('#sslFields').classList.toggle('hidden', !$('#connSsl').checked);
     $('#sshFields').classList.toggle('hidden', !$('#connSsh').checked);
     const useKey = $('#sshAuthMethod').value === 'key';
     $('#sshPasswordRow').classList.toggle('hidden', useKey);
     $('#sshKeyRows').classList.toggle('hidden', !useKey);
+    updateSecurityHints();
   };
   $('#connSsl').addEventListener('change', toggleOptions);
   $('#connSsh').addEventListener('change', toggleOptions);
   $('#sshAuthMethod').addEventListener('change', toggleOptions);
+  $('#connSslVerify').addEventListener('change', updateSecurityHints);
+  $('#connCleartextPassword').addEventListener('change', updateSecurityHints);
+  $('#connHost').addEventListener('input', updateSecurityHints);
+  toggleOptions();
 
   const readForm = () => {
     const mysqlHost = $('#connHost').value.trim().toLowerCase();
     const sshToLocalMysql = $('#connSsh').checked && ['localhost', '127.0.0.1', '::1'].includes(mysqlHost);
     if ($('#connCleartextPassword').checked
       && !(($('#connSsl').checked && $('#connSslVerify').checked) || sshToLocalMysql)) {
-      throw new Error('mysql_clear_password yêu cầu TLS đã xác thực hoặc SSH tunnel tới MySQL trên chính máy SSH (MySQL host localhost/127.0.0.1/::1).');
+      const error = new Error('mysql_clear_password yêu cầu TLS đã xác thực hoặc SSH tunnel tới MySQL trên chính máy SSH (MySQL host localhost/127.0.0.1/::1).');
+      error.code = 'CLEARTEXT_AUTH_INSECURE_TRANSPORT';
+      throw error;
     }
     const payload = {
       id: existing ? existing.id : undefined,
@@ -6741,12 +7604,12 @@ function connection(profile) {
       const payload = readForm();
       try {
         const result = await call(desktop.connections.test(payload));
-        showSuccess(`✓ Kết nối thành công! Phiên bản: MySQL ${result.version || ''}`);
+        showSuccess(`✓ Kết nối thành công! Phiên bản: MySQL ${result.version || ''}\nBảo mật: ${connectionSecuritySummary(payload)}`);
       } catch (err) {
         if (await handleHostKeyPrompt(err, payload)) {
           testButton.textContent = 'Đang kiểm tra lại…';
           const result = await call(desktop.connections.test(payload));
-          showSuccess(`✓ Đã tin cậy khóa! Kết nối thành công MySQL ${result.version || ''}`);
+          showSuccess(`✓ Đã tin cậy khóa! Kết nối thành công MySQL ${result.version || ''}\nBảo mật: ${connectionSecuritySummary(payload)}`);
         } else {
           throw err;
         }
@@ -6828,9 +7691,11 @@ function connection(profile) {
 function connectionMenu(id) {
   const profile = app.connections.find((connection) => connection.id === id);
   if (!profile) return;
+  const securityClass = profile.ssl?.enabled && profile.ssl.verify === true ? 'hint' : 'securitywarning';
   modal(`
     <h2>${esc(profile.name)}</h2>
-    <p>${esc(profile.user || 'root')}@${esc(profile.host)}:${profile.port} · ${profile.type === 'mariadb' ? 'MariaDB' : 'MySQL'}${profile.ssh.enabled ? ' · SSH tunnel' : ''}</p>
+    <p>${esc(profile.user || 'root')}@${esc(profile.host)}:${profile.port} · ${profile.type === 'mariadb' ? 'MariaDB' : 'MySQL'} · ${esc(connectionTransportBadge(profile))}${profile.ssh?.enabled ? ' · SSH tunnel' : ''}</p>
+    <div class="${securityClass}">${esc(connectionSecuritySummary(profile))}</div>
     <div class="hint">${profile.hasPassword ? 'Mật khẩu đã lưu an toàn bằng OS keychain.' : 'Chưa lưu mật khẩu.'}</div>
     <div class="actions">
       <button class="danger" id="menuDelete">Xóa</button>
@@ -6990,7 +7855,7 @@ function backupDatabase() {
     <div class="hint">SqlPro tự lưu tệp .sql vào thư mục backup của ứng dụng và hiển thị trong nhánh Backups. Dung lượng phụ thuộc vào ổ đĩa và máy chủ MySQL.</div>
     <div class="hint">Backup dùng kết nối riêng và snapshot chung khi tất cả bảng dữ liệu là InnoDB. Với engine khác, hãy tạm dừng ghi dữ liệu. Tránh thay đổi cấu trúc bảng trong lúc sao lưu.</div>
     <div class="actions">
-      <button onclick="closeModal()">Hủy</button>
+      <button data-click="close-modal">Hủy</button>
       <button class="primary" id="backupGo">Tạo bản sao lưu</button>
     </div>
   `, true);
@@ -7133,6 +7998,7 @@ function backupDatabase() {
       finishBackgroundTransfer('success', 'Sao lưu hoàn tất', `
         <p>Đã sao lưu ${parts.join(', ')} (${Number(result.rows || 0).toLocaleString()} dòng) · ${formatBytes(result.bytes)}.</p>
         ${(result.warnings || []).map((message) => `<div class="hint" role="status">${esc(message)}</div>`).join('')}
+        ${backupIntegrityHtml(result)}
         <label>Đường dẫn tệp đã lưu</label>
         <input value="${esc(result.filePath)}" readonly aria-label="Đường dẫn tệp sao lưu">
       `, taskId);
@@ -7144,6 +8010,90 @@ function backupDatabase() {
       setStatus('Sao lưu thất bại');
     }
   });
+}
+
+function preflightFindingHtml(finding) {
+  const label = finding.objectName
+    ? `${finding.objectType ? `${finding.objectType} ` : ''}"${finding.objectName}"`
+    : '';
+  return `<li>${label ? `<strong>${esc(label)}</strong>: ` : ''}${esc(finding.message)}${finding.action ? `<br><span class="subtle">${esc(finding.action)}</span>` : ''}</li>`;
+}
+
+function restorePreflightHtml(preflight) {
+  if (!preflight) return '';
+  const groups = [
+    { key: 'blocking', label: 'Vấn đề chặn phục hồi', className: 'errorbox' },
+    { key: 'warning', label: 'Cảnh báo', className: 'hint' },
+    { key: 'unknown', label: 'Chưa xác minh', className: 'hint' }
+  ];
+  const sections = groups.map((group) => {
+    const findings = preflight[group.key] || [];
+    if (!findings.length) return '';
+    return `<div class="${group.className}" role="${group.key === 'blocking' ? 'alert' : 'status'}">
+      <strong>${group.label} (${findings.length}):</strong>
+      <ul>${findings.slice(0, 10).map(preflightFindingHtml).join('')}</ul>
+      ${findings.length > 10 ? `<p>Còn ${findings.length - 10} vấn đề khác.</p>` : ''}
+    </div>`;
+  }).join('');
+  const target = preflight.target || {};
+  const impact = preflight.impact || {};
+  const facts = [];
+  if (target.version) facts.push(`${target.flavor ? `${target.flavor} ` : ''}${target.version}`);
+  if (target.logBin !== null && target.logBin !== undefined) facts.push(`log_bin=${target.logBin ? 'ON' : 'OFF'}`);
+  if (target.logBinTrustFunctionCreators !== null && target.logBinTrustFunctionCreators !== undefined) {
+    facts.push(`log_bin_trust_function_creators=${target.logBinTrustFunctionCreators ? 'ON' : 'OFF'}`);
+  }
+  if (target.lowerCaseTableNames !== null && target.lowerCaseTableNames !== undefined) {
+    facts.push(`lower_case_table_names=${target.lowerCaseTableNames}`);
+  }
+  const counts = [];
+  if (impact.objects) counts.push(`${impact.objects} đối tượng`);
+  if (impact.conflicts) counts.push(`${impact.conflicts} trùng tên`);
+  if (impact.overwritten) counts.push(`${impact.overwritten} sẽ ghi đè`);
+  return `
+    <div class="preflight-report">
+      <p><strong>Kiểm tra trước phục hồi:</strong> ${preflight.canProceed ? 'không có vấn đề chặn.' : 'đã dừng trước khi ghi câu lệnh đầu tiên.'}</p>
+      ${sections}
+      ${facts.length || counts.length ? `<p class="subtle">${esc([...facts, ...counts].join(' · '))}</p>` : ''}
+      <p class="subtle">Kiểm tra này chỉ dựa trên thông tin đọc được trước khi chạy; không bảo đảm mọi câu lệnh SQL sẽ chạy thành công.</p>
+    </div>`;
+}
+
+function restoreImpactHtml(impact) {
+  if (!impact) return '';
+  const executed = Number(impact.executed || 0);
+  const statements = Number(impact.statements || 0);
+  const skipped = Number(impact.skipped || 0);
+  const dropped = Number(impact.droppedObjects || 0);
+  const last = impact.lastObject
+    ? ` Đối tượng gần nhất: ${impact.lastObject}${impact.lastCommand ? ` (${impact.lastCommand})` : ''}.`
+    : '';
+  if (impact.targetChanged === false) {
+    return `<p class="hint">Chưa có thay đổi nào được ghi vào database đích.${executed ? ` Đã chạy ${executed.toLocaleString()} câu lệnh.` : ''}</p>`;
+  }
+  if (impact.targetChanged === true) {
+    return `<div class="errorbox" role="alert">
+      <strong>Database đích có thể đã thay đổi một phần.</strong>
+      Đã chạy ${executed.toLocaleString()}${statements ? `/${statements.toLocaleString()}` : ''} câu lệnh${skipped ? `, bỏ qua ${skipped.toLocaleString()}` : ''}${dropped ? `, đã xóa ${dropped.toLocaleString()} đối tượng` : ''}.${esc(last)}
+      SqlPro không tự động hoàn tác hoặc chạy lại; hãy kiểm tra dữ liệu thủ công trước khi tiếp tục.
+    </div>`;
+  }
+  return `<p class="hint">Chưa xác định được chắc chắn database đích có thay đổi hay không.${executed ? ` Đã chạy ${executed.toLocaleString()} câu lệnh.` : ''}${esc(last)} Hãy kiểm tra dữ liệu trước khi chạy lại.</p>`;
+}
+
+function backupIntegrityHtml(backup) {
+  if (!backup) return '';
+  const checksum = backup.verification?.checksum;
+  if (checksum === 'verified') {
+    return `<p class="hint">✓ Checksum SHA-256 khớp${backup.checksum ? ` (${esc(String(backup.checksum).slice(0, 12))}…)` : ''}. Đây là mức “checksum khớp”, chưa phải “đã thử phục hồi”.</p>`;
+  }
+  if (checksum === 'mismatch') {
+    return '<div class="errorbox" role="alert"><strong>Checksum không khớp.</strong> Tệp có thể đã bị sửa hoặc hỏng; không nên phục hồi cho đến khi kiểm tra lại.</div>';
+  }
+  if (backup.manifestError) {
+    return `<p class="hint">Chưa xác minh được checksum: ${esc(backup.manifestError)}</p>`;
+  }
+  return '<p class="hint">Bản sao lưu này chưa có checksum (bản cũ). Có thể dùng “Xác minh” để tính SHA-256; manifest chỉ được tạo cho các bản sao lưu mới.</p>';
 }
 
 function restoreVerificationHtml(verification) {
@@ -7191,22 +8141,31 @@ function restoreDatabase(backupId = null) {
   }
   const sourceDb = app.database;
   const sourceProfileId = app.connection.id;
+  const selectedBackup = backupId ? (app.backups || []).find((entry) => entry.id === backupId) : null;
+  const backupSummary = backupObjectSummary(selectedBackup);
+  const defaultNew = Boolean(backupId);
+  const suggestedName = `${sourceDb}_copy`;
   const dbOptions = (app.databases || []).map((db) => `
-    <option value="${esc(db)}" ${db === sourceDb ? 'selected' : ''}>${esc(db)}${db === sourceDb ? ' (Hiện tại)' : ''}</option>
+    <option value="${esc(db)}" ${!defaultNew && db === sourceDb ? 'selected' : ''}>${esc(db)}${db === sourceDb ? ' (Hiện tại)' : ''}</option>
   `).join('');
 
   modal(`
     <h2>Phục hồi database</h2>
     <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; margin: 10px 0;">
       <div>Nguồn: <strong>${esc(sourceDb)}</strong>${backupId ? ` · Bản sao lưu <code>${esc(backupId.slice(0, 14))}</code>` : ' · Tệp .sql bên ngoài'}</div>
+      ${backupSummary ? `<div class="subtle">Dự kiến trong bản sao lưu: ${esc(backupSummary)}</div>` : ''}
     </div>
     <label for="restoreTargetDb" style="display:block; margin: 12px 0 4px; font-weight: 600;">Database đích:</label>
     <select id="restoreTargetDb" style="width: 100%;">
       ${dbOptions}
-      <option value="__NEW__">＋ Tạo database mới…</option>
+      <option value="__NEW__" ${defaultNew ? 'selected' : ''}>＋ Tạo database mới…</option>
     </select>
     <div id="restoreNewDbBox" style="display:none; margin-top: 8px;">
-      <input id="restoreNewDbName" placeholder="Tên database mới (ví dụ: ${esc(sourceDb)}_copy)" style="width: 100%;">
+      <input id="restoreNewDbName" value="${defaultNew ? esc(suggestedName) : ''}" placeholder="Tên database mới (ví dụ: ${esc(suggestedName)})" style="width: 100%;">
+    </div>
+    <div id="restoreExistingWarning" class="errorbox" style="display:none;" role="alert">
+      <strong>Database đích đã tồn tại.</strong> Ghi vào database hiện có có thể thay đổi dữ liệu đang dùng. Nhập đúng tên database bên dưới để xác nhận.
+      <input id="restoreConfirmName" autocomplete="off" style="width: 100%; margin-top: 8px;" aria-label="Nhập tên database đích để xác nhận">
     </div>
     <div style="margin-top: 12px; display: flex; flex-direction: column; gap: 6px;">
       <label class="checkline"><input type="checkbox" id="restoreDrop"> Xóa bảng/view/trigger/routine/event trùng tên trước khi tạo lại</label>
@@ -7214,10 +8173,11 @@ function restoreDatabase(backupId = null) {
         <input type="checkbox" id="restoreCopyCatalog" checked> Lưu bản sao lưu này vào danh mục của Database đích
       </label>
     </div>
+    <div class="hint"><strong>Không có rollback toàn bộ:</strong> MySQL/MariaDB không bảo đảm hoàn tác DDL nếu lỗi giữa chừng. Nếu phục hồi thất bại hoặc bị hủy sau khi đã ghi, SqlPro sẽ báo phần đã chạy và không tự retry, tự xóa hay tự rollback database đích.</div>
     <div class="hint">Tệp .sql được chạy tuần tự vào database đích. Trước khi ghi, SqlPro kiểm tra toàn bộ tệp: câu lệnh ghi ra ngoài database đích, CALL/PREPARE/EXECUTE và câu lệnh không phân tích được sẽ bị chặn. Các lệnh USE và CREATE/DROP DATABASE trong tệp sẽ bị bỏ qua; khóa ngoại tạm thời tắt trong lúc phục hồi nhưng được kiểm tra lại sau đó. Trigger/routine trong tệp vẫn có thể ghi gián tiếp hoặc dùng SQL động ngoài phần đã phân tích, nên hãy dùng tài khoản chỉ có quyền trên database đích.</div>
     <div class="hint"><strong>Chỉ phục hồi tệp bạn tin cậy</strong> — nội dung tệp có thể thay đổi dữ liệu.</div>
     <div class="actions">
-      <button onclick="closeModal()">Hủy</button>
+      <button data-click="close-modal">Hủy</button>
       <button class="primary" id="restoreGo">${backupId ? 'Phục hồi bản này' : 'Chọn tệp .sql…'}</button>
     </div>
   `);
@@ -7225,6 +8185,8 @@ function restoreDatabase(backupId = null) {
   const targetSelect = $('#restoreTargetDb');
   const newDbBox = $('#restoreNewDbBox');
   const copyCatalogLine = $('#restoreCopyCatalogLine');
+  const existingWarning = $('#restoreExistingWarning');
+  const confirmNameInput = $('#restoreConfirmName');
   const restoreGoBtn = $('#restoreGo');
 
   const updateTargetUi = () => {
@@ -7232,6 +8194,14 @@ function restoreDatabase(backupId = null) {
     newDbBox.style.display = isNew ? 'block' : 'none';
     const isDifferent = isNew || targetSelect.value !== sourceDb;
     copyCatalogLine.style.display = (isDifferent && backupId) ? 'flex' : 'none';
+    const existing = !isNew && (app.databases || []).includes(targetSelect.value);
+    existingWarning.style.display = existing ? 'block' : 'none';
+    if (existing) {
+      confirmNameInput.placeholder = `Nhập "${targetSelect.value}"`;
+      restoreGoBtn.disabled = confirmNameInput.value.trim() !== targetSelect.value;
+    } else {
+      restoreGoBtn.disabled = false;
+    }
     if (isDifferent) {
       restoreGoBtn.textContent = isNew ? 'Tạo mới & Phục hồi' : `Phục hồi sang ${targetSelect.value}`;
     } else {
@@ -7239,12 +8209,18 @@ function restoreDatabase(backupId = null) {
     }
   };
   targetSelect.addEventListener('change', updateTargetUi);
+  confirmNameInput.addEventListener('input', updateTargetUi);
+  updateTargetUi();
 
   $('#restoreGo').addEventListener('click', async () => {
     const isNew = targetSelect.value === '__NEW__';
     const targetDb = isNew ? ($('#restoreNewDbName').value || '').trim() : targetSelect.value;
     if (!targetDb) {
       toast('Hãy chọn hoặc nhập tên database đích.', 'error');
+      return;
+    }
+    if (!isNew && (app.databases || []).includes(targetDb) && $('#restoreConfirmName').value.trim() !== targetDb) {
+      toast(`Nhập đúng tên database "${targetDb}" để xác nhận ghi đè.`, 'error');
       return;
     }
     const dropExisting = $('#restoreDrop').checked;
@@ -7274,7 +8250,7 @@ function restoreDatabase(backupId = null) {
       if (result.canceled) {
         setStatus('Đã hủy phục hồi');
         finishBackgroundTransfer('canceled', 'Đã hủy phục hồi', `
-          <p>Đã chạy ${Number(result.executed || 0).toLocaleString()} câu lệnh trước khi hủy. Các thay đổi đã áp dụng <strong>không được tự động hoàn tác</strong>.</p>
+          ${restoreImpactHtml(result) || `<p>Đã chạy ${Number(result.executed || 0).toLocaleString()} câu lệnh trước khi hủy. Các thay đổi đã áp dụng <strong>không được tự động hoàn tác</strong>.</p>`}
         `, taskId);
         return;
       }
@@ -7298,6 +8274,7 @@ function restoreDatabase(backupId = null) {
       persistState();
       finishBackgroundTransfer(verificationFailed ? 'error' : 'success', verificationFailed ? 'Phục hồi đã chạy nhưng cần kiểm tra' : verificationUnverified ? 'Phục hồi hoàn tất (chưa kiểm chứng đầy đủ)' : 'Phục hồi hoàn tất', `
         <p>Đã chạy ${result.statements} câu lệnh${result.skipped ? `, bỏ qua ${result.skipped}` : ''} vào <strong>${esc(targetDb)}</strong>.</p>
+        ${restorePreflightHtml(result.preflight)}
         ${restoreVerificationHtml(verification)}
         ${result.copiedBackup ? `<p class="subtle">Đã lưu bản sao lưu vào danh mục của <strong>${esc(targetDb)}</strong>.</p>` : ''}
       `, taskId);
@@ -7305,7 +8282,8 @@ function restoreDatabase(backupId = null) {
       const partial = error.partial;
       finishBackgroundTransfer('error', 'Phục hồi thất bại', `
         <div class="errorbox">${esc(error.message)}</div>
-        ${partial ? `<p class="hint">Đã chạy ${Number(partial.executed || 0).toLocaleString()} câu lệnh${partial.skipped ? `, bỏ qua ${partial.skipped}` : ''} trước khi lỗi. Các thay đổi đã áp dụng không được tự động hoàn tác.</p>` : '<div class="hint">Một số câu lệnh trước lỗi có thể đã được áp dụng. Kiểm tra database trước khi chạy lại tệp.</div>'}
+        ${restorePreflightHtml(error.preflight)}
+        ${restoreImpactHtml(error.impact || partial) || '<div class="hint">Một số câu lệnh trước lỗi có thể đã được áp dụng. Kiểm tra database trước khi chạy lại tệp.</div>'}
       `, taskId);
       setStatus('Phục hồi thất bại');
       if (app.connection?.id === sourceProfileId) {
@@ -7356,7 +8334,7 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
 
   const allConnections = (app.connections && app.connections.length) ? app.connections : (app.connection ? [app.connection] : []);
   let selectedConnId = targetConnectionId || app.connection?.id || (allConnections[0] ? allConnections[0].id : null);
-  let selectedDb = targetDb || (selectedConnId === app.connection?.id ? app.database : '') || '';
+  let selectedDb = targetDb || '';
 
   let targetDatabases = [];
   try {
@@ -7374,7 +8352,7 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
     return [
       `<option value="" ${!currDb ? 'selected' : ''} disabled>-- Chọn Database đích --</option>`,
       ...list,
-      `<option value="__NEW__">＋ Tạo database mới…</option>`
+      `<option value="__NEW__" ${!currDb ? 'selected' : ''}>＋ Tạo database mới…</option>`
     ].join('');
   };
 
@@ -7402,8 +8380,8 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
     <select id="pasteTargetDb" style="width: 100%;">
       ${renderDbOptions(targetDatabases, selectedDb)}
     </select>
-    <div id="pasteNewDbBox" style="display:none; margin-top: 8px;">
-      <input id="pasteNewDbName" placeholder="Tên database mới (ví dụ: ${esc(copied.sourceDatabase)}_copy)" style="width: 100%;">
+    <div id="pasteNewDbBox" style="display:${selectedDb ? 'none' : 'block'}; margin-top: 8px;">
+      <input id="pasteNewDbName" value="${selectedDb ? '' : esc(`${copied.sourceDatabase}_copy`)}" placeholder="Tên database mới (ví dụ: ${esc(copied.sourceDatabase)}_copy)" style="width: 100%;">
     </div>
 
     <div style="margin-top: 14px; display: flex; flex-direction: column; gap: 8px;">
@@ -7422,9 +8400,10 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
     </div>
 
     <div class="hint" style="margin-top: 12px;">Dữ liệu sẽ được sao chép trực tiếp từ bản backup của <strong>${esc(copied.sourceConnectionName)}</strong> sang máy chủ và database đích đã chọn.</div>
+    <div class="hint"><strong>Không có rollback toàn bộ:</strong> MySQL/MariaDB không bảo đảm hoàn tác DDL nếu lỗi giữa chừng. Nếu lỗi hoặc bị hủy sau khi đã ghi, SqlPro báo phần đã chạy và không tự retry, tự xóa hay tự rollback database đích.</div>
 
     <div class="actions">
-      <button onclick="closeModal()">Hủy</button>
+      <button data-click="close-modal">Hủy</button>
       <button class="primary" id="pasteGoBtn">Dán ngay</button>
     </div>
   `);
@@ -7452,7 +8431,9 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
       }
       dbSelect.disabled = false;
       dbSelect.innerHTML = renderDbOptions(targetDatabases, '');
-      newDbBox.style.display = 'none';
+      newDbBox.style.display = 'block';
+      const newDbName = $('#pasteNewDbName');
+      if (newDbName) newDbName.value = `${copied.sourceDatabase}_copy`;
     });
   }
 
@@ -7503,6 +8484,7 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
 
     try {
       let restoreResult = null;
+      let catalogCopy = null;
 
       if (doRestore) {
         restoreResult = await call(desktop.db.restore({
@@ -7520,12 +8502,12 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
         if (restoreResult.canceled) {
           setStatus('Đã hủy dán bản sao lưu');
           finishBackgroundTransfer('canceled', 'Đã hủy dán bản sao lưu', `
-            <p>Đã chạy ${Number(restoreResult.executed || 0).toLocaleString()} câu lệnh trước khi hủy. Các thay đổi đã áp dụng <strong>không được tự động hoàn tác</strong>.</p>
+            ${restoreImpactHtml(restoreResult) || `<p>Đã chạy ${Number(restoreResult.executed || 0).toLocaleString()} câu lệnh trước khi hủy. Các thay đổi đã áp dụng <strong>không được tự động hoàn tác</strong>.</p>`}
           `, taskId);
           return;
         }
       } else if (doCatalog) {
-        await call(desktop.db.copyBackup({
+        catalogCopy = await call(desktop.db.copyBackup({
           profileId: targetConnId,
           sourceProfileId: copied.sourceConnectionId,
           targetProfileId: targetConnId,
@@ -7537,6 +8519,7 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
 
       if (!doRestore) closeModal();
       const pastedFailed = restoreResult?.verification?.status === 'failed';
+      const pastedTitle = pastedFailed ? 'Dán bản sao lưu đã chạy nhưng cần kiểm tra' : 'Dán bản sao lưu thành công';
       toast(`Đã dán bản sao lưu sang "${finalTargetDb}"${pastedFailed ? ' nhưng cần kiểm tra dữ liệu' : ' thành công!'}`, pastedFailed ? 'error' : 'info');
       setStatus(`Dán hoàn tất sang ${finalTargetDb}${pastedFailed ? ' • có cảnh báo' : ''}`);
 
@@ -7546,16 +8529,18 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
       }
 
       const outcomeHtml = `
-        <p>Đã dán thành công bản sao lưu từ <strong>${esc(copied.sourceConnectionName)} › ${esc(copied.sourceDatabase)}</strong> sang <strong>${esc(targetConnName)} › ${esc(finalTargetDb)}</strong>.</p>
+        <p>Đã dán bản sao lưu từ <strong>${esc(copied.sourceConnectionName)} › ${esc(copied.sourceDatabase)}</strong> sang <strong>${esc(targetConnName)} › ${esc(finalTargetDb)}</strong>.</p>
         ${restoreResult ? `<p>Đã chạy ${restoreResult.statements} câu lệnh${restoreResult.skipped ? `, bỏ qua ${restoreResult.skipped}` : ''}.</p>` : ''}
+        ${restorePreflightHtml(restoreResult?.preflight)}
         ${restoreVerificationHtml(restoreResult?.verification)}
+        ${backupIntegrityHtml(catalogCopy || restoreResult?.copiedBackup)}
         ${(doCatalog || restoreResult?.copiedBackup) ? `<p class="subtle">Bản sao lưu đã được lưu vào danh mục của <strong>${esc(finalTargetDb)}</strong>.</p>` : ''}
         <div class="actions">
           <button class="primary" data-transfer-open-db="${esc(finalTargetDb)}" data-transfer-profile="${esc(targetConnId)}">Mở Database "${esc(finalTargetDb)}"</button>
         </div>
       `;
-      if (doRestore) finishBackgroundTransfer(pastedFailed ? 'error' : 'success', pastedFailed ? 'Dán bản sao lưu đã chạy nhưng cần kiểm tra' : 'Dán bản sao lưu thành công', outcomeHtml, taskId);
-      else modal(`<h2>Dán bản sao lưu thành công</h2>${outcomeHtml}<div class="actions"><button onclick="closeModal()">Đóng</button></div>`);
+      if (doRestore) finishBackgroundTransfer(pastedFailed ? 'error' : 'success', pastedTitle, outcomeHtml, taskId);
+      else modal(`<h2>${pastedTitle}</h2>${outcomeHtml}<div class="actions"><button data-click="close-modal">Đóng</button></div>`);
 
       $('#modal [data-transfer-open-db]')?.addEventListener('click', async () => {
         closeModal();
@@ -7568,10 +8553,11 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
       const partial = error.partial;
       const errorHtml = `
         <div class="errorbox">${esc(error.message)}</div>
-        ${partial ? `<p class="hint">Đã chạy ${Number(partial.executed || 0).toLocaleString()} câu lệnh${partial.skipped ? `, bỏ qua ${partial.skipped}` : ''} trước khi lỗi. Các thay đổi đã áp dụng không được tự động hoàn tác.</p>` : ''}
+        ${restorePreflightHtml(error.preflight)}
+        ${restoreImpactHtml(error.impact || partial) || '<div class="hint">Một số câu lệnh trước lỗi có thể đã được áp dụng. Hãy kiểm tra database đích trước khi chạy lại.</div>'}
       `;
       if (doRestore) finishBackgroundTransfer('error', 'Dán bản sao lưu thất bại', errorHtml, taskId);
-      else { closeModal(); modal(`<h2>Dán bản sao lưu thất bại</h2>${errorHtml}<div class="actions"><button onclick="closeModal()">Đóng</button></div>`); }
+      else { closeModal(); modal(`<h2>Dán bản sao lưu thất bại</h2>${errorHtml}<div class="actions"><button data-click="close-modal">Đóng</button></div>`); }
       setStatus('Dán bản sao lưu thất bại');
     }
   });
@@ -7596,7 +8582,7 @@ function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn
     return [
       `<option value="" ${!currDb ? 'selected' : ''} disabled>-- Chọn Database đích --</option>`,
       ...list,
-      `<option value="__NEW__">＋ Tạo database mới…</option>`
+      `<option value="__NEW__" ${!currDb ? 'selected' : ''}>＋ Tạo database mới…</option>`
     ].join('');
   };
 
@@ -7624,8 +8610,8 @@ function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn
     <select id="copyTargetDb" style="width: 100%;">
       ${renderDbOptions(targetDatabases, '')}
     </select>
-    <div id="copyNewDbBox" style="display:none; margin-top: 8px;">
-      <input id="copyNewDbName" placeholder="Tên database mới (ví dụ: ${esc(sourceDb)}_copy)" style="width: 100%;">
+    <div id="copyNewDbBox" style="display:block; margin-top: 8px;">
+      <input id="copyNewDbName" value="${esc(`${sourceDb}_copy`)}" placeholder="Tên database mới (ví dụ: ${esc(sourceDb)}_copy)" style="width: 100%;">
     </div>
 
     <div style="margin-top: 14px; display: flex; flex-direction: column; gap: 8px;">
@@ -7644,9 +8630,10 @@ function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn
     </div>
 
     <div class="hint" style="margin-top: 12px;">Hệ thống sẽ sao chép toàn bộ bảng và dữ liệu từ bản backup này sang máy chủ và Database đích được chỉ định.</div>
+    <div class="hint"><strong>Không có rollback toàn bộ:</strong> MySQL/MariaDB không bảo đảm hoàn tác DDL nếu lỗi giữa chừng. Nếu lỗi hoặc bị hủy sau khi đã ghi, SqlPro báo phần đã chạy và không tự retry, tự xóa hay tự rollback database đích.</div>
 
     <div class="actions">
-      <button onclick="closeModal()">Hủy</button>
+      <button data-click="close-modal">Hủy</button>
       <button class="primary" id="copyGoBtn">Bắt đầu sao chép</button>
     </div>
   `);
@@ -7674,7 +8661,9 @@ function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn
       }
       copyTargetSelect.disabled = false;
       copyTargetSelect.innerHTML = renderDbOptions(targetDatabases, '');
-      copyNewDbBox.style.display = 'none';
+      copyNewDbBox.style.display = 'block';
+      const copyNewDbName = $('#copyNewDbName');
+      if (copyNewDbName) copyNewDbName.value = `${sourceDb}_copy`;
     });
   }
 
@@ -7729,6 +8718,7 @@ function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn
 
     try {
       let restoreResult = null;
+      let catalogCopy = null;
 
       if (doRestore) {
         restoreResult = await call(desktop.db.restore({
@@ -7746,12 +8736,12 @@ function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn
         if (restoreResult.canceled) {
           setStatus('Đã hủy sao chép');
           finishBackgroundTransfer('canceled', 'Đã hủy sao chép', `
-            <p>Đã chạy ${Number(restoreResult.executed || 0).toLocaleString()} câu lệnh trước khi hủy. Các thay đổi đã áp dụng <strong>không được tự động hoàn tác</strong>.</p>
+            ${restoreImpactHtml(restoreResult) || `<p>Đã chạy ${Number(restoreResult.executed || 0).toLocaleString()} câu lệnh trước khi hủy. Các thay đổi đã áp dụng <strong>không được tự động hoàn tác</strong>.</p>`}
           `, taskId);
           return;
         }
       } else if (doCatalog) {
-        await call(desktop.db.copyBackup({
+        catalogCopy = await call(desktop.db.copyBackup({
           profileId: targetConnId,
           sourceProfileId: sourceConn?.id,
           targetProfileId: targetConnId,
@@ -7763,6 +8753,7 @@ function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn
 
       if (!doRestore) closeModal();
       const copiedFailed = restoreResult?.verification?.status === 'failed';
+      const copiedTitle = copiedFailed ? 'Sao chép đã chạy nhưng cần kiểm tra' : 'Sao chép hoàn tất';
       toast(`Đã sao chép sang database "${targetDb}"${copiedFailed ? ' nhưng cần kiểm tra dữ liệu' : ' thành công!'}`, copiedFailed ? 'error' : 'info');
       setStatus(`Sao chép hoàn tất sang ${targetDb}${copiedFailed ? ' • có cảnh báo' : ''}`);
       if (targetConnId === app.connection?.id) {
@@ -7770,16 +8761,18 @@ function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn
       }
 
       const outcomeHtml = `
-        <p>Đã sao chép thành công bản sao lưu từ <strong>${esc(sourceConnName)} › ${esc(sourceDb)}</strong> sang <strong>${esc(targetConnName)} › ${esc(targetDb)}</strong>.</p>
+        <p>Đã sao chép bản sao lưu từ <strong>${esc(sourceConnName)} › ${esc(sourceDb)}</strong> sang <strong>${esc(targetConnName)} › ${esc(targetDb)}</strong>.</p>
         ${restoreResult ? `<p>Đã chạy ${restoreResult.statements} câu lệnh${restoreResult.skipped ? `, bỏ qua ${restoreResult.skipped}` : ''}.</p>` : ''}
+        ${restorePreflightHtml(restoreResult?.preflight)}
         ${restoreVerificationHtml(restoreResult?.verification)}
+        ${backupIntegrityHtml(catalogCopy || restoreResult?.copiedBackup)}
         ${(doCatalog || restoreResult?.copiedBackup) ? `<p class="subtle">Bản sao lưu đã được lưu vào danh mục của <strong>${esc(targetDb)}</strong>.</p>` : ''}
         <div class="actions">
           <button class="primary" data-transfer-open-db="${esc(targetDb)}" data-transfer-profile="${esc(targetConnId)}">Mở Database "${esc(targetDb)}"</button>
         </div>
       `;
-      if (doRestore) finishBackgroundTransfer(copiedFailed ? 'error' : 'success', copiedFailed ? 'Sao chép đã chạy nhưng cần kiểm tra' : 'Sao chép hoàn tất', outcomeHtml, taskId);
-      else modal(`<h2>Sao chép hoàn tất</h2>${outcomeHtml}<div class="actions"><button onclick="closeModal()">Đóng</button></div>`);
+      if (doRestore) finishBackgroundTransfer(copiedFailed ? 'error' : 'success', copiedTitle, outcomeHtml, taskId);
+      else modal(`<h2>${copiedTitle}</h2>${outcomeHtml}<div class="actions"><button data-click="close-modal">Đóng</button></div>`);
 
       $('#modal [data-transfer-open-db]')?.addEventListener('click', async () => {
         closeModal();
@@ -7792,10 +8785,11 @@ function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn
       const partial = error.partial;
       const errorHtml = `
         <div class="errorbox">${esc(error.message)}</div>
-        ${partial ? `<p class="hint">Đã chạy ${Number(partial.executed || 0).toLocaleString()} câu lệnh${partial.skipped ? `, bỏ qua ${partial.skipped}` : ''} trước khi lỗi. Các thay đổi đã áp dụng không được tự động hoàn tác.</p>` : ''}
+        ${restorePreflightHtml(error.preflight)}
+        ${restoreImpactHtml(error.impact || partial) || '<div class="hint">Một số câu lệnh trước lỗi có thể đã được áp dụng. Hãy kiểm tra database đích trước khi chạy lại.</div>'}
       `;
       if (doRestore) finishBackgroundTransfer('error', 'Sao chép thất bại', errorHtml, taskId);
-      else { closeModal(); modal(`<h2>Sao chép thất bại</h2>${errorHtml}<div class="actions"><button onclick="closeModal()">Đóng</button></div>`); }
+      else { closeModal(); modal(`<h2>Sao chép thất bại</h2>${errorHtml}<div class="actions"><button data-click="close-modal">Đóng</button></div>`); }
       setStatus('Sao chép thất bại');
     }
   });
@@ -7939,7 +8933,7 @@ async function previewImportDialog(file, database, targetTable, options = {}) {
       <div class="hint">Không hỗ trợ tiếp tục sau khi hủy hoặc lỗi: chạy lại sẽ bắt đầu từ đầu tệp. “Toàn bộ” có thể giữ transaction lâu trên tệp lớn; “Không dùng transaction” có thể để lại dữ liệu đã ghi khi lỗi. Rollback chỉ được bảo đảm với bảng InnoDB; engine khác như MyISAM có thể giữ lại các dòng đã ghi.</div>
       <label class="check-row"><input type="checkbox" id="importAllowNonTransactional"> Tôi hiểu và cho phép nhập vào bảng dùng engine không hỗ trợ transaction (ví dụ MyISAM)</label>
       <div class="actions">
-        <button onclick="closeModal()">Hủy</button>
+        <button data-click="close-modal">Hủy</button>
         <button class="primary" id="doFileImportBtn">Bắt đầu nhập</button>
       </div>
     </div>
@@ -8057,7 +9051,7 @@ async function transfer(type) {
       </label>
       <div class="hint">Tác vụ chạy theo luồng, không giới hạn 20.000 dòng và có thể hủy giữa chừng. CSV/TSV dùng <code>\\N</code> cho NULL và <code>0x…</code> cho dữ liệu nhị phân; JSON giữ nguyên <code>null</code>.</div>
       <div class="actions">
-        <button onclick="closeModal()">Hủy</button>
+        <button data-click="close-modal">Hủy</button>
         <button class="primary" id="exportGo">Chọn nơi lưu…</button>
       </div>
     `);
@@ -8097,5 +9091,35 @@ async function transfer(type) {
   }
   await importFileModal();
 }
+
+const delegatedClickActions = {
+  'close-modal': () => closeModal(),
+  'new-connection': () => connection(),
+  'import-navicat': () => importNavicat(),
+  'new-query': () => newQuery(),
+  'account': () => accountModal(),
+  'workspace-form': () => workspaceForm(),
+  'workspace-manager': () => workspaceManager(),
+  'disconnect': () => disconnect(),
+  'processlist': () => showProcesslistModal(),
+  'server-vars': () => showServerVarsModal(),
+  'shortcuts': () => showShortcutsModal(),
+  'toggle-theme': () => toggleTheme(),
+  'erd': () => showErDiagramModal(),
+  'load-data': () => loadData(),
+  'view': (target) => view(target.dataset.view),
+  'export-result': (target) => exportCurrentResult(target.dataset.format)
+};
+
+document.addEventListener('click', (event) => {
+  const target = event.target && typeof event.target.closest === 'function'
+    ? event.target.closest('[data-click]')
+    : null;
+  if (!target) return;
+  const action = delegatedClickActions[target.dataset.click];
+  if (!action) return;
+  event.preventDefault();
+  action(target);
+});
 
 window.addEventListener('DOMContentLoaded', init);

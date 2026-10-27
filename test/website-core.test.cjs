@@ -52,3 +52,32 @@ test('release metadata rejects malformed checksums and invalid values', () => {
   assert.equal(core.formatBytes(NaN, 'en'), 'File size not available');
   assert.equal(core.formatBytes(0.5, 'en'), '0.5 B');
 });
+
+test('downloads only expose uploaded GitHub release assets with matching platform names', () => {
+  const uploaded = (name, repository = 'MinhIT97/sqlPro') => ({
+    name, state: 'uploaded', size: 1024,
+    browser_download_url: `https://github.com/${repository}/releases/download/v0.3.8/${name}`
+  });
+  const release = {
+    assets: [
+      uploaded('SqlPro-0.3.8-amd64.deb'),
+      uploaded('SqlPro-Setup-0.3.8-x64.exe'),
+      uploaded('SqlPro-0.3.8-x86_64.AppImage'),
+      uploaded('SqlPro-Portable-0.3.8-x64.exe'),
+      uploaded('SqlPro-0.3.8-arm64.deb'),
+      uploaded('SqlPro-0.3.8-amd64.deb', 'attacker/sqlPro'),
+      { ...uploaded('SqlPro-0.3.8-x86_64.AppImage'), state: 'new' },
+      uploaded('source.zip')
+    ]
+  };
+  const selected = core.selectReleaseDownloads(release, 'en');
+  const byId = Object.fromEntries(selected.map((entry) => [entry.id, entry.asset?.name || null]));
+  assert.deepEqual(byId, {
+    downloadLinux: 'SqlPro-0.3.8-amd64.deb',
+    downloadWindows: 'SqlPro-Setup-0.3.8-x64.exe',
+    downloadAppImage: 'SqlPro-0.3.8-x86_64.AppImage',
+    downloadPortable: 'SqlPro-Portable-0.3.8-x64.exe'
+  });
+  assert.ok(selected.every((entry) => entry.label.startsWith('Download')));
+  assert.ok(core.selectReleaseDownloads(null, 'vi').every((entry) => !entry.asset));
+});

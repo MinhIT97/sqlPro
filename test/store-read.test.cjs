@@ -148,3 +148,59 @@ test('supported v1 stores migrate without dropping connections or secrets', asyn
     } finally { restore(); }
   });
 });
+
+test('new profiles default to TLS certificate verification while legacy verify values are preserved', async () => {
+  await withTempDir(async (directory) => {
+    const file = path.join(directory, 'connections.json');
+    const legacy = {
+      id: 'legacy',
+      workspaceId: 'ws-personal',
+      name: 'Legacy',
+      host: 'db.example',
+      port: 3306,
+      user: 'root',
+      ssl: { enabled: true },
+      ssh: { enabled: false },
+      updatedAt: '2026-01-01T00:00:00.000Z'
+    };
+    await fs.promises.writeFile(file, JSON.stringify({ version: 2, connections: [legacy], workspaces: [], tombstones: [] }));
+    try {
+      const store = loadStore(directory);
+      const listed = store.list()[0];
+      assert.equal(listed.ssl.verify, false);
+      assert.equal(listed.ssl.legacyUnverified, true);
+      assert.equal(store.getWithSecrets('legacy').ssl.verify, undefined);
+
+      const updated = store.save({ id: 'legacy', host: 'db2.example' });
+      assert.equal(updated.ssl.verify, false);
+      assert.equal(updated.ssl.legacyUnverified, false);
+      assert.equal(store.getWithSecrets('legacy').ssl.verify, false);
+
+      const created = store.save({ host: 'new.example', user: 'root', ssl: { enabled: true } });
+      assert.equal(created.ssl.verify, true);
+      assert.equal(created.ssl.legacyUnverified, false);
+
+      const optedOut = store.save({ host: 'manual.example', user: 'root', ssl: { enabled: true, verify: false } });
+      assert.equal(optedOut.ssl.verify, false);
+    } finally { restore(); }
+  });
+});
+
+test('legacy profiles without ssl or ssh objects remain readable and do not crash runtime loading', async () => {
+  await withTempDir(async (directory) => {
+    const file = path.join(directory, 'connections.json');
+    const bare = { id: 'bare', workspaceId: 'ws-personal', host: 'db.example', updatedAt: '2026-01-01T00:00:00.000Z' };
+    await fs.promises.writeFile(file, JSON.stringify({ version: 2, connections: [bare], workspaces: [], tombstones: [] }));
+    try {
+      const store = loadStore(directory);
+      const listed = store.list()[0];
+      assert.equal(listed.ssl.enabled, false);
+      assert.equal(listed.ssl.verify, false);
+      assert.equal(listed.ssl.legacyUnverified, true);
+      assert.equal(listed.ssh.enabled, false);
+      const runtime = store.getWithSecrets('bare');
+      assert.deepEqual(runtime.ssl, { passphrase: '' });
+      assert.equal(runtime.ssh, undefined);
+    } finally { restore(); }
+  });
+});

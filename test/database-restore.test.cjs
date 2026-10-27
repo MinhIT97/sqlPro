@@ -6,6 +6,93 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSession } = require('../electron/database.cjs');
+const { saveBackupFile } = require('../electron/backup-file.cjs');
+const { buildRestorePreflight } = require('../electron/restore-preflight.cjs');
+const crypto = require('node:crypto');
+
+test('restore kiểm tra checksum ngay trong lượt scan và chặn tệp hỏng trước mọi truy vấn', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-restore-checksum-'));
+  try {
+    const filePath = path.join(folder, 'backup.sql');
+    await saveBackupFile(filePath, async (write) => {
+      await write('CREATE TABLE items (id INT);');
+      return { bytes: Buffer.byteLength('CREATE TABLE items (id INT);') };
+    });
+    // Keep the SQL valid and the same size; syntax validation alone cannot detect corruption.
+    await fs.writeFile(filePath, 'CREATE TABLE other (id INT);');
+    const session = new DatabaseSession({});
+    session.connection = {};
+    const queries = [];
+    session.raw = async (sql) => { queries.push(sql); return { rows: [] }; };
+    await assert.rejects(session.restoreDatabase({ database: 'sample', filePath }), (error) => {
+      assert.equal(error.code, 'BACKUP_CHECKSUM_MISMATCH');
+      assert.equal(error.partial.executed, 0);
+      assert.equal(error.impact.targetChanged, false);
+      return true;
+    });
+    assert.deepEqual(queries, []);
+    assert.equal(session.activeTask, null);
+  } finally { await fs.rm(folder, { recursive: true, force: true }); }
+});
+
+test('scanner giữ đúng thứ tự DROP nhiều bảng và CREATE, hash đúng byte UTF-8 qua chunk nhỏ', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-restore-order-'));
+  try {
+    const filePath = path.join(folder, 'backup.sql');
+    const sql = '-- Sao lưu tiếng Việt\nDROP TABLE IF EXISTS `a`, `b`; CREATE TABLE `a` (`id` INT); CREATE TABLE `b` (`id` INT);';
+    await fs.writeFile(filePath, sql);
+    const session = new DatabaseSession({});
+    const result = await session.scanRestoreInventory({ filePath, database: 'sample', totalBytes: Buffer.byteLength(sql), readChunkBytes: 1 });
+    assert.equal(result.checksum, crypto.createHash('sha256').update(sql).digest('hex'));
+    assert.equal(result.bytes, Buffer.byteLength(sql));
+    assert.deepEqual(result.inventory.objectOperations.map(({ command, name }) => [command, name]), [
+      ['DROP', 'a'], ['DROP', 'b'], ['CREATE', 'a'], ['CREATE', 'b']
+    ]);
+    const target = { databaseExists: true, lowerCaseTableNames: 0,
+      objects: [{ type: 'table', name: 'a' }, { type: 'table', name: 'b' }] };
+    assert.equal(buildRestorePreflight({ inventory: result.inventory, target, options: { database: 'sample' } }).canProceed, true);
+  } finally { await fs.rm(folder, { recursive: true, force: true }); }
+});
+
+test('restore chặn function SPLIT_STR không hợp lệ binary logging trước khi ghi bất kỳ câu nào', async () => {
+  const filePath = path.join(__dirname, 'fixtures', 'restore-routines.sql');
+  const session = new DatabaseSession({});
+  session.connection = {};
+  session.metadata = new Map();
+  const queries = [];
+  session.raw = async (sql) => {
+    queries.push(sql);
+    if (sql.includes('@@log_bin')) {
+      return { rows: [{
+        version: '8.4.0',
+        versionComment: 'MySQL Community Server - GPL',
+        logBin: 1,
+        trustFunctionCreators: 0,
+        lowerCaseTableNames: 0,
+        currentUser: 'root@localhost'
+      }] };
+    }
+    if (sql.includes('information_schema.SCHEMATA')) return { rows: [{ name: 'sample' }] };
+    return { rows: [] };
+  };
+  session.useDatabase = async () => {};
+  await assert.rejects(
+    session.restoreDatabase({ database: 'sample', filePath }),
+    (error) => {
+      assert.equal(error.code, 'RESTORE_PREFLIGHT_BLOCKED');
+      assert.equal(error.partial.phase, 'preflight');
+      assert.equal(error.partial.executed, 0);
+      assert.equal(error.partial.targetChanged, false);
+      assert.equal(error.impact.targetChanged, false);
+      assert.equal(error.preflight.canProceed, false);
+      assert.equal(error.preflight.target.logBin, true);
+      assert.ok(error.preflight.blocking.some((entry) => entry.code === 'BINARY_LOG_FUNCTION_NOT_COMPLIANT'
+        && entry.objectName === 'SPLIT_STR'));
+      return true;
+    }
+  );
+  assert.deepEqual(queries.filter((sql) => !/^\s*SELECT\b/i.test(sql)), []);
+});
 
 test('quét tệp restore lớn trong worker để tiến trình chính vẫn phản hồi', async () => {
   const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-restore-yield-'));

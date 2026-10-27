@@ -37,29 +37,95 @@ test('backup hiển thị màn tiến trình và số dòng đã ghi', () => {
 });
 
 test('restore phân biệt lượt kiểm tra và lượt thực thi SQL', () => {
-  const bar = { value: 0 };
+  const bar = {
+    value: 0,
+    attributes: new Set(['value']),
+    removeAttribute(name) { this.attributes.delete(name); }
+  };
   const detail = { textContent: '' };
   const currentObject = { textContent: '', title: '' };
   const percent = { textContent: '' };
+  const elapsed = { textContent: '' };
   const dialog = { className: '', innerHTML: '', open: false, showModal() { this.open = true; } };
   const workspace = { innerHTML: '' };
   const r = loadRenderer({ elements: new Map([
     ['#modal', dialog], ['#workspace', workspace],
     ['#workspace [data-transfer-running]', { dataset: { transferRunning: 'restore' } }],
     ['#transferDetail', detail], ['#transferSize', { textContent: '' }], ['#transferBar', bar],
-    ['#taskCurrentStep', { textContent: '' }], ['#transferObject', currentObject], ['#transferPercent', percent]
+    ['#taskCurrentStep', { textContent: '' }], ['#transferObject', currentObject], ['#transferPercent', percent],
+    ['#taskElapsed', elapsed]
   ]) });
-  r.evaluate("view=async(nextMode)=>{mode=nextMode;renderTransferView()};startTaskClock=()=>{}");
+  r.evaluate("view=async(nextMode)=>{mode=nextMode;renderTransferView()}");
   r.evaluate("showTransferProgress('restore', 'sample')");
+  assert.doesNotMatch(workspace.innerHTML, /id="transferBar"[^>]*value=/);
   r.evaluate("updateTransferProgress({ operation: 'restore', phase: 'scan', statements: 10, executed: 0, bytes: 100, totalBytes: 200, currentObject: 'items', currentCommand: 'CREATE' })");
   assert.equal(bar.value, 25);
   assert.match(detail.textContent, /10 câu lệnh đã kiểm tra/);
   assert.equal(currentObject.textContent, 'Kiểm tra CREATE: items');
-  assert.match(percent.textContent, /25% tổng tiến trình/);
+  assert.match(percent.textContent, /~25% tổng tiến trình/);
+  assert.match(percent.textContent, /ước tính/);
   r.evaluate("updateTransferProgress({ operation: 'restore', phase: 'execute', executed: 10, bytes: 50, totalBytes: 200, currentObject: 'items', currentCommand: 'INSERT' })");
   assert.equal(bar.value, 63);
   assert.match(detail.textContent, /10 câu lệnh đã chạy/);
   assert.equal(currentObject.textContent, 'Thực thi INSERT: items');
+
+  r.evaluate("transferView.startedAt = Date.now() - 65000; startTaskClock()");
+  assert.match(elapsed.textContent, /01:05/);
+  assert.equal(currentObject.title, 'Thực thi INSERT: items');
+});
+
+test('restore chưa biết tổng dung lượng dùng tiến trình không xác định thay vì 0%', () => {
+  const bar = {
+    value: 0,
+    attributes: new Set(['value']),
+    removeAttribute(name) { this.attributes.delete(name); }
+  };
+  const percent = { textContent: '' };
+  const detail = { textContent: '' };
+  const dialog = { className: '', innerHTML: '', open: false, showModal() { this.open = true; }, close() { this.open = false; } };
+  const r = loadRenderer({ elements: new Map([
+    ['#modal', dialog],
+    ['#workspace', { innerHTML: '' }],
+    ['#workspace [data-transfer-running]', { dataset: { transferRunning: 'restore' } }],
+    ['#transferDetail', detail], ['#transferSize', { textContent: '' }], ['#transferBar', bar],
+    ['#transferPercent', percent], ['#taskCurrentStep', { textContent: '' }],
+    ['#transferObject', { textContent: '', title: '' }]
+  ]) });
+  r.evaluate("view=async(nextMode)=>{mode=nextMode};startTaskClock=()=>{}");
+  r.evaluate("showTransferProgress('restore', 'sample', { taskId: 'r1', profileId: 'p1' })");
+  r.evaluate("updateTransferProgress({ operation: 'restore', taskId: 'r1', profileId: 'p1', phase: 'scan', statements: 0, executed: 0, bytes: 0, totalBytes: 0 })");
+  assert.equal(bar.attributes.has('value'), false);
+  assert.match(percent.textContent, /không xác định/);
+  assert.doesNotMatch(percent.textContent, /\b0%/);
+  r.evaluate("updateTransferProgress({ operation: 'restore', taskId: 'r1', profileId: 'p1', phase: 'scan', statements: 3, executed: 0, bytes: 100, totalBytes: 200 })");
+  assert.equal(bar.value, 25);
+  assert.match(percent.textContent, /~25%/);
+});
+
+test('backup chưa đủ dữ liệu ước tính không hiển thị phần trăm giả', () => {
+  const bar = {
+    value: 0,
+    attributes: new Set(['value']),
+    removeAttribute(name) { this.attributes.delete(name); }
+  };
+  const percent = { textContent: '' };
+  const dialog = { className: '', innerHTML: '', open: false, showModal() { this.open = true; }, close() { this.open = false; } };
+  const r = loadRenderer({ elements: new Map([
+    ['#modal', dialog],
+    ['#workspace', { innerHTML: '' }],
+    ['#workspace [data-transfer-running]', { dataset: { transferRunning: 'backup' } }],
+    ['#transferDetail', { textContent: '' }], ['#transferSize', { textContent: '' }],
+    ['#transferBar', bar], ['#transferPercent', percent],
+    ['#taskCurrentStep', { textContent: '' }], ['#transferObject', { textContent: '', title: '' }]
+  ]) });
+  r.evaluate("view=async(nextMode)=>{mode=nextMode};startTaskClock=()=>{}");
+  r.evaluate("showTransferProgress('backup', 'sample', { taskId: 'b1', profileId: 'p1' })");
+  r.evaluate("updateTransferProgress({ operation: 'backup', taskId: 'b1', profileId: 'p1', rows: 0, objects: 0, bytes: 0, percent: null, stage: 'prepare', events: [] })");
+  assert.equal(bar.attributes.has('value'), false);
+  assert.match(percent.textContent, /chưa đủ dữ liệu/);
+  r.evaluate("updateTransferProgress({ operation: 'backup', taskId: 'b1', profileId: 'p1', rows: 10, objects: 2, bytes: 100, percent: 42, estimated: true, stage: 'table-data', objectName: 'items', objectIndex: 1, objectTotal: 4, events: [] })");
+  assert.equal(bar.value, 42);
+  assert.match(percent.textContent, /~42%/);
 });
 
 test('export hiển thị số dòng và dung lượng đã ghi', () => {
@@ -119,10 +185,21 @@ test('bỏ qua tiến trình của task hoặc profile khác', () => {  const de
   assert.equal(detail.textContent, '');
   r.evaluate("updateTransferProgress({ operation: 'backup', taskId: 'task-a', profileId: 'profile-a', rows: 5, bytes: 10 })");
   assert.match(detail.textContent, /5 dòng/);
+  r.evaluate("updateTransferProgress({ operation: 'backup', profileId: 'profile-a', rows: 9, bytes: 99 })");
+  assert.match(detail.textContent, /5 dòng/);
+  r.evaluate("finishBackgroundTransfer('success', 'Sao lưu hoàn tất', '<p>cũ</p>', 'task-a')");
+  r.evaluate("showTransferProgress('backup', 'sample', { taskId: 'task-c', profileId: 'profile-a' })");
+  r.evaluate("updateTransferProgress({ operation: 'backup', taskId: 'task-a', profileId: 'profile-a', rows: 7, bytes: 77 })");
+  assert.equal(r.evaluate('transferView.progress'), null);
+  r.evaluate("updateTransferProgress({ operation: 'backup', profileId: 'profile-a', rows: 8, bytes: 88 })");
+  assert.equal(r.evaluate('transferView.progress'), null);
+  r.evaluate("updateTransferProgress({ operation: 'backup', taskId: 'task-c', profileId: 'profile-a', rows: 6, bytes: 66 })");
+  assert.equal(r.evaluate('transferView.progress.rows'), 6);
 });
 
-test('nút hủy gửi đúng profileId và taskId', async () => {
+test('nút hủy gửi đúng profileId và taskId, chỉ hoàn tất khi main báo dừng', async () => {
   const calls = [];
+  const button = { disabled: false, textContent: 'Hủy tác vụ' };
   const dialog = { className: '', innerHTML: '', open: false, showModal() { this.open = true; } };
   const r = loadRenderer({
     desktop: {
@@ -133,13 +210,36 @@ test('nút hủy gửi đúng profileId và taskId', async () => {
         }
       }
     },
-    elements: new Map([['#modal', dialog]])
+    elements: new Map([['#modal', dialog], ['#workspace', { innerHTML: '' }], ['[data-cancel-transfer]', button]])
   });
   r.evaluate("view=async(nextMode)=>{mode=nextMode}");
   r.evaluate("showTransferProgress('backup', 'sample', { taskId: 'task-x', profileId: 'profile-x' })");
   await r.evaluate('cancelActiveTransfer()');
   assert.deepEqual(calls, [{ profileId: 'profile-x', taskId: 'task-x' }]);
-  assert.match(r.messages.at(-1).message, /Đã yêu cầu hủy tác vụ/);
+  assert.match(r.messages.at(-1).message, /Đã gửi yêu cầu hủy/);
+  assert.equal(r.evaluate('transferView.state'), 'running');
+  assert.equal(button.disabled, true);
+  assert.equal(button.textContent, 'Đang hủy…');
+  assert.notEqual(r.evaluate('activeTransfer'), null);
+  r.evaluate("finishBackgroundTransfer('canceled', 'Đã hủy sao lưu', '<p>Đã dừng</p>', 'task-x')");
+  assert.equal(r.evaluate('transferView.state'), 'canceled');
+  assert.equal(r.evaluate('activeTransfer'), null);
+});
+
+test('main từ chối hủy thì nút được mở lại và tác vụ vẫn chạy', async () => {
+  const button = { disabled: false, textContent: 'Hủy tác vụ' };
+  const dialog = { className: '', innerHTML: '', open: false, showModal() { this.open = true; }, close() { this.open = false; } };
+  const r = loadRenderer({
+    desktop: { db: { cancelTask: async () => ({ ok: true, data: { canceled: false } }) } },
+    elements: new Map([['#modal', dialog], ['[data-cancel-transfer]', button]])
+  });
+  r.evaluate("view=async(nextMode)=>{mode=nextMode};renderTransferTab=()=>{}");
+  r.evaluate("showTransferProgress('backup', 'sample', { taskId: 'task-y', profileId: 'profile-y' })");
+  await r.evaluate('cancelActiveTransfer()');
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, 'Hủy tác vụ');
+  assert.equal(r.evaluate('activeTransfer.canceling'), false);
+  assert.match(r.messages.at(-1).message, /đã dừng trước khi/);
 });
 
 test('tác vụ tiếp tục cập nhật khi người dùng chuyển sang query và kết quả nằm trong tab', () => {

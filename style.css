@@ -649,6 +649,7 @@ dialog:has(.transfer-progress){width:520px;max-width:calc(100vw - 32px);padding:
 .dbpick{font-size:12px;padding:9px 13px}
 .errorbox{background:#fff2f2;border:1px solid #f0c9c9;color:#b23c3c;border-radius:6px;padding:10px 12px;margin-top:14px;font-size:11px;white-space:pre-wrap;text-align:left;line-height:1.6}
 .successbox{background:#eefaf6;border:1px solid #bcead8;color:#0d7a64;border-radius:6px;padding:10px 12px;margin-top:14px;font-size:11px;white-space:pre-wrap;text-align:left;line-height:1.6}
+.securitywarning{background:#fff8e8;border:1px solid #ecd9a7;color:#8a6418;border-radius:6px;padding:9px 11px;margin-top:10px;font-size:11px;white-space:pre-line;line-height:1.6}
 .errorbox button{margin-top:8px;background:#fff;border:1px solid #f0c9c9;color:#b23c3c;cursor:pointer;border-radius:4px;padding:5px 10px;font-weight:500}
 .errorbox button:hover{background:#ffebeb}
 .hidden{display:none!important}
@@ -880,6 +881,60 @@ dialog select{width:100%}
   cursor: pointer;
   transition: background 0.1s, color 0.1s;
 }
+.context-menu button.context-menu-item {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+.context-menu button.context-menu-item:hover,
+.context-menu button.context-menu-item:focus-visible { background: #edf6f4; color: #087f72; }
+.context-menu button.context-menu-item:disabled { opacity: .45; cursor: default; background: transparent; color: inherit; }
+.context-submenu-wrap { position: relative; }
+.context-submenu-trigger { justify-content: space-between; }
+.context-submenu {
+  display: none;
+  position: absolute;
+  top: -5px;
+  left: calc(100% - 2px);
+  min-width: 265px;
+  max-height: min(70vh, 420px);
+  overflow: auto;
+  padding: 5px 0;
+  background: #fff;
+  border: 1px solid #d5dee6;
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(18, 52, 60, .18);
+}
+.context-submenu-wrap:hover .context-submenu,
+.context-submenu-wrap:focus-within .context-submenu,
+.context-submenu-wrap.open .context-submenu { display: block; }
+.context-menu.submenu-left .context-submenu { left: auto; right: calc(100% - 2px); }
+.context-menu .context-menu-divider { background: #e9eef2; }
+#queryResult .tablebox table { zoom: var(--query-grid-zoom, 1); }
+#queryResult tr.query-context-selected td { background: #e5f5f1; }
+body.dark-theme #queryResult tr.query-context-selected td { background: #1c4947; }
+#queryResult .query-selectable-grid { user-select: none; }
+#queryResult .query-virtual-grid table { table-layout: fixed; width: max-content; min-width: 100%; }
+#queryResult .query-virtual-grid th, #queryResult .query-virtual-grid td { width: 170px; min-width: 170px; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; box-sizing: border-box; }
+#queryResult .query-virtual-grid th:first-child, #queryResult .query-virtual-grid td:first-child { width: 48px; min-width: 48px; max-width: 48px; }
+#queryResult .query-virtual-grid tr[data-query-row] { height: 42px; }
+#queryResult .query-virtual-grid tr[data-query-row] td { height: 42px; padding-top: 0; padding-bottom: 0; }
+#queryResult .query-virtual-grid .query-grid-spacer td { width: auto; min-width: 0; max-width: none; padding: 0; border: 0; line-height: 0; }
+#queryResult .query-selectable-grid:focus-visible { outline: 2px solid #168878; outline-offset: -2px; }
+#queryResult tr.query-row-selected td,
+#queryResult tr.query-row-selected:hover td { background: #cde8e3; color: #173e3a; }
+body.dark-theme #queryResult tr.query-row-selected td,
+body.dark-theme #queryResult tr.query-row-selected:hover td { background: #245854; color: #ecf7f5; }
+#queryResult .query-selectable-grid .editing-cell { user-select: text; }
+#queryResult .query-selection-status {
+  display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 6px 10px; border-top: 1px solid #e5e9ed; color: #71838d; font-size: 10px;
+}
+.query-mode #queryResult .query-selection-status { flex: 0 0 auto; overflow: visible; }
 .context-menu-item:hover {
   background: #edf6f4;
   color: #087f72;
@@ -992,7 +1047,7 @@ dialog.extra-wide {
 th.sortable {
   cursor: pointer;
   user-select: none;
-  position: relative !important;
+  position: relative;
   padding-right: 24px !important;
   transition: background 0.15s ease, color 0.15s ease;
 }

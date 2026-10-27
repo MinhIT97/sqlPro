@@ -4,9 +4,12 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { Worker } = require('node:worker_threads');
+const { StringDecoder } = require('node:string_decoder');
+const { readManifest } = require('./backup-file.cjs');
 const mysql = require('mysql2');
 const { Client: SshClient } = require('ssh2');
 const { SqlScriptParser, splitSqlStatements, stripLeadingComments, createTarget, skipReason, assertStatementScope, countInsertRows } = require('./sql-script.cjs');
+const { analyzeCreateObject, buildRestorePreflight } = require('./restore-preflight.cjs');
 const { CsvStreamParser } = require('./csv-stream.cjs');
 const { JsonArrayStreamParser, isJsonNumber, stringifyJsonValue } = require('./json-array-stream.cjs');
 const RowValues = require('../row-values.js');
@@ -46,6 +49,7 @@ const BLOB_BYTE_LIMITS = {
   longblob: 4294967295
 };
 const RESTORE_ROWCOUNT_LIMIT = 500000;
+const RESTORE_MAX_INVENTORY_OBJECTS = 10000;
 const WORKER_LOCK_WAIT_SECONDS = 15;
 
 const TYPE_NAMES = (() => {
@@ -58,6 +62,17 @@ function fail(message, code) {
   const error = new Error(message);
   if (code) error.code = code;
   return error;
+}
+
+function flagValue(value) {
+  if (value === true || value === 1 || value === '1') return true;
+  if (value === false || value === 0 || value === '0') return false;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toUpperCase();
+    if (['ON', 'YES', 'TRUE'].includes(normalized)) return true;
+    if (['OFF', 'NO', 'FALSE'].includes(normalized)) return false;
+  }
+  return null;
 }
 
 function quoteId(name) {
@@ -801,6 +816,75 @@ function verifySshHostKey(known, host, port, key) {
   return { ok: true, fingerprint };
 }
 
+function sshErrorCode(error) {
+  const level = String(error?.level || '');
+  const message = String(error?.message || '');
+  if (level === 'client-authentication' || /authentication methods? failed|authentication failure/i.test(message)) {
+    return 'SSH_AUTH_FAILED';
+  }
+  if (/timed out|timeout/i.test(message)) return 'SSH_TIMEOUT';
+  return 'SSH_CONNECTION_FAILED';
+}
+
+function tlsClassification(code, message) {
+  if (code === 'HANDSHAKE_NO_SSL_SUPPORT') {
+    return {
+      code: 'TLS_NOT_SUPPORTED',
+      message: 'Máy chủ không hỗ trợ TLS nhưng kết nối đang yêu cầu SSL/TLS.'
+    };
+  }
+  if (code === 'CERT_HAS_EXPIRED' || code === 'CERT_NOT_YET_VALID'
+    || /certificate has expired|certificate is not yet valid/i.test(message)) {
+    return {
+      code: 'TLS_CERT_EXPIRED',
+      message: 'Chứng chỉ TLS của máy chủ đã hết hạn hoặc chưa có hiệu lực.'
+    };
+  }
+  if (code === 'ERR_TLS_CERT_ALTNAME_INVALID' || code === 'HOSTNAME_MISMATCH'
+    || /altnames|does not match.*(?:host|ip)|hostname\/ip does not match/i.test(message)) {
+    return {
+      code: 'TLS_CERT_HOSTNAME_MISMATCH',
+      message: 'Tên/IP trên chứng chỉ TLS không khớp địa chỉ máy chủ đang kết nối.'
+    };
+  }
+  if (['DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'CERT_UNTRUSTED'].includes(code)
+    || /self[- ]signed|unable to verify|certificate verify failed|unable to get (?:local )?issuer|certificate chain/i.test(message)) {
+    return {
+      code: 'TLS_CERT_UNTRUSTED',
+      message: 'Chứng chỉ TLS của máy chủ không được tin cậy hoặc chuỗi chứng chỉ không hợp lệ.'
+    };
+  }
+  if (code === 'HANDSHAKE_SSL_ERROR' || code.startsWith('ERR_TLS_')
+    || /ssl routines|tlsv1 alert|wrong version number|unknown protocol/i.test(message)) {
+    return {
+      code: 'TLS_HANDSHAKE_FAILED',
+      message: 'Không thiết lập được TLS với máy chủ do giao thức hoặc chứng chỉ không tương thích.'
+    };
+  }
+  if (code === 'MYSQL_CLEAR_PASSWORD_NOT_ENABLED' || /mysql_clear_password/i.test(message)) {
+    return {
+      code: 'MYSQL_CLEARTEXT_AUTH_REQUIRED',
+      message: 'Máy chủ yêu cầu mysql_clear_password nhưng SqlPro chưa cho phép hoặc vận chuyển hiện tại không đáp ứng chính sách.'
+    };
+  }
+  return null;
+}
+
+function classifyConnectionError(error) {
+  if (!error) return error;
+  const code = String(error.code || '');
+  if (code.startsWith('SSH_') || code.startsWith('TLS_') || code.startsWith('CLEARTEXT_') || code === 'MYSQL_CLEARTEXT_AUTH_REQUIRED') {
+    return error;
+  }
+  const classification = tlsClassification(code, String(error.message || ''));
+  if (!classification) return error;
+  const classified = fail(classification.message, classification.code);
+  classified.cause = error;
+  classified.originalCode = code || null;
+  return classified;
+}
+
 class DatabaseSession {
   constructor(profile) {
     this.profile = profile;
@@ -809,6 +893,7 @@ class DatabaseSession {
     this.ssh = null;
     this.dead = false;
     this.version = null;
+    this.tls = null;
     this.cancelQuery = null;
     this.activeTask = null;
     this.inTransaction = false;
@@ -862,7 +947,7 @@ class DatabaseSession {
       client.on('ready', () => {
         client.forwardOut('127.0.0.1', 0, this.profile.host, this.profile.port, (error, stream) => {
           if (error) {
-            failConnect(fail(`Không tạo được SSH tunnel: ${error.message}`));
+            failConnect(fail(`Không tạo được SSH tunnel: ${error.message}`, 'SSH_TUNNEL_FAILED'));
             return;
           }
           if (settled) {
@@ -874,7 +959,8 @@ class DatabaseSession {
           resolve(stream);
         });
       });
-      client.on('error', (error) => failConnect(hostKeyFailure || fail(`SSH: ${error.message}`)));
+      client.on('error', (error) => failConnect(hostKeyFailure
+        || fail(`SSH: ${error.message}`, sshErrorCode(error))));
       const options = {
         host: ssh.host,
         port: ssh.port,
@@ -895,7 +981,7 @@ class DatabaseSession {
         try {
           options.privateKey = fs.readFileSync(ssh.privateKeyPath);
         } catch {
-          failConnect(fail(`Không đọc được SSH private key: ${ssh.privateKeyPath}`));
+          failConnect(fail(`Không đọc được SSH private key: ${ssh.privateKeyPath}`, 'SSH_KEY_READ_FAILED'));
           return;
         }
         if (ssh.passphrase) options.passphrase = ssh.passphrase;
@@ -905,7 +991,7 @@ class DatabaseSession {
       try {
         client.connect(options);
       } catch (error) {
-        failConnect(error);
+        failConnect(fail(`SSH: ${error.message}`, sshErrorCode(error)));
       }
     });
   }
@@ -942,7 +1028,7 @@ class DatabaseSession {
         try {
           options.ssl[key] = fs.readFileSync(filePath);
         } catch {
-          throw fail(`Không đọc được tệp SSL ${key}: ${filePath}`);
+          throw fail(`Không đọc được tệp SSL ${key}: ${filePath}`, 'SSL_FILE_READ_FAILED');
         }
       }
     }
@@ -952,16 +1038,40 @@ class DatabaseSession {
         && Boolean(profile.ssh.knownHostKey && profile.ssh.knownHostKey.fingerprint)
         && ['localhost', '127.0.0.1', '::1'].includes(String(profile.host || '').toLowerCase());
       if (!verifiedTls && !sshToLocalMysql) {
-        throw fail('mysql_clear_password yêu cầu TLS đã xác thực hoặc SSH tunnel đã xác thực host key tới MySQL trên chính máy SSH (host localhost/127.0.0.1/::1).');
+        throw fail('mysql_clear_password yêu cầu TLS đã xác thực hoặc SSH tunnel đã xác thực host key tới MySQL trên chính máy SSH (host localhost/127.0.0.1/::1).', 'CLEARTEXT_AUTH_INSECURE_TRANSPORT');
       }
       options.enableCleartextPlugin = true;
     }
     return options;
   }
 
+  async readTlsState() {
+    const configured = Boolean(this.profile.ssl && this.profile.ssl.enabled);
+    const verify = configured && this.profile.ssl.verify === true;
+    try {
+      const { rows } = await this.raw("SHOW SESSION STATUS LIKE 'Ssl_%'");
+      const values = {};
+      for (const row of rows) {
+        const name = String(row.Variable_name || row.variable_name || '').toLowerCase();
+        if (name) values[name] = row.Value ?? row.value ?? null;
+      }
+      return {
+        active: Boolean(values.ssl_cipher),
+        cipher: values.ssl_cipher || null,
+        version: values.ssl_version || null,
+        configured,
+        verify,
+        unknown: false
+      };
+    } catch {
+      return { active: null, cipher: null, version: null, configured, verify, unknown: true };
+    }
+  }
+
   async connect() {
     if (this.connection) await this.close();
     this.dead = false;
+    this.tls = null;
     let stream = null;
     if (this.profile.ssh && this.profile.ssh.enabled) stream = await this.openSshTunnel();
     let connection;
@@ -973,6 +1083,7 @@ class DatabaseSession {
       this.connection = connection;
       const result = await this.raw('SELECT VERSION() AS version');
       this.version = result.rows[0] ? result.rows[0].version : '';
+      this.tls = await this.readTlsState();
     } catch (error) {
       this.dead = true;
       try {
@@ -981,7 +1092,7 @@ class DatabaseSession {
         // ignore
       }
       this.closeSsh();
-      throw error;
+      throw classifyConnectionError(error);
     }
   }
 
@@ -2446,12 +2557,12 @@ class DatabaseSession {
         const now = Date.now();
         if (!force && now - lastReport < 300) return;
         lastReport = now;
-        const estimate = estimatedWork ? Math.floor((rows + objects) / estimatedWork * 100) : 0;
-        reportedPercent = Math.max(reportedPercent, Math.min(99, estimate));
+        const estimate = estimatedWork ? Math.floor((rows + objects) / estimatedWork * 100) : null;
+        reportedPercent = estimate === null ? null : Math.max(reportedPercent || 0, Math.min(99, estimate));
         const events = pendingEvents;
         pendingEvents = [];
         if (typeof onProgress === 'function') onProgress({
-          operation: 'backup', bytes, rows, objects, percent: reportedPercent,
+          operation: 'backup', bytes, rows, objects, percent: reportedPercent, estimated: true,
           stage: currentStage, objectName: currentObject, objectIndex: currentIndex, objectTotal: currentTotal,
           events
         });
@@ -2718,6 +2829,9 @@ class DatabaseSession {
   async scanRestoreInventory({ filePath, database, totalBytes, dropExisting, onProgress, task, readChunkBytes = RESTORE_READ_CHUNK_BYTES }) {
     const inventory = {
       tables: new Map(),
+      createdObjects: [],
+      objectOperations: [],
+      objectsTruncated: false,
       rowCountsReliable: true,
       rowCountLimitations: [],
       warnings: [],
@@ -2759,6 +2873,17 @@ class DatabaseSession {
       const analysis = assertStatementScope(sql, database, inventory.statements);
       const command = analysis.command;
       const target = createTarget(sql);
+      const recordOperation = (operation) => {
+        if (inventory.objectOperations.length < RESTORE_MAX_INVENTORY_OBJECTS) {
+          inventory.objectOperations.push(operation);
+        } else inventory.objectsTruncated = true;
+      };
+      if (command === 'DROP') {
+        const kind = /^DROP\s+(TABLE|VIEW|TRIGGER|PROCEDURE|FUNCTION|EVENT)\b/i.exec(analysis.sql);
+        if (kind) {
+          for (const ref of analysis.refs) recordOperation({ command: 'DROP', type: kind[1].toLowerCase(), name: ref.table });
+        }
+      }
       const objectName = target?.name || analysis.refs[0]?.table || '';
       const key = objectName ? `${command}:${objectName}` : '';
       if (key && key !== currentKey) {
@@ -2769,6 +2894,17 @@ class DatabaseSession {
         if (pendingEvents.length > 200) pendingEvents.shift();
       }
       if (command === 'CREATE') {
+        const createdObject = analyzeCreateObject(sql, target);
+        if (createdObject) {
+          if (!/^CREATE\s+(?:OR\s+REPLACE\s+)?TEMPORARY\b/i.test(analysis.sql)) {
+            recordOperation({ command: 'CREATE', ...createdObject });
+          }
+          if (inventory.createdObjects.length < RESTORE_MAX_INVENTORY_OBJECTS) {
+            inventory.createdObjects.push(createdObject);
+          } else {
+            inventory.objectsTruncated = true;
+          }
+        }
         if (target && target.type === 'table') {
           const ifNotExists = /\bIF\s+NOT\s+EXISTS\b/i.test(analysis.sql);
           const temporary = /^CREATE\s+TEMPORARY\b/i.test(analysis.sql);
@@ -2825,12 +2961,14 @@ class DatabaseSession {
       }
     };
     const parser = new SqlScriptParser();
-    const stream = fs.createReadStream(filePath, { encoding: 'utf8', highWaterMark: readChunkBytes });
+    const stream = fs.createReadStream(filePath, { highWaterMark: readChunkBytes });
+    const decoder = new StringDecoder('utf8');
+    const hash = crypto.createHash('sha256');
     let bytes = 0;
     let lastReport = 0;
     const canceled = () => {
       const error = fail('Đã hủy phục hồi.', 'RESTORE_CANCELED');
-      error.partial = { statements: inventory.statements, executed: 0, skipped: inventory.skipped, phase: 'scan' };
+      error.partial = { statements: inventory.statements, executed: 0, skipped: inventory.skipped, phase: 'scan', targetChanged: false };
       return error;
     };
     const report = () => {
@@ -2844,8 +2982,9 @@ class DatabaseSession {
     };
     for await (const chunk of stream) {
       if (task && task.canceled) throw canceled();
-      bytes += Buffer.byteLength(chunk);
-      for (const statement of parser.push(chunk)) processStatement(statement);
+      bytes += chunk.length;
+      hash.update(chunk);
+      for (const statement of parser.push(decoder.write(chunk))) processStatement(statement);
       const now = Date.now();
       if (now - lastReport >= 300) {
         lastReport = now;
@@ -2853,10 +2992,129 @@ class DatabaseSession {
       }
       await yieldToOtherTasks();
     }
+    for (const statement of parser.push(decoder.end())) processStatement(statement);
     for (const statement of parser.end()) processStatement(statement);
     if (task && task.canceled) throw canceled();
     report();
-    return { inventory, bytes };
+    return { inventory, bytes, checksum: hash.digest('hex') };
+  }
+
+  async collectRestoreTargetFacts(database) {
+    const facts = {
+      database,
+      checkedAt: new Date().toISOString(),
+      version: null,
+      flavor: null,
+      logBin: null,
+      logBinTrustFunctionCreators: null,
+      lowerCaseTableNames: null,
+      currentUser: null,
+      databaseExists: null,
+      objects: [],
+      objectsComplete: false,
+      objectsTruncated: false,
+      errors: []
+    };
+    const record = (check, error) => {
+      facts.errors.push({ check, message: error && error.message ? error.message : String(error) });
+    };
+    const objectLimit = 5000;
+    const appendObjects = (rows, typeOf) => {
+      for (const row of Array.isArray(rows) ? rows : []) {
+        if (facts.objects.length >= objectLimit) {
+          facts.objectsTruncated = true;
+          return;
+        }
+        const name = row && row.name !== undefined && row.name !== null ? String(row.name) : '';
+        if (name) facts.objects.push({ type: typeOf(row), name });
+      }
+    };
+
+    try {
+      const result = await this.raw(
+        `SELECT VERSION() AS version, @@version_comment AS versionComment,
+                @@log_bin AS logBin, @@log_bin_trust_function_creators AS trustFunctionCreators,
+                @@lower_case_table_names AS lowerCaseTableNames, CURRENT_USER() AS currentUser`
+      );
+      const row = result.rows?.[0] || {};
+      facts.version = row.version ? String(row.version) : null;
+      facts.flavor = /mariadb/i.test(`${row.version || ''} ${row.versionComment || ''}`)
+        ? 'MariaDB'
+        : (facts.version ? 'MySQL' : null);
+      facts.logBin = flagValue(row.logBin);
+      facts.logBinTrustFunctionCreators = flagValue(row.trustFunctionCreators);
+      const lowerCase = Number(row.lowerCaseTableNames);
+      facts.lowerCaseTableNames = Number.isInteger(lowerCase) ? lowerCase : null;
+      facts.currentUser = row.currentUser ? String(row.currentUser) : null;
+    } catch (error) {
+      record('server', error);
+    }
+
+    try {
+      const result = await this.raw(
+        'SELECT SCHEMA_NAME AS name FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?',
+        [database]
+      );
+      facts.databaseExists = (result.rows || []).length > 0;
+    } catch (error) {
+      record('database', error);
+    }
+
+    let complete = true;
+    try {
+      const result = await this.raw(
+        `SELECT TABLE_NAME AS name, TABLE_TYPE AS type
+           FROM information_schema.TABLES
+          WHERE TABLE_SCHEMA = ?
+          LIMIT ${objectLimit + 1}`,
+        [database]
+      );
+      appendObjects(result.rows, (row) => (/view/i.test(String(row.type || '')) ? 'view' : 'table'));
+    } catch (error) {
+      complete = false;
+      record('tables', error);
+    }
+    try {
+      const result = await this.raw(
+        `SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS type
+           FROM information_schema.ROUTINES
+          WHERE ROUTINE_SCHEMA = ?
+          LIMIT ${objectLimit + 1}`,
+        [database]
+      );
+      appendObjects(result.rows, (row) => (String(row.type || '').toUpperCase() === 'FUNCTION' ? 'function' : 'procedure'));
+    } catch (error) {
+      complete = false;
+      record('routines', error);
+    }
+    try {
+      const result = await this.raw(
+        `SELECT EVENT_NAME AS name
+           FROM information_schema.EVENTS
+          WHERE EVENT_SCHEMA = ?
+          LIMIT ${objectLimit + 1}`,
+        [database]
+      );
+      appendObjects(result.rows, () => 'event');
+    } catch (error) {
+      complete = false;
+      record('events', error);
+    }
+    try {
+      const result = await this.raw(
+        `SELECT TRIGGER_NAME AS name
+           FROM information_schema.TRIGGERS
+          WHERE TRIGGER_SCHEMA = ?
+          LIMIT ${objectLimit + 1}`,
+        [database]
+      );
+      appendObjects(result.rows, () => 'trigger');
+    } catch (error) {
+      complete = false;
+      record('triggers', error);
+    }
+    facts.objectsComplete = complete;
+    return facts;
   }
 
   async verifyRestore(database, inventory, task) {
@@ -3036,8 +3294,14 @@ class DatabaseSession {
     if (typeof filePath !== 'string' || !filePath) throw fail('Tệp SQL không hợp lệ.', 'INVALID_FILE');
     const stat = await fs.promises.stat(filePath);
     if (!stat.isFile()) throw fail('Đường dẫn phục hồi không phải là tệp.', 'INVALID_FILE');
+    const { manifest, error: manifestError } = await readManifest(filePath);
+    if (manifestError) {
+      const error = fail(`Không thể xác minh bản sao lưu: ${manifestError}`, 'BACKUP_MANIFEST_INVALID');
+      error.partial = { phase: 'preflight', executed: 0, targetChanged: false, database };
+      throw error;
+    }
 
-    const { inventory } = await this.scanRestoreInventoryInWorker({
+    const { inventory, checksum } = await this.scanRestoreInventoryInWorker({
       filePath,
       database,
       totalBytes: stat.size,
@@ -3045,6 +3309,12 @@ class DatabaseSession {
       onProgress,
       task
     });
+    if (manifest && checksum !== manifest.checksum.value.toLowerCase()) {
+      const error = fail('Tệp sao lưu không khớp checksum đã lưu. Chưa có thay đổi nào được ghi.', 'BACKUP_CHECKSUM_MISMATCH');
+      error.partial = { phase: 'preflight', executed: 0, targetChanged: false, database };
+      error.impact = error.partial;
+      throw error;
+    }
 
     const stream = fs.createReadStream(filePath, { encoding: 'utf8', highWaterMark: RESTORE_READ_CHUNK_BYTES });
     try {
@@ -3060,6 +3330,41 @@ class DatabaseSession {
       }
     } catch (error) {
       stream.destroy();
+      throw error;
+    }
+
+    const targetFacts = await this.collectRestoreTargetFacts(database);
+    if (task && task.canceled) {
+      stream.destroy();
+      const error = fail('Đã hủy phục hồi.', 'RESTORE_CANCELED');
+      error.partial = { phase: 'preflight', statements: 0, executed: 0, skipped: 0, bytes: 0, targetChanged: false, database };
+      error.impact = error.partial;
+      throw error;
+    }
+    const preflight = buildRestorePreflight({
+      filePath,
+      fileSize: stat.size,
+      inventory,
+      target: targetFacts,
+      options: { database, dropExisting, createDatabaseIfNotExists }
+    });
+    if (preflight.blocking.length) {
+      stream.destroy();
+      const error = fail(
+        'Kiểm tra trước phục hồi phát hiện vấn đề có thể làm hỏng dữ liệu đích. Chưa có thay đổi nào được ghi.',
+        'RESTORE_PREFLIGHT_BLOCKED'
+      );
+      error.preflight = preflight;
+      error.partial = {
+        phase: 'preflight',
+        statements: 0,
+        executed: 0,
+        skipped: 0,
+        bytes: 0,
+        targetChanged: false,
+        database
+      };
+      error.impact = error.partial;
       throw error;
     }
 
@@ -3085,6 +3390,7 @@ class DatabaseSession {
     let statements = 0;
     let executed = 0;
     let skipped = 0;
+    let droppedObjects = 0;
     let lastReport = 0;
     let currentObject = '';
     let currentCommand = '';
@@ -3113,10 +3419,23 @@ class DatabaseSession {
       }
     };
 
-    const partialState = () => ({ statements, executed, skipped });
+    const partialState = () => ({
+      phase: 'execute',
+      statements,
+      executed,
+      skipped,
+      droppedObjects,
+      bytes,
+      totalBytes: stat.size,
+      database,
+      targetChanged: executed > 0 || droppedObjects > 0,
+      lastObject: currentObject || null,
+      lastCommand: currentCommand || null
+    });
     const canceledError = () => {
       const error = fail('Đã hủy phục hồi.', 'RESTORE_CANCELED');
       error.partial = partialState();
+      error.impact = error.partial;
       return error;
     };
     const throwIfCanceled = () => {
@@ -3178,6 +3497,7 @@ class DatabaseSession {
           };
           if (target && target.name && dropKinds[target.type]) {
             await this.raw(`DROP ${dropKinds[target.type]} IF EXISTS ${quoteId(target.name)}`);
+            droppedObjects += 1;
           }
         }
         throwIfCanceled();
@@ -3187,6 +3507,7 @@ class DatabaseSession {
       } catch (error) {
         if (task && task.canceled) throw canceledError();
         if (!error.partial) error.partial = partialState();
+        error.impact = error.partial;
         const summary = sql.replace(/\s+/g, ' ').slice(0, 120);
         let message = `Lỗi ở câu lệnh #${statements}: ${error.message}`;
         if (summary) message += `\n${summary}${sql.length > 120 ? '…' : ''}`;
@@ -3229,10 +3550,12 @@ class DatabaseSession {
       database,
       statements: executed,
       skipped,
+      droppedObjects,
       bytes,
       durationMs: Date.now() - startedAt,
       warnings: inventory.warnings.length,
       verification,
+      preflight,
       inventory: {
         tables: inventory.tables.size,
         expectedRows: [...inventory.tables.values()].reduce((total, entry) => total + (entry.canCount ? entry.expectedRows : 0), 0),
@@ -3259,5 +3582,7 @@ module.exports = {
   previewImportFile,
   normalizeFileFormat,
   sshHostKeyFingerprint,
-  verifySshHostKey
+  verifySshHostKey,
+  sshErrorCode,
+  classifyConnectionError
 };

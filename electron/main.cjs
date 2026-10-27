@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, Menu, dialog, ipcMain, screen, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, screen, shell, clipboard } = require('electron');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -10,9 +10,9 @@ const store = require('./store.cjs');
 const sync = require('./sync.cjs');
 const { parseNavicatFile } = require('./navicat.cjs');
 const { DatabaseSession, testConnection, previewImportFile, normalizeFileFormat } = require('./database.cjs');
-const { saveBackupFile } = require('./backup-file.cjs');
+const { saveBackupFile, manifestPathFor } = require('./backup-file.cjs');
 const { SessionRegistry } = require('./session-registry.cjs');
-const { backupDirectory, backupName, listBackups, resolveBackup, copyBackup } = require('./backup-catalog.cjs');
+const { backupDirectory, backupName, listBackups, resolveBackup, copyBackup, verifyBackup } = require('./backup-catalog.cjs');
 
 const MAX_RENDERER_STATE_BYTES = 2 * 1024 * 1024;
 const MAX_IMPORT_BYTES = 20 * 1024 * 1024;
@@ -361,7 +361,30 @@ function validateState(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Trạng thái ứng dụng không hợp lệ.');
   }
+  let serialized;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    throw new Error('Trạng thái ứng dụng không thể chuyển thành JSON.');
+  }
+  if (Buffer.byteLength(serialized) > 2 * 1024 * 1024) {
+    throw new Error('Trạng thái ứng dụng vượt quá giới hạn 2 MB.');
+  }
   return value;
+}
+
+function validateDialogFilters(filters) {
+  if (!Array.isArray(filters)) return undefined;
+  return filters.slice(0, 5)
+    .filter((filter) => filter && typeof filter === 'object')
+    .map((filter) => ({
+      name: typeof filter.name === 'string' ? filter.name.slice(0, 80) : 'Tệp dữ liệu',
+      extensions: Array.isArray(filter.extensions)
+        ? filter.extensions.slice(0, 20)
+          .filter((extension) => typeof extension === 'string' && /^[A-Za-z0-9*]+$/.test(extension))
+          .map((extension) => extension.slice(0, 20))
+        : ['*']
+    }));
 }
 
 function handle(channel, handler) {
@@ -381,6 +404,8 @@ function handle(channel, handler) {
           ...(error && error.fingerprint ? { fingerprint: String(error.fingerprint) } : {}),
           ...(error && error.expectedFingerprint ? { expectedFingerprint: String(error.expectedFingerprint) } : {}),
           ...(error && error.partial ? { partial: error.partial } : {}),
+          ...(error && error.impact ? { impact: error.impact } : {}),
+          ...(error && error.preflight ? { preflight: error.preflight } : {}),
           ...(error && error.conflict ? { conflict: error.conflict } : {})
         }
       };
@@ -420,7 +445,22 @@ function friendlyError(error) {
     SESSION_EXPIRED: 'Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.',
     VAULT_TOO_LARGE: 'Dữ liệu đồng bộ vượt quá giới hạn 5 MB.',
     STORE_READ_FAILED: 'Không đọc được cấu hình kết nối. Tệp dữ liệu được giữ nguyên, không ghi đè; hãy kiểm tra tệp hoặc dùng chức năng đặt lại dữ liệu local.',
-    BACKUP_SNAPSHOT_FAILED: 'Không tạo được snapshot nhất quán cho bản sao lưu.'
+    BACKUP_SNAPSHOT_FAILED: 'Không tạo được snapshot nhất quán cho bản sao lưu.',
+    RESTORE_PREFLIGHT_BLOCKED: 'Kiểm tra trước phục hồi phát hiện vấn đề có thể làm hỏng dữ liệu đích. Chưa có thay đổi nào được ghi.',
+    BACKUP_CHECKSUM_MISMATCH: 'Tệp sao lưu không khớp checksum đã lưu. Tệp có thể đã bị sửa hoặc hỏng.',
+    TLS_NOT_SUPPORTED: 'Máy chủ không hỗ trợ TLS nhưng kết nối đang yêu cầu SSL/TLS. Hãy liên hệ quản trị viên máy chủ hoặc tắt TLS nếu hiểu rõ rủi ro.',
+    TLS_CERT_UNTRUSTED: 'Chứng chỉ TLS của máy chủ không được tin cậy. Hãy cung cấp đúng CA hoặc dùng chứng chỉ do CA tin cậy phát hành.',
+    TLS_CERT_EXPIRED: 'Chứng chỉ TLS của máy chủ đã hết hạn hoặc chưa có hiệu lực. Hãy cập nhật chứng chỉ trên máy chủ.',
+    TLS_CERT_HOSTNAME_MISMATCH: 'Tên/IP trên chứng chỉ TLS không khớp địa chỉ máy chủ. Hãy dùng đúng hostname trong chứng chỉ hoặc cấu hình lại chứng chỉ.',
+    TLS_HANDSHAKE_FAILED: 'Không thiết lập được TLS với máy chủ (giao thức hoặc chứng chỉ không tương thích). Kiểm tra cấu hình TLS của máy chủ và CA.',
+    SSH_AUTH_FAILED: 'Xác thực SSH thất bại. Kiểm tra username, mật khẩu hoặc private key/passphrase.',
+    SSH_CONNECTION_FAILED: 'Không kết nối được SSH host. Kiểm tra địa chỉ, cổng, mạng và firewall.',
+    SSH_TUNNEL_FAILED: 'Đã kết nối SSH nhưng không mở được tunnel tới MySQL. Kiểm tra host/port MySQL nhìn từ máy SSH.',
+    SSH_KEY_READ_FAILED: 'Không đọc được SSH private key. Kiểm tra đường dẫn và quyền đọc tệp.',
+    SSH_TIMEOUT: 'Kết nối SSH quá thời gian chờ. Kiểm tra mạng, cổng và cấu hình SSH host.',
+    MYSQL_CLEARTEXT_AUTH_REQUIRED: 'Máy chủ yêu cầu mysql_clear_password nhưng SqlPro chưa cho phép hoặc vận chuyển hiện tại không đáp ứng chính sách.',
+    CLEARTEXT_AUTH_INSECURE_TRANSPORT: 'mysql_clear_password chỉ được phép khi TLS đã xác thực chứng chỉ hoặc qua SSH tunnel tới MySQL loopback trên chính máy SSH với host key đã xác minh.',
+    SSL_FILE_READ_FAILED: 'Không đọc được tệp CA/chứng chỉ/khóa TLS. Kiểm tra đường dẫn và quyền đọc tệp.'
   };
   return messages[code] || error.message || 'Đã xảy ra lỗi.';
 }
@@ -530,19 +570,36 @@ async function withSession(handler, { retry = false, profileId = null } = {}) {
   } finally { release(); }
 }
 
-ipcMain.handle('app:metadata', () => ({
+handle('clipboard:write-text', async (text) => {
+  if (typeof text !== 'string' || Buffer.byteLength(text) > 32 * 1024 * 1024) {
+    throw new Error('Nội dung sao chép không hợp lệ hoặc vượt quá 32 MB. Hãy xuất ra tệp nếu dữ liệu lớn hơn.');
+  }
+  await clipboard.writeText(text);
+  return { written: true };
+});
+handle('clipboard:read-text', async () => {
+  const text = await clipboard.readText();
+  if (Buffer.byteLength(text) > 32 * 1024 * 1024) throw new Error('Nội dung clipboard vượt quá 32 MB.');
+  return text;
+});
+
+handle('app:metadata', () => ({
   name: app.getName(),
   version: app.getVersion(),
   platform: process.platform
 }));
-ipcMain.handle('state:load', () => readJson('renderer-state.json', {}));
-ipcMain.handle('state:save', (_event, value) => {
+handle('state:load', async () => {
+  const value = await readJson('renderer-state.json', {});
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+});
+handle('state:save', (value) => {
   writeJson('renderer-state.json', validateState(value));
-  return { ok: true };
+  return { saved: true };
 });
 
-ipcMain.handle('file:save-text', async (_event, payload) => {
-  if (!payload || typeof payload.contents !== 'string' || typeof payload.suggestedName !== 'string') {
+handle('file:save-text', async (payload) => {
+  if (!payload || typeof payload !== 'object' || typeof payload.contents !== 'string'
+    || typeof payload.suggestedName !== 'string') {
     throw new Error('Yêu cầu lưu tệp không hợp lệ.');
   }
   if (Buffer.byteLength(payload.contents) > MAX_EXPORT_BYTES) {
@@ -552,14 +609,14 @@ ipcMain.handle('file:save-text', async (_event, payload) => {
   const result = await dialog.showSaveDialog(mainWindow, {
     title: 'Xuất dữ liệu',
     defaultPath: safeName,
-    filters: Array.isArray(payload.filters) ? payload.filters.slice(0, 5) : undefined
+    filters: validateDialogFilters(payload.filters)
   });
   if (result.canceled || !result.filePath) return { canceled: true };
   await fs.promises.writeFile(result.filePath, payload.contents, 'utf8');
   return { canceled: false, filePath: result.filePath };
 });
 
-ipcMain.handle('file:open-json', async () => {
+handle('file:open-json', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Nhập dữ liệu JSON',
     properties: ['openFile'],
@@ -572,14 +629,15 @@ ipcMain.handle('file:open-json', async () => {
   return { canceled: false, filePath, contents: await fs.promises.readFile(filePath, 'utf8') };
 });
 
-ipcMain.handle('file:open-text', async (_event, payload) => {
-  const filters = Array.isArray(payload && payload.filters) && payload.filters.length
-    ? payload.filters
-    : [{ name: 'Tệp dữ liệu', extensions: ['csv', 'tsv', 'txt', 'json', 'sql'] }];
+handle('file:open-text', async (payload) => {
+  if (!payload || typeof payload !== 'object') throw new Error('Tham số mở tệp không hợp lệ.');
+  const filters = validateDialogFilters(payload.filters);
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: (payload && payload.title) || 'Chọn tệp dữ liệu',
+    title: typeof payload.title === 'string' ? payload.title.slice(0, 120) : 'Chọn tệp dữ liệu',
     properties: ['openFile'],
-    filters
+    filters: filters && filters.length
+      ? filters
+      : [{ name: 'Tệp dữ liệu', extensions: ['csv', 'tsv', 'txt', 'json', 'sql'] }]
   });
   if (result.canceled || result.filePaths.length === 0) return { canceled: true };
   const filePath = result.filePaths[0];
@@ -740,7 +798,8 @@ handle('db:session-state', (profileId) => {
     profileId: current?.profileId || null,
     connected: Boolean(session && !session.dead),
     inTransaction: Boolean(session?.inTransaction),
-    autocommit: session?.autocommit !== false
+    autocommit: session?.autocommit !== false,
+    tls: session?.tls || null
   };
 });
 
@@ -1099,6 +1158,19 @@ handle('db:backup', async (payload) => {
       transfer.pending = false;
       return session.backupDatabase(requested, write,
         (progress) => sendDbProgress({ ...progress, taskId, profileId, database: requested.database }));
+    }, {
+      appName: 'SqlPro',
+      appVersion: typeof app.getVersion === 'function' ? app.getVersion() : null,
+      source: { profileId, database: requested.database, serverVersion: session.version || null },
+      selection: {
+        includeStructure: requested.includeStructure,
+        includeData: requested.includeData,
+        dropTables: requested.dropTables,
+        stripDefiner: requested.stripDefiner,
+        tables: requested.tables || [],
+        routines: requested.routines,
+        events: requested.events
+      }
     });
     return { canceled: false, id, filePath, ...stats };
   } catch (error) {
@@ -1126,7 +1198,15 @@ handle('db:delete-backup', async (payload) => {
   const current = await ensureSession(payload.profileId);
   const filePath = await resolveBackup(app.getPath('userData'), current.profileId, payload.database, payload.id);
   await fs.promises.unlink(filePath);
+  await fs.promises.rm(manifestPathFor(filePath), { force: true });
   return { deleted: true };
+});
+
+handle('db:verify-backup', async (payload) => {
+  if (!payload || typeof payload.database !== 'string' || !payload.database) throw new Error('Chưa chọn database.');
+  if (typeof payload.id !== 'string' || !payload.id) throw new Error('Chưa chọn bản sao lưu.');
+  const current = await ensureSession(payload.profileId);
+  return verifyBackup(app.getPath('userData'), current.profileId, payload.database, payload.id);
 });
 
 handle('db:export-backup', async (payload) => {

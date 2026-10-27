@@ -62,6 +62,11 @@ function toBoolean(value) {
   return String(value).toLowerCase() === 'true' || String(value) === '1';
 }
 
+function verifyCertificateValue(verifyCa, weakValidation) {
+  if (verifyCa === undefined && weakValidation === undefined) return undefined;
+  return toBoolean(verifyCa) && !toBoolean(weakValidation);
+}
+
 function toPort(value, fallback) {
   const port = Number(value);
   return Number.isInteger(port) && port > 0 && port < 65536 ? port : fallback;
@@ -88,7 +93,7 @@ function buildConnection(raw) {
     database: String(raw.database || '').slice(0, 128),
     ssl: {
       enabled: Boolean(raw.sslEnabled),
-      verify: Boolean(raw.sslVerify),
+      verify: raw.sslVerify === undefined ? true : Boolean(raw.sslVerify),
       ca: raw.sslCa || '',
       cert: raw.sslCert || '',
       key: raw.sslKey || '',
@@ -129,7 +134,7 @@ function fromJsonServer(server) {
     password: decryptPassword(server.Password),
     database: server.Database || server.DefaultDatabase || '',
     sslEnabled: toBoolean(server.UseSSL),
-    sslVerify: toBoolean(ssl.VerifyCA) && !toBoolean(ssl.WeakCertValidation),
+    sslVerify: verifyCertificateValue(ssl.VerifyCA, ssl.WeakCertValidation),
     sslCa: ssl.CACert || ssl.RootCert || '',
     sslCert: ssl.ClientCertFile || '',
     sslKey: ssl.ClientKeyFile || '',
@@ -156,7 +161,7 @@ function fromXmlAttributes(attrs) {
     password: decryptPassword(attrs.Password),
     database: attrs.Database || '',
     sslEnabled: toBoolean(attrs.SSL),
-    sslVerify: toBoolean(attrs.SSL_VerifyCA) && !toBoolean(attrs.SSL_WeakCertValidation),
+    sslVerify: verifyCertificateValue(attrs.SSL_VerifyCA, attrs.SSL_WeakCertValidation),
     sslCa: attrs.SSL_CACert || attrs.SSL_RootCert || '',
     sslCert: attrs.SSL_ClientCert || '',
     sslKey: attrs.SSL_ClientKey || '',

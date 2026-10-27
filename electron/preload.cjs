@@ -18,6 +18,16 @@ const allowedCommands = new Set([
   'refresh-data'
 ]);
 
+async function invoke(channel, ...args) {
+  const response = await ipcRenderer.invoke(channel, ...args);
+  if (response && response.ok === false) {
+    const error = new Error(response.error?.message || 'Yêu cầu không hợp lệ.');
+    error.code = response.error?.code || '';
+    throw error;
+  }
+  return response && response.ok === true ? response.data : response;
+}
+
 const connections = Object.freeze({
   list: () => ipcRenderer.invoke('connections:list'),
   save: (profile) => ipcRenderer.invoke('connections:save', profile),
@@ -61,6 +71,7 @@ const db = Object.freeze({
   backup: (payload) => ipcRenderer.invoke('db:backup', payload),
   cancelTask: (profileId, taskId) => ipcRenderer.invoke('db:cancel-task', { profileId, taskId }),
   listBackups: (database, profileId) => ipcRenderer.invoke('db:list-backups', { database, profileId }),
+  verifyBackup: (payload) => ipcRenderer.invoke('db:verify-backup', payload),
   deleteBackup: (payload) => ipcRenderer.invoke('db:delete-backup', payload),
   exportBackup: (payload) => ipcRenderer.invoke('db:export-backup', payload),
   showBackupFolder: (payload) => ipcRenderer.invoke('db:show-backup-folder', payload),
@@ -91,12 +102,14 @@ const account = Object.freeze({
 });
 
 contextBridge.exposeInMainWorld('sqlProDesktop', Object.freeze({
-  getMetadata: () => ipcRenderer.invoke('app:metadata'),
-  loadState: () => ipcRenderer.invoke('state:load'),
-  saveState: (state) => ipcRenderer.invoke('state:save', state),
-  saveTextFile: (payload) => ipcRenderer.invoke('file:save-text', payload),
-  openJsonFile: () => ipcRenderer.invoke('file:open-json'),
-  openTextFile: (payload) => ipcRenderer.invoke('file:open-text', payload),
+  writeClipboardText: (text) => invoke('clipboard:write-text', text),
+  readClipboardText: () => invoke('clipboard:read-text'),
+  getMetadata: () => invoke('app:metadata'),
+  loadState: () => invoke('state:load'),
+  saveState: (state) => invoke('state:save', state),
+  saveTextFile: (payload) => invoke('file:save-text', payload),
+  openJsonFile: () => invoke('file:open-json'),
+  openTextFile: (payload) => invoke('file:open-text', payload),
   onMenuCommand: (callback) => {
     const listener = (_event, command) => {
       if (allowedCommands.has(command)) callback(command);

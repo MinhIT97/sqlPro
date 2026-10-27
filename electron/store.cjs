@@ -221,11 +221,15 @@ function port(value, fallback) {
   return Number.isInteger(parsed) && parsed > 0 && parsed < 65536 ? parsed : fallback;
 }
 
-function normalizeSsl(input) {
+function normalizeSsl(input, existing) {
   const ssl = input && typeof input === 'object' ? input : {};
+  const existingSsl = existing && typeof existing === 'object' ? existing : null;
+  const verify = ssl.verify === undefined
+    ? (existingSsl ? existingSsl.verify === true : true)
+    : Boolean(ssl.verify);
   return {
     enabled: Boolean(ssl.enabled),
-    verify: ssl.verify === undefined ? false : Boolean(ssl.verify),
+    verify,
     ca: text(ssl.ca, 1024),
     cert: text(ssl.cert, 1024),
     key: text(ssl.key, 1024)
@@ -266,11 +270,13 @@ function normalizeProfile(input, existing, store) {
   const ssh = normalizeSsh(input.ssh, existing && existing.ssh);
   if (ssh.enabled && !ssh.host) throw new Error('SSH host không được để trống.');
   const type = input.type === 'mariadb' ? 'mariadb' : 'mysql';
-  const ssl = normalizeSsl(input.ssl);
+  const ssl = normalizeSsl(input.ssl, existing && existing.ssl);
   const allowCleartextPassword = input.allowCleartextPassword === true;
   const sshToLocalMysql = ssh.enabled && ['localhost', '127.0.0.1', '::1'].includes(host.toLowerCase());
   if (allowCleartextPassword && !(ssl.enabled && ssl.verify) && !sshToLocalMysql) {
-    throw new Error('mysql_clear_password yêu cầu TLS đã xác thực hoặc SSH tunnel tới MySQL trên chính máy SSH (host localhost/127.0.0.1/::1).');
+    const error = new Error('mysql_clear_password yêu cầu TLS đã xác thực hoặc SSH tunnel tới MySQL trên chính máy SSH (host localhost/127.0.0.1/::1).');
+    error.code = 'CLEARTEXT_AUTH_INSECURE_TRANSPORT';
+    throw error;
   }
   ssl.passphrase = input.ssl && input.ssl.passphrase !== undefined
     ? seal(input.ssl.passphrase)
@@ -315,6 +321,8 @@ function normalizeProfile(input, existing, store) {
 }
 
 function sanitize(profile) {
+  const ssl = profile.ssl && typeof profile.ssl === 'object' ? profile.ssl : {};
+  const ssh = profile.ssh && typeof profile.ssh === 'object' ? profile.ssh : {};
   return {
     id: profile.id,
     workspaceId: profile.workspaceId || DEFAULT_WORKSPACE_ID,
@@ -325,18 +333,25 @@ function sanitize(profile) {
     user: profile.user,
     database: profile.database,
     allowCleartextPassword: profile.allowCleartextPassword === true,
-    ssl: { enabled: profile.ssl.enabled, verify: profile.ssl.verify, ca: profile.ssl.ca, cert: profile.ssl.cert, key: profile.ssl.key },
+    ssl: {
+      enabled: Boolean(ssl.enabled),
+      verify: ssl.verify === true,
+      legacyUnverified: ssl.verify === undefined,
+      ca: ssl.ca,
+      cert: ssl.cert,
+      key: ssl.key
+    },
     ssh: {
-      enabled: profile.ssh.enabled,
-      host: profile.ssh.host,
-      port: profile.ssh.port,
-      user: profile.ssh.user,
-      authMethod: profile.ssh.authMethod,
-      privateKeyPath: profile.ssh.privateKeyPath,
-      knownHostKey: profile.ssh.knownHostKey || null
+      enabled: Boolean(ssh.enabled),
+      host: ssh.host,
+      port: ssh.port,
+      user: ssh.user,
+      authMethod: ssh.authMethod,
+      privateKeyPath: ssh.privateKeyPath,
+      knownHostKey: ssh.knownHostKey || null
     },
     hasPassword: Boolean(profile.password),
-    hasSslPassphrase: Boolean(profile.ssl.passphrase),
+    hasSslPassphrase: Boolean(ssl.passphrase),
     hasSshPassword: Boolean(profile.sshPassword),
     hasSshPassphrase: Boolean(profile.sshPassphrase),
     source: profile.source,
@@ -345,14 +360,15 @@ function sanitize(profile) {
 }
 
 function decryptProfile(profile) {
+  const ssl = profile.ssl && typeof profile.ssl === 'object' ? profile.ssl : {};
   return {
     ...profile,
     password: unseal(profile.password),
     sshPassword: unseal(profile.sshPassword),
     sshPassphrase: unseal(profile.sshPassphrase),
     ssl: {
-      ...profile.ssl,
-      passphrase: unseal(profile.ssl.passphrase)
+      ...ssl,
+      passphrase: unseal(ssl.passphrase)
     }
   };
 }

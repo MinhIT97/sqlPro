@@ -71,6 +71,22 @@ test('backup nhiều dòng vẫn nhường event loop cho thao tác khác', asyn
   assert.equal(timerFired, true);
 });
 
+test('backup không bịa phần trăm khi chưa có ước tính khối lượng', async () => {
+  const session = new DatabaseSession({});
+  session.connection = {};
+  session.listTables = async () => [{ name: 'only_view', type: 'view' }];
+  const progress = [];
+  const result = await session.writeBackup(
+    { database: 'sample', tables: ['only_view'], includeStructure: false, includeData: true },
+    async () => {},
+    (entry) => progress.push(entry)
+  );
+  assert.equal(result.rows, 0);
+  assert.ok(progress.length > 0);
+  assert.ok(progress.every((entry) => entry.percent === null));
+  assert.ok(progress.every((entry) => entry.estimated === true));
+});
+
 function routineSession() {
   const session = new DatabaseSession({});
   session.connection = {};

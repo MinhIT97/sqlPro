@@ -2,7 +2,7 @@
 
 // Runs the real HTML, renderer and preload in a hidden Electron window.
 // Only IPC handlers are replaced; no database or account is contacted.
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, clipboard } = require('electron');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -34,6 +34,8 @@ const handle = (name, fn) => ipcMain.handle(name, async (_event, ...args) => {
 handle('app:metadata', () => ({ version: 'test', platform: process.platform }));
 handle('state:load', () => ({}));
 handle('state:save', () => ({}));
+handle('clipboard:write-text', async (text) => { await clipboard.writeText(text); return ok({ written: true }); });
+handle('clipboard:read-text', async () => ok(await clipboard.readText()));
 handle('workspaces:list', () => ok([{ id: 'ws-personal', name: 'Personal' }]));
 handle('connections:list', () => ok([]));
 handle('connections:test', () => sshTestResponses.shift() || ok({ version: '8.4-test' }));
@@ -53,7 +55,7 @@ handle('db:indexes', () => ok([]));
 handle('db:relations', () => ok({ outbound: [{ table: 'users', column: 'id', refTable: 'table_1', refColumn: 'id', refDatabase: 'test' }], inbound: [] }));
 handle('db:table-data', () => ok({ columns, primaryKey: ['id'], rows: [{ id: 1, name: 'Alice' }], total: 1, page: 1, pageSize: 100 }));
 handle('db:table-count', () => ok({ total: 42 }));
-handle('db:delete-rows', () => ok({ affectedRows: 1 }));
+handle('db:delete-rows', (payload) => ok({ affectedRows: payload.keysList.length }));
 handle('db:update-row', () => rowEditorFailure ? { ok: false, error: { message: 'Expected row save failure' } } : ok(rowEditorResult));
 handle('db:insert-row', () => ok({ affectedRows: 1, insertId: 2 }));
 handle('db:import-file', (payload) => ok({
@@ -231,6 +233,56 @@ app.whenReady().then(async () => {
 
   await check('formatter button is bound after rendering', async () => {
     assert.equal(await evaluate("$('#sql').value='select 1'; $('#formatSqlBtn').click(); $('#sql').value"), 'SELECT 1');
+  });
+  await check('SQL editor undo and redo survive formatting and tab switches', async () => {
+    const result = await evaluate(`(() => {
+      app.query.sql = 'select';
+      renderQueryView();
+      let editor = $('#sql');
+      editor.focus();
+      editor.setSelectionRange(6, 6);
+      editor.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: ' 1', bubbles: true, cancelable: true }));
+      editor.value = 'select 1';
+      editor.setSelectionRange(8, 8);
+      editor.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: ' 1', bubbles: true }));
+      const key = (name, shiftKey = false) => editor.dispatchEvent(new KeyboardEvent('keydown', {
+        key: name, ctrlKey: true, shiftKey, bubbles: true, cancelable: true
+      }));
+      key('z');
+      const undoTyping = editor.value;
+      key('y');
+      const redoTyping = editor.value;
+      formatCurrentSql();
+      const formatted = editor.value;
+      key('z');
+      const undoFormat = editor.value;
+      newQuery('SELECT 2');
+      selectQueryTab(0);
+      editor = $('#sql');
+      editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'y', ctrlKey: true, bubbles: true, cancelable: true }));
+      return { undoTyping, redoTyping, formatted, undoFormat, redoAfterTab: editor.value };
+    })()`);
+    assert.deepEqual(result, {
+      undoTyping: 'select', redoTyping: 'select 1', formatted: 'SELECT 1',
+      undoFormat: 'select 1', redoAfterTab: 'SELECT 1'
+    });
+  });
+  await check('Electron delivers Ctrl+Z to the focused SQL editor', async () => {
+    await evaluate(`(() => {
+      app.query.sql = 'SELECT A';
+      renderQueryView();
+      const editor = $('#sql');
+      editor.focus();
+      editor.setSelectionRange(editor.value.length, editor.value.length);
+      editor.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', bubbles: true, cancelable: true }));
+      editor.value = 'SELECT AB';
+      editor.setSelectionRange(editor.value.length, editor.value.length);
+      editor.dispatchEvent(new InputEvent('input', { inputType: 'insertText', bubbles: true }));
+    })()`);
+    win.webContents.focus();
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Z', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Z', modifiers: ['control'] });
+    await until("$('#sql').value === 'SELECT A'");
   });
   await check('selected SQL and success/failure history contain strings', async () => {
     await evaluate("$('#sql').value='select 1; select 2;'; $('#sql').setSelectionRange(10,19); runQuery()");
@@ -529,6 +581,24 @@ app.whenReady().then(async () => {
     await evaluate("closeModal(); delete window.__sshForm");
   });
 
+  await check('new connections default to verified TLS and every unverified mode is visible', async () => {
+    await evaluate("window.__securityState={connections:app.connections,connection:app.connection,serverType:app.serverType,server:app.server,database:app.database,sessionState:app.sessionState}; connection(); $('#connSsl').checked=true; $('#connSsl').dispatchEvent(new Event('change'))");
+    assert.equal(await evaluate("$('#connSslVerify').checked"), true);
+    assert.equal(await evaluate("$('#connTlsWarning').classList.contains('hidden')"), true);
+    await evaluate("$('#connSslVerify').checked=false; $('#connSslVerify').dispatchEvent(new Event('change'))");
+    assert.match(await evaluate("$('#connTlsWarning').textContent"), /tắt xác thực chứng chỉ/i);
+    await evaluate("$('#connSsh').checked=true; $('#connSsh').dispatchEvent(new Event('change'))");
+    assert.match(await evaluate("$('#connSshWarning').textContent"), /chỉ bảo vệ đoạn từ máy này tới SSH host/i);
+    await evaluate("$('#connHost').value='db.internal'; $('#connHost').dispatchEvent(new Event('input'))");
+    assert.match(await evaluate("$('#connSshWarning').textContent"), /không mặc định an toàn toàn tuyến/i);
+    await evaluate("closeModal(); connection({id:'legacy',name:'Legacy',host:'db.example',port:3306,user:'root',ssl:{enabled:true,verify:false,legacyUnverified:true},ssh:{enabled:false}});");
+    assert.equal(await evaluate("$('#connSslVerify').checked"), false);
+    assert.match(await evaluate("$('#connTlsWarning').textContent"), /phiên bản cũ/i);
+    await evaluate("closeModal(); app.connections=[{id:'tls',name:'TLS',host:'db.example',port:3306,user:'root',ssl:{enabled:true,verify:false},ssh:{enabled:false},workspaceId:app.activeWorkspaceId}]; app.connection=app.connections[0]; app.serverType='mysql'; app.server='8.0'; app.database='test'; app.sessionState=null; setConnectionState('connected','Đã kết nối');");
+    assert.match(await evaluate("$('#serverInfo').textContent"), /TLS chưa xác thực/);
+    await evaluate("Object.assign(app, window.__securityState); delete window.__securityState; renderSidebar();");
+  });
+
   await check('small SQL exports use the cancellable full-data task instead of a BLOB preview', async () => {
     await evaluate("app.query.result={kind:'rows',columns:[{name:'raw',type:'BLOB'}],rows:[['0x00… (64 bytes)']],truncated:false}; app.query.lastSql='SELECT raw FROM items'; app.query.profileId='test'; app.query.database='test'; window.__exportPromise=exportCurrentResult('json'); void 0");
     await until("Boolean(document.querySelector('[data-cancel-transfer]'))");
@@ -778,6 +848,191 @@ app.whenReady().then(async () => {
     assert.deepEqual(payload.values, { recorded_at: '2026-11-04 23:00:56.123456' });
     assert.deepEqual(payload.keys, { id: 1 });
     rowEditorColumns = columns;
+  });
+
+  await check('query result context menu exposes copy formats and safe record actions', async () => {
+    await evaluate(`document.querySelectorAll('.confirmation-dialog').forEach((dialog) => { dialog.close(); dialog.remove(); });
+      app.query.profileId='test'; app.query.database='test';
+      app.query.resultContext={profileId:'test',database:'test'};
+      app.query.result={kind:'rows',columns:[
+        {name:'id',orgName:'id',orgTable:'users',db:'test',type:'INT',flags:2},
+        {name:'name',orgName:'name',orgTable:'users',db:'test',type:'VARCHAR',flags:0}
+      ],rows:[[1,'Alice']],durationMs:1}; mode='query'; renderQueryView();
+      $('#queryResult td[data-col-idx="1"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:100,clientY:100}));`);
+    assert.equal(await evaluate("Boolean($('#contextMenu [data-query-action=\"csv-all\"]'))"), true);
+    await until("Boolean($('#contextMenu [data-query-action=\"update\"]:not(:disabled)'))");
+    await evaluate("$('#contextMenu [data-query-submenu]').click()");
+    await captureReview('query-context-menu');
+    await evaluate("$('#contextMenu [data-query-action=\"zoom-125\"]').click()");
+    assert.equal(await evaluate("$('#queryResult').style.getPropertyValue('--query-grid-zoom')"), '1.25');
+    await evaluate("$('#queryResult td[data-col-idx=\"1\"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:100,clientY:100})); $('#contextMenu [data-query-action=\"empty\"]').click()");
+    await until("app.query.result.rows[0][1] === ''");
+    assert.deepEqual(calls.filter((call) => call.name === 'db:update-row').at(-1).args[0].values, { name: '' });
+    await evaluate("$('#queryResult td[data-col-idx=\"1\"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:100,clientY:100})); $('#contextMenu [data-query-action=\"null\"]').click()");
+    await until('app.query.result.rows[0][1] === null');
+    assert.deepEqual(calls.filter((call) => call.name === 'db:update-row').at(-1).args[0].values, { name: null });
+    await evaluate("$('#queryResult td[data-col-idx=\"1\"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:100,clientY:100}))");
+    await evaluate("$('#contextMenu [data-query-action=\"add\"]').click()");
+    await until("Boolean($('#rowForm'))");
+    assert.match(await evaluate("$('#modal').textContent"), /test\.users/);
+    await evaluate("closeModal(); $('#queryResult td[data-col-idx=\"1\"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:100,clientY:100}))");
+    await until("Boolean($('#contextMenu [data-query-action=\"delete\"]:not(:disabled)'))");
+    await evaluate("$('#contextMenu [data-query-action=\"delete\"]').click()");
+    await until("$('#modal').open");
+    await evaluate("$('#confirmOk').click()");
+    await until('app.query.result.rows.length === 0');
+    const deletion = calls.filter((call) => call.name === 'db:delete-rows').at(-1).args[0];
+    assert.equal(deletion.database, 'test');
+    assert.equal(deletion.table, 'users');
+    assert.deepEqual(deletion.keysList, [{ id: 1 }]);
+  });
+
+  await check('query result menu disables writes for JOIN results', async () => {
+    await evaluate(`app.query.result={kind:'rows',columns:[
+      {name:'id',orgName:'id',orgTable:'users',db:'test',type:'INT',flags:2},
+      {name:'team',orgName:'name',orgTable:'teams',db:'test',type:'VARCHAR'}
+    ],rows:[[1,'Ops']],durationMs:1}; renderQueryView();
+    $('#queryResult td[data-col-idx="1"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:100,clientY:100}));`);
+    assert.equal(await evaluate("$('#contextMenu [data-query-action=\"add\"]').disabled"), true);
+    assert.equal(await evaluate("$('#contextMenu [data-query-action=\"delete\"]').disabled"), true);
+    assert.equal(await evaluate("$('#contextMenu [data-query-action=\"insert\"]').disabled"), true);
+    assert.equal(await evaluate("$('#contextMenu [data-query-action=\"update\"]').disabled"), true);
+    assert.equal(await evaluate("$('#contextMenu [data-query-action=\"json\"]').disabled"), false);
+  });
+
+  await check('result grid selects ranges and disjoint rows, preserves selection on right-click and copies all selected rows', async () => {
+    rowEditorColumns = columns;
+    await evaluate(`app.query.profileId='test';app.query.database='test';
+      app.query.resultContext={profileId:'test',database:'test'};
+      app.query.sortCol=0;app.query.sortDir='ASC';
+      app.query.result={kind:'rows',columns:[
+        {name:'id',orgName:'id',orgTable:'users',db:'test',type:'INT',flags:2},
+        {name:'name',orgName:'name',orgTable:'users',db:'test',type:'VARCHAR'}
+      ],rows:[[5,'E'],[1,'A'],[3,'C'],[2,'B'],[4,'D']],durationMs:1};
+      mode='query';renderQueryView();
+      window.gridMouse=(index,options={})=>{
+        const td=document.querySelector('#queryResult tr[data-query-row="'+index+'"] td[data-col-idx="1"]');
+        td.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0,buttons:1,...options}));
+        document.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,button:0}));
+      };
+      gridMouse(1);gridMouse(2,{shiftKey:true});`);
+    assert.equal(await evaluate("JSON.stringify(queryGridSelectedIndexes(app.query.result))"), '[1,3,2]');
+    await evaluate('gridMouse(0,{ctrlKey:true}); gridMouse(3,{ctrlKey:true})');
+    assert.equal(await evaluate("JSON.stringify(queryGridSelectedIndexes(app.query.result))"), '[1,2,0]');
+    await evaluate(`$('#queryResult tr[data-query-row="2"] td[data-col-idx="1"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:100,clientY:100}));`);
+    assert.match(await evaluate("$('#contextMenu [data-query-action=\"delete\"]').textContent"), /3 dòng/);
+    assert.equal(await evaluate("document.querySelectorAll('#queryResult tr.query-row-selected').length"), 3);
+    assert.equal(await evaluate("$('#contextMenu [data-query-action=\"empty\"]').disabled"), true);
+    await until("!$('#contextMenu [data-query-action=\"delete\"]').disabled");
+    assert.equal(await evaluate("$('#contextMenu [data-query-action=\"delete\"]').classList.contains('disabled')"), false);
+    await evaluate("$('#contextMenu [data-query-submenu]').click()");
+    assert.match(await evaluate("$('#contextMenu').textContent"), /Copy As/);
+    await evaluate("$('#contextMenu [data-query-action=\"insert\"]').click()");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.match(await clipboard.readText(), /INSERT INTO `test`\.`users`/);
+    assert.equal((await clipboard.readText()).split('\n').length, 3);
+    await evaluate(`$('#queryResult tr[data-query-row="2"] td[data-col-idx="1"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:100,clientY:100}));`);
+    await until("!$('#contextMenu [data-query-action=\"update\"]').disabled");
+    await evaluate("$('#contextMenu [data-query-action=\"update\"]').click()");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.match(await clipboard.readText(), /UPDATE `test`\.`users` SET `name`/);
+    assert.equal((await clipboard.readText()).split('\n').length, 3);
+    await evaluate(`$('#queryResult tr[data-query-row="2"] td[data-col-idx="1"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:100,clientY:100}));`);
+    await captureReview('query-multi-selection');
+    await evaluate("$('#contextMenu [data-query-action=\"csv-all\"]').click()");
+    await until("$('#contextMenu').classList.contains('hidden')");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(await clipboard.readText(), 'id,name\r\n1,A\r\n3,C\r\n5,E');
+    assert.equal(await evaluate("document.querySelectorAll('#queryResult tr.query-row-selected').length"), 3);
+    await evaluate("$('#queryResult th[data-query-sort=\"0\"]').click()");
+    assert.equal(await evaluate("JSON.stringify(queryGridSelectedIndexes(app.query.result))"), '[0,2,1]');
+  });
+
+  await check('Electron Ctrl+A and Ctrl+C act on focused result rows while SQL editor keeps native select-all', async () => {
+    const previousMenu = Menu.getApplicationMenu();
+    Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Edit', submenu: [
+      { role: 'copy' }, { role: 'selectAll' }
+    ] }]));
+    try {
+      await evaluate("$('#queryResult [data-query-grid]').focus()");
+      win.webContents.focus();
+      win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'A', modifiers: ['control'] });
+      win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'A', modifiers: ['control'] });
+      await until('queryGridSelection(app.query.result).rows.size === 5');
+      await evaluate("$('#queryResult tr[data-query-row=\"0\"] td[data-col-idx=\"1\"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:550,clientY:450}))");
+      win.setContentSize(900, 650);
+      await evaluate("$('#contextMenu').classList.add('hidden')");
+      assert.equal(await evaluate("$('#queryResult').scrollWidth <= $('#queryResult').clientWidth"), true);
+      await captureReview('query-multi-selection-small');
+      win.setContentSize(1344, 835);
+      await evaluate("$('#queryResult [data-query-grid]').focus()");
+      win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'C', modifiers: ['control'] });
+      win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'C', modifiers: ['control'] });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal(await clipboard.readText(), '5\tE\r\n4\tD\r\n3\tC\r\n2\tB\r\n1\tA');
+      await evaluate("$('#sql').value='SELECT 123'; $('#sql').focus(); $('#sql').setSelectionRange(0,0)");
+      win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'A', modifiers: ['control'] });
+      win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'A', modifiers: ['control'] });
+      await until("$('#sql').selectionEnd === $('#sql').value.length");
+      assert.equal(await evaluate('queryGridSelection(app.query.result).rows.size'), 5);
+    } finally { Menu.setApplicationMenu(previousMenu); }
+  });
+
+  await check('drag selection highlights rows and bulk Delete confirms once with the selected primary keys', async () => {
+    await evaluate(`gridMouse(0);
+      const first=$('#queryResult tr[data-query-row="0"] td[data-col-idx="1"]');
+      const last=$('#queryResult tr[data-query-row="2"] td[data-col-idx="1"]');
+      const a=first.getBoundingClientRect(),b=last.getBoundingClientRect();
+      first.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,buttons:1,button:0,clientX:a.x+5,clientY:a.y+5}));
+      document.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,buttons:1,clientX:b.x+5,clientY:b.y+5}));`);
+    await until('queryGridSelection(app.query.result).rows.size === 3');
+    await evaluate("document.dispatchEvent(new MouseEvent('mouseup',{bubbles:true})); $('#queryResult [data-query-grid]').dispatchEvent(new KeyboardEvent('keydown',{key:'Delete',bubbles:true,cancelable:true}))");
+    await until("Boolean($('#confirmOk'))");
+    assert.match(await evaluate("$('#modal').textContent"), /3 bản ghi/);
+    const before = calls.filter((call) => call.name === 'db:delete-rows').length;
+    await evaluate("$('#confirmOk').click()");
+    await until('app.query.result.rows.length === 2');
+    assert.equal(calls.filter((call) => call.name === 'db:delete-rows').length, before + 1);
+    const request = calls.filter((call) => call.name === 'db:delete-rows').at(-1).args[0];
+    assert.deepEqual(request.keysList, [{ id: 5 }, { id: 4 }, { id: 3 }]);
+    assert.equal(request.originalValues.length, 3);
+    assert.equal(await evaluate("document.querySelectorAll('#queryResult tr.query-row-selected').length"), 0);
+    await evaluate('delete window.gridMouse');
+  });
+
+  await check('large results keep a bounded DOM, scroll to the final record and preserve position across renders', async () => {
+    await evaluate(`app.query.result={kind:'rows',columns:[{name:'id',type:'INT'},{name:'value',type:'TEXT'}],
+      rows:Array.from({length:5000},(_,i)=>[i,'value '+i]),durationMs:1};
+      app.query.sortCol=null;app.query.sortDir='ASC';renderQueryView();`);
+    assert.ok(await evaluate("document.querySelectorAll('#queryResult tr[data-query-row]').length") <= 80);
+    await evaluate("const box=$('#queryResult [data-query-grid]');box.scrollTop=box.scrollHeight;box.dispatchEvent(new Event('scroll'))");
+    await until("Boolean($('#queryResult tr[data-query-row=\"4999\"]'))");
+    const top = await evaluate("$('#queryResult [data-query-grid]').scrollTop");
+    await evaluate('renderQueryView()');
+    assert.ok(Math.abs(await evaluate("$('#queryResult [data-query-grid]').scrollTop") - top) < 3);
+    await evaluate("$('#queryResult [data-query-grid]').dispatchEvent(new KeyboardEvent('keydown',{key:'a',ctrlKey:true,bubbles:true,cancelable:true}))");
+    assert.equal(await evaluate('queryGridSelection(app.query.result).rows.size'), 5000);
+    assert.ok(await evaluate("document.querySelectorAll('#queryResult tr[data-query-row]').length") <= 80);
+    await evaluate("$('#queryResult [data-query-grid]').dispatchEvent(new KeyboardEvent('keydown',{key:'Home',bubbles:true,cancelable:true}))");
+    await until("Boolean($('#queryResult tr[data-query-row=\"0\"]'))");
+    assert.equal(await evaluate('queryGridSelection(app.query.result).focus'), 0);
+    await evaluate(`app.query.result={kind:'rows',columns:Array.from({length:40},(_,i)=>({name:'column_'+i,type:'INT'})),
+      rows:Array.from({length:5000},(_,i)=>Array.from({length:40},()=>i)),durationMs:1}; app.query.gridZoom=100;renderQueryView();`);
+    await evaluate(`const wide=$('#queryResult [data-query-grid]');wide.scrollTop=1920*42;wide.dispatchEvent(new Event('scroll'));`);
+    await until('queryGridViewport(app.query.result).start > 1800');
+    const geometry = await evaluate(`(()=>{
+      const box=$('#queryResult [data-query-grid]');
+      const table=box.querySelector('table');
+      const header=table.querySelector('th[data-query-sort="0"]').getBoundingClientRect();
+      const cell=table.querySelector('tr[data-query-row] td[data-col-idx="0"]').getBoundingClientRect();
+      return {headerWidth:header.width,cellWidth:cell.width,delta:Math.abs(header.left-cell.left),
+        top:header.top,boxTop:box.getBoundingClientRect().top,scrollHeight:box.scrollHeight};
+    })()`);
+    assert.ok(Math.abs(geometry.headerWidth - 170) < 2);
+    assert.ok(Math.abs(geometry.cellWidth - 170) < 2);
+    assert.ok(geometry.delta < 2);
+    await captureReview('query-wide-scrolled');
+    assert.ok(Math.abs(geometry.top - geometry.boxTop) < 3, JSON.stringify(geometry));
   });
 
   await check('typed row form remains usable in dark theme and a smaller window', async () => {

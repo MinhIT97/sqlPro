@@ -8,6 +8,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSession } = require('../electron/database.cjs');
+const { saveBackupFile, readManifest } = require('../electron/backup-file.cjs');
 
 test('MySQL integration: snapshots, precise import, typed keys, full export and cancellation', {
   skip: !process.env.SQLPRO_TEST_MYSQL_PORT,
@@ -209,6 +210,49 @@ test('MySQL integration: snapshots, precise import, typed keys, full export and 
         assert.equal(result.verification.checks.rowCounts.checked, 1);
         assert.equal(result.verification.limitations.length, 0);
       } finally { await reader.close(); await fs.rm(directory, { recursive: true, force: true }); }
+    });
+
+    await t.test('backup manifest checksum and restore round-trip preserve schema, FK and sample values', async () => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-roundtrip-'));
+      const targetDb = `${database}_rt`;
+      const backupPath = path.join(directory, 'roundtrip.sql');
+      const reader = await session();
+      try {
+        await admin.query('CREATE TABLE rt_parents (id INT PRIMARY KEY, name VARCHAR(30)) ENGINE=InnoDB');
+        await admin.query('CREATE TABLE rt_children (id INT PRIMARY KEY, parent_id INT, note VARCHAR(30), CONSTRAINT fk_rt_parent FOREIGN KEY (parent_id) REFERENCES rt_parents(id)) ENGINE=InnoDB');
+        await admin.query("INSERT INTO rt_parents VALUES (1,'alpha'),(2,'beta')");
+        await admin.query("INSERT INTO rt_children VALUES (10,1,'one'),(11,1,'two'),(12,2,'three')");
+        const saved = await saveBackupFile(backupPath, (write) =>
+          reader.writeBackup({ database, tables: ['rt_parents', 'rt_children'] }, write), {
+          source: { database }
+        });
+        assert.equal(saved.verification.checksum, 'verified');
+        assert.equal(saved.verification.restore, 'not-tested');
+        const manifest = await readManifest(backupPath);
+        assert.equal(manifest.error, null);
+        assert.equal(manifest.manifest.checksum.value, saved.checksum);
+        assert.deepEqual(manifest.manifest.selection.tables, ['rt_parents', 'rt_children']);
+
+        await admin.query(`DROP DATABASE IF EXISTS \`${targetDb}\``);
+        const result = await reader.restoreDatabase({ database: targetDb, filePath: backupPath, createDatabaseIfNotExists: true });
+        assert.equal(result.verification.status, 'verified');
+        assert.equal(result.preflight.canProceed, true);
+        const [values] = await admin.query(`SELECT p.name, SUM(c.id) AS child_sum, COUNT(*) AS child_count
+          FROM \`${targetDb}\`.rt_parents p JOIN \`${targetDb}\`.rt_children c ON c.parent_id = p.id
+          GROUP BY p.id ORDER BY p.id`);
+        assert.deepEqual(values, [
+          { name: 'alpha', child_sum: '21', child_count: 2 },
+          { name: 'beta', child_sum: '12', child_count: 1 }
+        ]);
+        const [fk] = await admin.query(`SELECT CONSTRAINT_NAME AS name FROM information_schema.REFERENTIAL_CONSTRAINTS
+          WHERE CONSTRAINT_SCHEMA=? AND TABLE_NAME='rt_children'`, [targetDb]);
+        assert.equal(fk.length, 1);
+        assert.equal(fk[0].name, 'fk_rt_parent');
+      } finally {
+        await reader.close();
+        await admin.query(`DROP DATABASE IF EXISTS \`${targetDb}\``);
+        await fs.rm(directory, { recursive: true, force: true });
+      }
     });
 
     await t.test('keyset pages and exact filters preserve composite order in both directions', async () => {

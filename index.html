@@ -3,18 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
   <title>SqlPro · Database workspace</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <aside class="rail">
     <div class="logo">S<span>↗</span></div>
-    <button title="Workspace" aria-label="Workspace" class="active" onclick="view('data')">▦</button>
-    <button title="Kết nối mới" aria-label="Kết nối mới" onclick="connection()">⌘</button>
-    <button title="SQL Editor" aria-label="SQL Editor" onclick="view('query')">⌑</button>
-    <button title="Lịch sử" aria-label="Lịch sử truy vấn" onclick="view('history')">◷</button>
-    <button class="railaccount" id="accountButton" title="Tài khoản và đồng bộ" aria-label="Tài khoản và đồng bộ" onclick="accountModal()">
+    <button title="Workspace" aria-label="Workspace" class="active" data-click="view" data-view="data">▦</button>
+    <button title="Kết nối mới" aria-label="Kết nối mới" data-click="new-connection">⌘</button>
+    <button title="SQL Editor" aria-label="SQL Editor" data-click="view" data-view="query">⌑</button>
+    <button title="Lịch sử" aria-label="Lịch sử truy vấn" data-click="view" data-view="history">◷</button>
+    <button class="railaccount" id="accountButton" title="Tài khoản và đồng bộ" aria-label="Tài khoản và đồng bộ" data-click="account">
       <span id="accountInitials">SP</span>
       <i class="syncdot" id="syncDot"></i>
     </button>
@@ -24,13 +24,13 @@
     <div class="brand">SqlPro <span id="runtimeBadge">WORKSPACE</span></div>
     <div class="workspacebar">
       <select id="workspaceSelect" title="Chọn workspace" aria-label="Chọn workspace"></select>
-      <button title="Workspace mới" aria-label="Workspace mới" onclick="workspaceForm()">＋</button>
-      <button title="Quản lý workspace" aria-label="Quản lý workspace" onclick="workspaceManager()">⚙</button>
+      <button title="Workspace mới" aria-label="Workspace mới" data-click="workspace-form">＋</button>
+      <button title="Quản lý workspace" aria-label="Quản lý workspace" data-click="workspace-manager">⚙</button>
     </div>
     <div class="sideheading">KẾT NỐI
       <span class="headingactions">
-        <button title="Nhập kết nối Navicat" aria-label="Nhập kết nối Navicat" onclick="importNavicat()">⇩</button>
-        <button title="Kết nối mới" aria-label="Kết nối mới" onclick="connection()">＋</button>
+        <button title="Nhập kết nối Navicat" aria-label="Nhập kết nối Navicat" data-click="import-navicat">⇩</button>
+        <button title="Kết nối mới" aria-label="Kết nối mới" data-click="new-connection">＋</button>
       </span>
     </div>
     <label class="search">⌕ <input id="treeSearch" aria-label="Tìm kết nối và bảng" placeholder="Tìm kết nối, bảng…"></label>
@@ -38,7 +38,7 @@
     <div class="sidefoot">
       <span class="dot" id="connDot"></span>
       <span id="connState">Chưa kết nối</span>
-      <button title="Ngắt kết nối" aria-label="Ngắt kết nối" onclick="disconnect()">⏻</button>
+      <button title="Ngắt kết nối" aria-label="Ngắt kết nối" data-click="disconnect">⏻</button>
     </div>
   </aside>
 
@@ -53,20 +53,20 @@
         <span class="env">LIVE</span>
       </div>
       <div>
-        <button onclick="showProcesslistModal()" title="Quản lý tiến trình MySQL (Processlist)">🖥️ Tiến trình</button>
-        <button onclick="showServerVarsModal()" title="Xem cấu hình & trạng thái server">⚙️ Biến hệ thống</button>
-        <button onclick="showShortcutsModal()" title="Bảng tra cứu phím tắt (F1)">⌨️ Phím tắt</button>
-        <button onclick="view('query')">Ctrl K &nbsp; SQL Editor</button>
-        <button class="theme-btn" id="themeToggleBtn" onclick="toggleTheme()" title="Chuyển chế độ Giao diện Sáng / Tối">☀️ Sáng</button>
-        <button onclick="showErDiagramModal()" title="Sơ đồ quan hệ CSDL (ERD)">📊 ERD</button>
-        <button class="avatar header-avatar" id="accountAvatar" title="Tài khoản và đồng bộ" onclick="accountModal()">SP</button>
+        <button data-click="processlist" title="Quản lý tiến trình MySQL (Processlist)">🖥️ Tiến trình</button>
+        <button data-click="server-vars" title="Xem cấu hình & trạng thái server">⚙️ Biến hệ thống</button>
+        <button data-click="shortcuts" title="Bảng tra cứu phím tắt (F1)">⌨️ Phím tắt</button>
+        <button data-click="view" data-view="query">Ctrl K &nbsp; SQL Editor</button>
+        <button class="theme-btn" id="themeToggleBtn" data-click="toggle-theme" title="Chuyển chế độ Giao diện Sáng / Tối">☀️ Sáng</button>
+        <button data-click="erd" title="Sơ đồ quan hệ CSDL (ERD)">📊 ERD</button>
+        <button class="avatar header-avatar" id="accountAvatar" title="Tài khoản và đồng bộ" data-click="account">SP</button>
       </div>
     </header>
     <div class="tabs" id="tabs">
-      <button id="dataTab" class="selected" onclick="view('data')">▦ &nbsp; <span id="tabName">—</span> &nbsp; ×</button>
+      <button id="dataTab" class="selected" data-click="view" data-view="data">▦ &nbsp; <span id="tabName">—</span> &nbsp; ×</button>
       <span id="queryTabs"></span>
-      <button id="transferTab" class="transfer-tab" onclick="view('transfer')" hidden>↓ &nbsp; Tác vụ database</button>
-      <button id="newQueryTab" onclick="newQuery()" title="Truy vấn mới (Ctrl+T)" aria-label="Truy vấn mới">＋</button>
+      <button id="transferTab" class="transfer-tab" data-click="view" data-view="transfer" hidden>↓ &nbsp; Tác vụ database</button>
+      <button id="newQueryTab" data-click="new-query" title="Truy vấn mới (Ctrl+T)" aria-label="Truy vấn mới">＋</button>
     </div>
     <section class="content">
       <div class="titleline">
@@ -75,14 +75,14 @@
           <h1 id="title">Workspace <span>TABLE</span></h1>
           <p id="subtitle">Chọn một bảng để xem dữ liệu thật.</p>
         </div>
-        <button class="primary" onclick="newQuery()">＋ &nbsp; Truy vấn mới</button>
+        <button class="primary" data-click="new-query">＋ &nbsp; Truy vấn mới</button>
       </div>
       <nav id="subnav">
-        <button class="current" onclick="view('data')">Dữ liệu</button>
-        <button onclick="view('structure')">Cấu trúc</button>
-        <button onclick="view('indexes')">Indexes</button>
-        <button onclick="view('relations')">Quan hệ</button>
-        <button onclick="showErDiagramModal()" title="Sơ đồ thực thể trực quan (ERD)">📊 Sơ đồ ERD</button>
+        <button class="current" data-click="view" data-view="data">Dữ liệu</button>
+        <button data-click="view" data-view="structure">Cấu trúc</button>
+        <button data-click="view" data-view="indexes">Indexes</button>
+        <button data-click="view" data-view="relations">Quan hệ</button>
+        <button data-click="erd" title="Sơ đồ thực thể trực quan (ERD)">📊 Sơ đồ ERD</button>
       </nav>
       <div id="workspace"></div>
     </section>

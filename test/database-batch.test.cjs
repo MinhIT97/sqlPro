@@ -16,10 +16,10 @@ test('batch row results share a byte allowance without dropping later statements
   const limits = [];
   const session = stubSession(async (_sql, _timeout, _rows, bytes) => {
     limits.push(bytes);
-    return { kind: 'rows', columns: [], rows: [], bytes: Math.min(bytes, 8 * 1024 * 1024), truncated: bytes === 0 };
+    return { kind: 'rows', columns: [], rows: [], bytes: Math.min(bytes, 32 * 1024 * 1024), truncated: bytes === 0 };
   });
   const result = await session.runQueryScript('SELECT 1; SELECT 2; SELECT 3');
-  assert.deepEqual(limits, [16 * 1024 * 1024, 8 * 1024 * 1024, 0]);
+  assert.deepEqual(limits, [32 * 1024 * 1024, 32 * 1024 * 1024, 0]);
   assert.equal(result.executedCount, 3);
 });
 
@@ -117,8 +117,8 @@ test('giới hạn tổng số row lưu trong batch nhưng vẫn chạy statemen
       truncated: count === 0
     };
   });
-  const batch = await session.runQueryScript('SELECT 1; SELECT 2; SELECT 3;');
-  assert.deepEqual(limits, [10000, 5000, 0]);
+  const batch = await session.runQueryScript('SELECT 1; SELECT 2; SELECT 3;', 30000, false, null, { rowLimit: 5000 });
+  assert.deepEqual(limits, [5000, 5000, 0]);
   assert.equal(batch.executedCount, 3);
   assert.equal(batch.stopped, false);
   assert.equal(batch.truncated, true);

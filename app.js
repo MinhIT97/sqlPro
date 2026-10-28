@@ -968,6 +968,8 @@ function persistState() {
       mode: mode === 'transfer' ? 'backups' : mode,
       savedQuery: app.query?.sql ?? (sessionStorage.getItem('query') || ''),
       queryTabs: queryTabs.map((tab) => ({
+        timeoutMs: queryTimeoutMs(tab),
+        rowLimit: queryRowLimit(tab),
         title: tab.title,
         sql: tab.sql ?? '',
         profileId: tab.profileId || null,
@@ -1302,6 +1304,8 @@ async function init() {
         ? tab.title.trim().slice(0, 40)
         : `Query ${index + 1}`,
       sql: tab && typeof tab.sql === 'string' ? tab.sql : '',
+      timeoutMs: queryTimeoutMs(tab),
+      rowLimit: queryRowLimit(tab),
       result: null,
       error: null,
       running: false,
@@ -5499,7 +5503,7 @@ async function runExplainQuery() {
     setStatus('Đang phân tích kế hoạch thực thi (EXPLAIN)...');
     const result = await call(desktop.db.query({
       sql: explainSql,
-      timeoutMs: 30000,
+      timeoutMs: queryTimeoutMs(tab),
       profileId: target.profileId,
       database: tab.database || null,
       taskId: tab.taskId
@@ -5640,7 +5644,13 @@ function renderQueryView() {
       <button id="explainQueryBtn" title="Phân tích kế hoạch thực thi (Ctrl+E)">⚡ EXPLAIN</button>
       <button id="formatSqlBtn" title="Định dạng SQL chuẩn đẹp (Ctrl+Shift+F)">🪄 Định dạng</button>
       <button id="saveQueryBtn">⌑ Lưu</button>
+      <select id="queryTimeout" aria-label="Thời gian chờ truy vấn" title="Giới hạn cho toàn bộ lượt chạy, gồm thực thi và nhận dữ liệu">
+        ${[[30000, '30 giây'], [60000, '1 phút'], [300000, '5 phút'], [900000, '15 phút']].map(([value, label]) => `<option value="${value}" ${queryTimeoutMs(app.query) === value ? 'selected' : ''}>Chờ ${label}</option>`).join('')}
+      </select>
       <button class="danger" id="cancelQueryBtn" style="display:${app.query.running ? 'inline-block' : 'none'}">■ Hủy</button>
+      <select id="queryRowLimit" aria-label="Số dòng tối đa mỗi kết quả" title="Tối đa 32 MB mỗi kết quả; cả lượt chạy tối đa 100.000 dòng / 64 MB. Chạy lại SQL để áp dụng mức mới.">
+        ${[5000, 20000, 50000, 100000].map((value) => `<option value="${value}" ${queryRowLimit(app.query) === value ? 'selected' : ''}>Tối đa ${value.toLocaleString()} dòng</option>`).join('')}
+      </select>
       <button id="bindQueryTargetBtn" style="display:${queryTargetConnection(app.query) ? 'none' : 'inline-block'}">Gắn kết nối…</button>
       <span class="spacer"></span>
       <span class="subtle query-target-label" id="queryTargetLabel" title="Kết nối và database đích của tab này">${esc(queryTargetLabel(app.query))}${table ? ` · ${esc(table)}` : ''} &nbsp; · &nbsp; Ctrl+Enter / Ctrl+E</span>
@@ -5745,6 +5755,14 @@ function renderQueryView() {
   $('#explainQueryBtn').addEventListener('click', runExplainQuery);
   $('#formatSqlBtn').addEventListener('click', formatCurrentSql);
   $('#saveQueryBtn').addEventListener('click', saveQuery);
+  $('#queryTimeout').addEventListener('change', (event) => {
+    app.query.timeoutMs = Number(event.target.value);
+    persistState();
+  });
+  $('#queryRowLimit').addEventListener('change', (event) => {
+    app.query.rowLimit = Number(event.target.value);
+    persistState();
+  });
   $('#cancelQueryBtn').addEventListener('click', cancelQuery);
   $('#bindQueryTargetBtn').addEventListener('click', bindQueryTargetToActive);
   $('#queryResult').addEventListener('click', (event) => {
@@ -6375,7 +6393,21 @@ function updateQueryButtons() {
   if (run) run.disabled = running;
   const explain = $('#explainQueryBtn');
   if (explain) explain.disabled = running;
+  const timeout = $('#queryTimeout');
+  if (timeout) timeout.disabled = Boolean(app.query?.running);
+  const rowLimit = $('#queryRowLimit');
+  if (rowLimit) rowLimit.disabled = Boolean(app.query?.running);
   if (cancel) cancel.style.display = running ? 'inline-block' : 'none';
+}
+
+function queryRowLimit(tab) {
+  const value = Number(tab?.rowLimit);
+  return [5000, 20000, 50000, 100000].includes(value) ? value : 50000;
+}
+
+function queryTimeoutMs(tab) {
+  const value = Number(tab?.timeoutMs);
+  return [30000, 60000, 300000, 900000].includes(value) ? value : 300000;
 }
 
 async function runQuery() {
@@ -6419,7 +6451,8 @@ async function runQuery() {
     let result;
     const request = {
       sql: sqlToRun,
-      timeoutMs: 30000,
+      timeoutMs: queryTimeoutMs(tab),
+      rowLimit: queryRowLimit(tab),
       profileId: target.profileId,
       database: tab.database || null,
       taskId: tab.taskId

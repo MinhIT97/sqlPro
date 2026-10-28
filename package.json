@@ -2,7 +2,7 @@
   "name": "sqlpro-desktop",
   "productName": "SqlPro",
   "desktopName": "SqlPro",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "description": "Ứng dụng desktop quản trị MySQL/MariaDB tương thích kết nối Navicat cho Windows và Ubuntu",
   "main": "electron/main.cjs",
   "homepage": "https://github.com",

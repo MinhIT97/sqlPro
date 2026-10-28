@@ -232,6 +232,14 @@ app.whenReady().then(async () => {
   await evaluate("window.addEventListener('error', event => { window.rendererErrors.push(event.message); }); window.addEventListener('unhandledrejection', event => { window.rendererErrors.push(String(event.reason)); }); window.rendererErrors = []; app.connection = {id:'test', name:'Mock', host:'localhost', port:3306, ssh:{enabled:false}}; app.database='test'; table='users'; app.tables=[{name:'users',type:'table'}]; mode='query'; renderQueryView();");
 
   await check('formatter button is bound after rendering', async () => {
+    assert.equal(await evaluate("$('#queryTimeout').value"), '300000');
+    assert.equal(await evaluate("$('#queryRowLimit').value"), '50000');
+    await evaluate("$('#queryRowLimit').value='100000'; $('#queryRowLimit').dispatchEvent(new Event('change')); renderQueryView()");
+    assert.equal(await evaluate("$('#queryRowLimit').value"), '100000');
+    await evaluate("$('#queryRowLimit').value='50000'; $('#queryRowLimit').dispatchEvent(new Event('change'))");
+    await evaluate("$('#queryTimeout').value='900000'; $('#queryTimeout').dispatchEvent(new Event('change')); renderQueryView()");
+    assert.equal(await evaluate("$('#queryTimeout').value"), '900000');
+    await evaluate("$('#queryTimeout').value='300000'; $('#queryTimeout').dispatchEvent(new Event('change'))");
     assert.equal(await evaluate("$('#sql').value='select 1'; $('#formatSqlBtn').click(); $('#sql').value"), 'SELECT 1');
   });
   await check('SQL editor undo and redo survive formatting and tab switches', async () => {

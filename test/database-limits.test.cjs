@@ -5,6 +5,42 @@ const { EventEmitter } = require('node:events');
 const { DatabaseSession } = require('../electron/database.cjs');
 const { ResultBudget } = require('../electron/result-budget.cjs');
 
+test('SQL editor default can return 11,674 rows without truncating at 5,000', async () => {
+  const session = new DatabaseSession({});
+  session.connection = { query() {
+    const query = new EventEmitter();
+    queueMicrotask(() => {
+      query.emit('fields', [{ name: 'id', columnType: 3 }]);
+      for (let i = 0; i < 11674; i += 1) query.emit('result', [i]);
+      query.emit('end');
+    });
+    return query;
+  } };
+  const result = await session.runQueryScript('SELECT id FROM items');
+  assert.equal(result.rows.length, 11674);
+  assert.equal(result.truncated, false);
+  const limited = await session.runQueryScript('SELECT id FROM items', 30000, false, null, { rowLimit: 5000 });
+  assert.equal(limited.rows.length, 5000);
+  assert.equal(limited.truncationReason, 'row-limit');
+});
+
+test('read timeout reports received rows, closes the stalled session and never retries SQL', async () => {
+  const session = new DatabaseSession({});
+  let destroyed = 0, queries = 0;
+  session.connection = {
+    destroy() { destroyed += 1; },
+    query() { queries += 1; const query = new EventEmitter(); queueMicrotask(() => query.emit('result', [1])); return query; }
+  };
+  await assert.rejects(session.runQuery('SELECT id FROM items', 10), (error) => {
+    assert.equal(error.code, 'QUERY_TIMEOUT');
+    assert.match(error.message, /đã nhận 1 dòng/);
+    return true;
+  });
+  assert.equal(session.dead, true);
+  assert.equal(destroyed, 1);
+  assert.equal(queries, 1);
+});
+
 test('row budgets account for escaped JSON and stop oversized cells before keeping a row', () => {
   const budget = new ResultBudget({ rows: 10, bytes: 30 });
   assert.equal(budget.add(['abc']), true);

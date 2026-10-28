@@ -17,10 +17,10 @@ const ExportValues = require('../export-values.js');
 const { ResultBudget } = require('./result-budget.cjs');
 const { TableDataService } = require('./table-data.cjs');
 
-const MAX_QUERY_ROWS = 5000;
-const MAX_QUERY_BATCH_ROWS = 10000;
-const MAX_QUERY_BYTES = 8 * 1024 * 1024;
-const MAX_QUERY_BATCH_BYTES = 16 * 1024 * 1024;
+const MAX_QUERY_ROWS = 100000;
+const MAX_QUERY_BATCH_ROWS = 100000;
+const MAX_QUERY_BYTES = 32 * 1024 * 1024;
+const MAX_QUERY_BATCH_BYTES = 64 * 1024 * 1024;
 const MAX_QUERY_STATEMENTS = 100;
 const MAX_PAGE_SIZE = 500;
 const BACKUP_INSERT_ROWS = 200;
@@ -1383,7 +1383,7 @@ class DatabaseSession {
     } finally { await control.close(); }
   }
 
-  async runQuery(sql, timeoutMs = 30000, rowLimit = MAX_QUERY_ROWS, byteLimit = MAX_QUERY_BYTES) {
+  async runQuery(sql, timeoutMs = 30000, rowLimit = 5000, byteLimit = MAX_QUERY_BYTES) {
     this.ensureOpen();
     const statement = String(sql || '').trim();
     if (!statement) throw fail('Câu lệnh SQL đang trống.', 'EMPTY_QUERY');
@@ -1407,7 +1407,7 @@ class DatabaseSession {
           } catch {
             // ignore
           }
-          finish(reject, fail('Truy vấn quá thời gian cho phép.', 'QUERY_TIMEOUT'));
+          finish(reject, fail(`Truy vấn vượt thời gian chờ ${Math.ceil(timeoutMs / 1000)} giây. Với lệnh ghi, cần kiểm tra dữ liệu trước khi chạy lại vì chưa xác nhận được kết quả.`, 'QUERY_TIMEOUT'));
         }, timeoutMs);
         this.cancelQuery = () => {
           this.dead = true;
@@ -1465,7 +1465,7 @@ class DatabaseSession {
       };
       const timer = setTimeout(() => {
         stopConnection();
-        finish(reject, fail('Truy vấn quá thời gian cho phép.', 'QUERY_TIMEOUT'));
+        finish(reject, fail(`Truy vấn vượt thời gian chờ ${Math.ceil(timeoutMs / 1000)} giây; đã nhận ${rows.length.toLocaleString()} dòng${truncated ? ' (đã đạt giới hạn hiển thị)' : ''}. Có thể tăng thời gian chờ trong SQL Editor hoặc kiểm tra truy vấn đang bị khóa/chờ trên máy chủ.`, 'QUERY_TIMEOUT'));
       }, timeoutMs);
       this.cancelQuery = () => {
         stopConnection();
@@ -1518,7 +1518,10 @@ class DatabaseSession {
     });
   }
 
-  async runQueryScript(sql, timeoutMs = 30000, confirmed = false, taskId = null) {
+  async runQueryScript(sql, timeoutMs = 30000, confirmed = false, taskId = null, options = {}) {
+    const requestedRows = Number(options?.rowLimit);
+    const rowLimit = [5000, 20000, 50000, 100000].includes(requestedRows) ? requestedRows : 50000;
+    const batchRowLimit = Math.min(MAX_QUERY_BATCH_ROWS, rowLimit * 2);
     this.ensureOpen();
     if (this.activeTask) throw fail('Phiên kết nối đang chạy một tác vụ khác.', 'SESSION_BUSY');
     const source = String(sql || '').trim();
@@ -1550,7 +1553,7 @@ class DatabaseSession {
     });
     try {
       if (statements.length === 1) {
-        const result = await this.runQuery(statements[0], timeoutMs);
+        const result = await this.runQuery(statements[0], timeoutMs, rowLimit);
         if (statementCommand(statements[0]) === 'USE') {
           try {
             const current = await this.raw('SELECT DATABASE() AS value');
@@ -1574,12 +1577,12 @@ class DatabaseSession {
         const database = this.database;
         try {
           const remainingMs = deadline - Date.now();
-          if (remainingMs <= 0) throw fail('Truy vấn quá thời gian cho phép.', 'QUERY_TIMEOUT');
+          if (remainingMs <= 0) throw fail(`Lượt chạy đã vượt thời gian chờ ${Math.ceil(timeoutMs / 1000)} giây trước câu lệnh #${index + 1}. Các kết quả trước đó được giữ lại.`, 'QUERY_TIMEOUT');
           const result = await this.runQuery(
             statement,
             remainingMs,
-            Math.max(0, MAX_QUERY_BATCH_ROWS - storedRows),
-            Math.max(0, MAX_QUERY_BATCH_BYTES - storedBytes)
+            Math.max(0, Math.min(rowLimit, batchRowLimit - storedRows)),
+            Math.max(0, Math.min(MAX_QUERY_BYTES, MAX_QUERY_BATCH_BYTES - storedBytes))
           );
           if (result.kind === 'rows') storedRows += result.rows.length;
           if (result.kind === 'rows') storedBytes += result.bytes || 0;

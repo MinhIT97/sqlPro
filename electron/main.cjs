@@ -426,7 +426,7 @@ function friendlyError(error) {
     ECONNRESET: 'Kết nối bị đóng bởi máy chủ.',
     PROTOCOL_CONNECTION_LOST: 'Mất kết nối tới database.',
     SESSION_CLOSED: 'Phiên kết nối đã đóng. Hãy kết nối lại.',
-    QUERY_TIMEOUT: 'Truy vấn quá thời gian cho phép.',
+    QUERY_TIMEOUT: error.message || 'Truy vấn quá thời gian cho phép.',
     QUERY_CANCELED: 'Đã hủy truy vấn.',
     ER_LOCK_WAIT_TIMEOUT: 'Database đang bị transaction khác giữ khóa. Hãy hoàn tất hoặc rollback transaction đó rồi thử lại.',
     ER_LOCK_DEADLOCK: 'Database phát hiện deadlock và đã hủy một transaction. Hãy thử lại sau khi kiểm tra transaction đang mở.',
@@ -889,9 +889,10 @@ handle('db:query', (payload) => {
     if (database) await session.useDatabase(database);
     return session.runQueryScript(
       payload.sql,
-      Math.min(300000, Math.max(1000, Number(payload.timeoutMs) || 30000)),
+      Math.min(900000, Math.max(1000, Number(payload.timeoutMs) || 300000)),
       payload.confirmed === true,
-      typeof payload.taskId === 'string' ? payload.taskId : null
+      typeof payload.taskId === 'string' ? payload.taskId : null,
+      { rowLimit: payload.rowLimit }
     );
   });
 });

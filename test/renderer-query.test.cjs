@@ -6,6 +6,19 @@ const { loadRenderer } = require('./helpers/renderer.cjs');
 
 const rowResult = () => ({ kind: 'rows', columns: [{ name: 'value', type: 'INT' }], rows: [[1]], durationMs: 1 });
 
+test('SQL editor uses a five-minute default and honors each tab timeout', async () => {
+  const r = setup();
+  await r.evaluate('runQuery()');
+  assert.equal(r.requests[0].timeoutMs, 300000);
+  assert.equal(r.requests[0].rowLimit, 50000);
+  r.evaluate('app.query.timeoutMs=900000; app.query.rowLimit=100000');
+  await r.evaluate('runQuery()');
+  assert.equal(r.requests[1].timeoutMs, 900000);
+  assert.equal(r.requests[1].rowLimit, 100000);
+  assert.equal(r.evaluate('queryTimeoutMs({timeoutMs:-1})'), 300000);
+  assert.equal(r.evaluate('queryTimeoutMs({timeoutMs:30000})'), 30000);
+});
+
 test('large wide results render only the viewport and reuse ordering across selection changes', () => {
   const r = loadRenderer();
   const html = r.evaluate(`app.query={sortCol:0,sortDir:'DESC'};

@@ -71,7 +71,7 @@ async function trialHash(filePath,control) {
   return hash.digest('hex');
 }
 
-async function runRestoreTrial({session,filePath,onProgress,taskId=null,control:providedControl}) {
+async function runRestoreTrial({session,filePath,onProgress,taskId=null,control:providedControl,journal}) {
   assertWritable(session.profile);
   const control=providedControl || createTrialControl(session,taskId);
   const database=`sqlpro_trial_${crypto.randomBytes(16).toString('hex')}`;
@@ -82,6 +82,7 @@ async function runRestoreTrial({session,filePath,onProgress,taskId=null,control:
   let created=false;
   let marked=false;
   let temporary;
+  let journalId;
   try {
     control.check();
     const before=await fs.promises.stat(filePath);
@@ -117,6 +118,7 @@ async function runRestoreTrial({session,filePath,onProgress,taskId=null,control:
     // Scan the original under the temporary scope before creating any schema.
     await session.scanRestoreInventoryInWorker({filePath,database,totalBytes:before.size,dropExisting:false,task:control.task,onProgress});
     control.check();
+    if (journal) journalId = journal.prepare({ database, marker, token });
     await session.raw(`CREATE DATABASE ${quote(database)}`);
     created=true;report.cleanup='pending';
     await session.raw(`CREATE TABLE ${quote(database)}.${quote(marker)} (token VARCHAR(64) NOT NULL) ENGINE=InnoDB`);
@@ -146,6 +148,16 @@ async function runRestoreTrial({session,filePath,onProgress,taskId=null,control:
       } catch(error) {report.cleanup='manual-required';report.cleanupError=error.message;}
     }
     report.finishedAt=new Date().toISOString();
+    // Retain evidence if CREATE returned an ambiguous connection error, or if
+    // ownership/drop could not be confirmed. Recovery verifies it independently.
+    if (journalId) {
+      report.recoveryId = journalId;
+      if (!created) report.cleanup = 'check-required';
+      if (report.cleanup === 'removed') {
+        try { journal.remove(journalId); }
+        catch (error) { report.journalError = error.message; }
+      }
+    }
     if(temporary)await fs.promises.rm(temporary,{recursive:true,force:true}).catch(()=>{});
   }
   return report;

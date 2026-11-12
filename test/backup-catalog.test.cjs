@@ -8,7 +8,76 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { backupDirectory, backupName, listBackups, resolveBackup, copyBackup, verifyBackup } = require('../electron/backup-catalog.cjs');
 const { saveBackupFile, readManifest } = require('../electron/backup-file.cjs');
-const { renameBackup } = require('../electron/backup-catalog.cjs');
+const { renameBackup, updateBackupAnnotations, deleteBackup } = require('../electron/backup-catalog.cjs');
+
+test('notes and pin migrate old names, survive concurrent edits and protect deletion', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-annotations-'));
+  try {
+    const directory = backupDirectory(root, 'conn', 'db');
+    await fs.mkdir(directory, { recursive: true });
+    const id = backupName();
+    const file = path.join(directory, id);
+    await saveBackupFile(file, async write => { await write('SELECT 1;'); return { bytes: 9 }; });
+    await fs.writeFile(`${file}.name.json`, JSON.stringify({ name: 'Tên cũ' }));
+    const originalManifest = await readManifest(file);
+    assert.equal((await listBackups(root, 'conn', 'db'))[0].pinned, false);
+    await Promise.all([
+      updateBackupAnnotations(root, 'conn', 'db', id, { note: 'Trước nâng cấp\nGiữ đến cuối tháng <script>' }),
+      updateBackupAnnotations(root, 'conn', 'db', id, { pinned: true }),
+      renameBackup(root, 'conn', 'db', id, 'Tên mới')
+    ]);
+    const [entry] = await listBackups(root, 'conn', 'db');
+    assert.equal(entry.name, 'Tên mới');
+    assert.equal(entry.note, 'Trước nâng cấp\nGiữ đến cuối tháng <script>');
+    assert.equal(entry.pinned, true);
+    await assert.rejects(deleteBackup(root, 'conn', 'db', id), { code: 'BACKUP_PINNED' });
+    assert.equal(await fs.readFile(file, 'utf8'), 'SELECT 1;');
+    assert.deepEqual(await readManifest(file), originalManifest);
+    const copied = await copyBackup(root, 'conn', 'other', 'db', 'target', id);
+    assert.equal(copied.pinned, true);
+    const [copy] = await listBackups(root, 'other', 'target');
+    assert.equal(copy.name, entry.name); assert.equal(copy.note, entry.note); assert.equal(copy.pinned, true);
+    await assert.rejects(deleteBackup(root, 'other', 'target', copied.id), { code: 'BACKUP_PINNED' });
+    await updateBackupAnnotations(root, 'conn', 'db', id, { pinned: false, note: '' });
+    await fs.writeFile(`${file}.trial.json`, '{}');
+    assert.equal((await deleteBackup(root, 'conn', 'db', id)).deleted, true);
+    assert.deepEqual(await fs.readdir(directory), []);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('invalid metadata fails closed; failed atomic writes retain prior notes and release the edit lock', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-annotation-errors-'));
+  const originalRename = fs.rename;
+  try {
+    const directory = backupDirectory(root, 'conn', 'db');
+    await fs.mkdir(directory, { recursive: true });
+    const id = backupName();
+    const file = path.join(directory, id);
+    await fs.writeFile(file, 'SELECT 1;');
+    for (const patch of [{ note: 'x'.repeat(2001) }, { note: '\0' }, { note: 7 }, { pinned: 'false' }, { name: '' }, { extra: 1 }, {}, { note: undefined }]) {
+      await assert.rejects(updateBackupAnnotations(root, 'conn', 'db', id, patch));
+    }
+    await updateBackupAnnotations(root, 'conn', 'db', id, { note: 'Giữ nguyên', pinned: true });
+    fs.rename = async (source, target) => {
+      if (target === `${file}.name.json`) throw Object.assign(new Error('disk full fixture'), { code: 'ENOSPC' });
+      return originalRename(source, target);
+    };
+    await assert.rejects(renameBackup(root, 'conn', 'db', id, 'Thất bại'), { code: 'ENOSPC' });
+    fs.rename = originalRename;
+    await renameBackup(root, 'conn', 'db', id, 'Thành công');
+    assert.equal((await listBackups(root, 'conn', 'db'))[0].note, 'Giữ nguyên');
+    assert.equal((await fs.readdir(directory)).some(name => name.endsWith('.part')), false);
+    for (const metadata of ['{broken', JSON.stringify({ version: 99 }), JSON.stringify({ pinned: 'true' }), 'x'.repeat(16385)]) {
+      await fs.writeFile(`${file}.name.json`, metadata);
+      assert.ok((await listBackups(root, 'conn', 'db'))[0].annotationError);
+      await assert.rejects(deleteBackup(root, 'conn', 'db', id));
+      await assert.rejects(renameBackup(root, 'conn', 'db', id, 'Không ghi đè'));
+      await assert.rejects(copyBackup(root, 'conn', 'other', 'db', 'target', id));
+      assert.equal(await fs.readFile(`${file}.name.json`, 'utf8'), metadata);
+      assert.equal(await fs.readFile(file, 'utf8'), 'SELECT 1;');
+    }
+  } finally { fs.rename = originalRename; await fs.rm(root, { recursive: true, force: true }); }
+});
 
 test('đổi tên backup lưu bền tên tiếng Việt và giữ nội dung, checksum, ID', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-rename-'));
@@ -38,6 +107,55 @@ test('đổi tên backup lưu bền tên tiếng Việt và giữ nội dung, ch
   }
 });
 
+test('copy does not publish an unpinned backup when metadata or SQL publication fails', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-annotation-copy-failure-'));
+  const originalLink = fs.link;
+  try {
+    const directory = backupDirectory(root, 'conn', 'source');
+    await fs.mkdir(directory, { recursive: true });
+    const id = backupName();
+    await fs.writeFile(path.join(directory, id), 'SELECT 1;');
+    await updateBackupAnnotations(root, 'conn', 'source', id, { name: 'Bản quan trọng', note: 'Giữ lại', pinned: true });
+    for (const stage of ['metadata', 'sql']) {
+      const destination = backupDirectory(root, 'conn', stage);
+      fs.link = async (source, target) => {
+        if (path.dirname(target) === destination && target.endsWith(stage === 'metadata' ? '.name.json' : '.sql')) throw new Error('publication failed');
+        return originalLink(source, target);
+      };
+      await assert.rejects(copyBackup(root, 'conn', 'conn', 'source', stage, id), /publication failed/);
+      assert.deepEqual(await fs.readdir(destination), []);
+      assert.deepEqual(await listBackups(root, 'conn', stage), []);
+    }
+    assert.equal((await listBackups(root, 'conn', 'source'))[0].pinned, true);
+  } finally { fs.link = originalLink; await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('copy publication never overwrites a colliding SQL or pin sidecar', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-copy-collision-'));
+  const originalLink = fs.link;
+  try {
+    const source = backupDirectory(root, 'p1', 'source');
+    const target = backupDirectory(root, 'p1', 'target');
+    await fs.mkdir(source, { recursive: true });
+    const id = backupName();
+    await fs.writeFile(path.join(source, id), 'SELECT 1;');
+    for (const stage of ['metadata', 'sql']) {
+      let collision;
+      fs.link = async (from, to) => {
+        if (to.endsWith(stage === 'metadata' ? '.name.json' : '.sql')) {
+          collision = to;
+          await fs.writeFile(to, stage === 'metadata' ? '{"pinned":true}' : 'ORIGINAL BACKUP', { flag: 'wx' });
+        }
+        return originalLink(from, to);
+      };
+      await assert.rejects(copyBackup(root, 'p1', 'p1', 'source', 'target', id), { code: 'EEXIST' });
+      assert.equal(await fs.readFile(collision, 'utf8'), stage === 'metadata' ? '{"pinned":true}' : 'ORIGINAL BACKUP');
+      if (stage === 'sql') await assert.rejects(fs.stat(`${collision}.name.json`), { code: 'ENOENT' });
+      await fs.rm(target, { recursive: true, force: true });
+    }
+  } finally { fs.link = originalLink; await fs.rm(root, { recursive: true, force: true }); }
+});
+
 test('backup được liệt kê riêng theo kết nối và database', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-catalog-'));
   try {
@@ -54,6 +172,20 @@ test('backup được liệt kê riêng theo kết nối và database', async ()
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+test('catalog quota is checked before reading per-backup metadata', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-catalog-quota-'));
+  const originalRead = fs.readFile;
+  let reads = 0;
+  try {
+    const directory = backupDirectory(root, 'p1', 'db');
+    await fs.mkdir(directory, { recursive: true });
+    for (let index = 0; index < 3; index++) await fs.writeFile(path.join(directory, backupName()), 'SELECT 1;');
+    fs.readFile = (...args) => { reads++; return originalRead(...args); };
+    await assert.rejects(listBackups(root, 'p1', 'db', { maxEntries: 2 }), /vượt giới hạn 2/);
+    assert.equal(reads, 0);
+  } finally { fs.readFile = originalRead; await fs.rm(root, { recursive: true, force: true }); }
 });
 
 test('copyBackup sao chép bản sao lưu sang database khác', async () => {

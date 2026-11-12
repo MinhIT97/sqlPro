@@ -3791,7 +3791,9 @@ function backupDetailsHtml(entry) {
   const names = (label, values) => Array.isArray(values) && values.length
     ? `<h4>${esc(label)} (${values.length})</h4><ul class="backup-object-list">${values.map((name) => `<li>${esc(name)}</li>`).join('')}</ul>` : '';
   return `<section class="backup-details" aria-label="Chi tiết bản sao lưu">
-    <h3>${esc(entry.name)}</h3>
+    <h3>${entry.pinned ? '📌 ' : ''}${esc(entry.name)}</h3>
+    ${entry.note ? `<p class="backup-user-note">${esc(entry.note)}</p>` : ''}
+    ${entry.annotationError ? `<p class="errorbox" role="alert">Không đọc được ghi chú/ghim: ${esc(entry.annotationError)}</p>` : ''}
     <dl class="backup-details-grid">
       <div><dt>Ngày tạo</dt><dd>${esc(new Date(entry.createdAt).toLocaleString('vi-VN'))}</dd></div>
       <div><dt>Dung lượng</dt><dd>${formatBytes(entry.bytes)}</dd></div>
@@ -3818,10 +3820,10 @@ function renderBackupsView() {
   const selected = app.backups.find((entry) => entry.id === app.selectedBackupId);
   const rows = app.backups.map((entry) => `
     <tr class="backup-row ${entry.id === app.selectedBackupId ? 'selected' : ''}" data-backup-row="${esc(entry.id)}" tabindex="0" aria-selected="${entry.id === app.selectedBackupId}">
-      <td>◴ &nbsp; ${esc(entry.name)}</td>
+      <td>${entry.pinned ? '<span aria-label="Đã ghim">📌</span>' : '◴'} &nbsp; ${esc(entry.name)}</td>
       <td>${esc(new Date(entry.createdAt).toLocaleString('vi-VN'))}</td>
       <td>${formatBytes(entry.bytes)}</td>
-      <td title="${esc(entry.checksum || '')}">${esc(backupChecksumNote(entry))}</td>
+      <td title="${esc(entry.checksum || '')}">${esc(backupChecksumNote(entry))}${entry.note ? `<br><span class="backup-note-preview">${esc(entry.note.slice(0, 120))}${entry.note.length > 120 ? '…' : ''}</span>` : ''}${entry.annotationError ? '<br>⚠ Không đọc được ghi chú/ghim' : ''}</td>
     </tr>`).join('');
   $('#workspace').innerHTML = `
     <section class="backup-manager" aria-label="Quản lý bản sao lưu">
@@ -3830,12 +3832,16 @@ function renderBackupsView() {
         <button data-backup-action="restore" ${selected ? '' : 'disabled'}>↶ Phục hồi</button>
         <button data-backup-action="verify" ${selected ? '' : 'disabled'}>✓ Xác minh checksum</button>
         <button data-backup-action="rename" ${selected ? '' : 'disabled'}>✎ Đổi tên</button>
+        <button data-backup-action="annotations" ${selected ? '' : 'disabled'}>✎ Ghi chú / Ghim</button>
         <button data-backup-action="copy-backup" ${selected ? '' : 'disabled'}>⎘ Sao chép (Ctrl+C)</button>
         <button data-backup-action="paste-backup" ${app.copiedBackup ? '' : 'disabled'}>📋 Dán (Ctrl+V)</button>
         <button data-backup-action="copy-to-db" ${selected ? '' : 'disabled'}>⧉ Sao chép sang DB khác…</button>
-        <button data-backup-action="delete" class="danger" ${selected ? '' : 'disabled'}>⌫ Xóa bản sao lưu</button>
+        <button data-backup-action="delete" class="danger" ${selected && !selected.pinned && !selected.annotationError ? '' : 'disabled'}>⌫ Xóa bản sao lưu</button>
         <button data-backup-action="export" ${selected ? '' : 'disabled'}>⇩ Xuất tệp SQL</button>
         <button data-backup-action="refresh">↻ Làm mới</button>
+        <button data-backup-action="trial-recovery">Database thử còn sót…</button>
+        <button data-backup-action="retention-preview">Xem trước dọn backup…</button>
+        <button data-backup-action="retention-history">Lịch sử dọn backup…</button>
       </div>
       <div class="backup-manager-table"><table><thead><tr><th>Tên</th><th>Ngày tạo</th><th>Dung lượng</th><th>Ghi chú</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="4" class="backup-manager-empty">Chưa có bản sao lưu. Bấm “Tạo bản sao lưu” để bắt đầu.</td></tr>'}</tbody>
@@ -3848,6 +3854,7 @@ function renderBackupsView() {
 function backupContextMenuHtml(hasSelection) {
   const item = (action, icon, label, disabled = false) => `<div class="context-menu-item ${disabled ? 'disabled' : ''}" ${disabled ? '' : `data-backup-menu="${action}"`}><span class="c-icon">${icon}</span>${label}</div>`;
   const canPaste = Boolean(app.copiedBackup);
+  const selected = app.backups.find(entry => entry.id === app.selectedBackupId);
   return `
     ${item('restore', '↶', 'Phục hồi bản sao lưu', !hasSelection)}
     ${item('verify', '✓', 'Xác minh checksum', !hasSelection)}
@@ -3856,7 +3863,7 @@ function backupContextMenuHtml(hasSelection) {
     ${item('paste-backup', '📋', 'Dán bản sao lưu vào đây (Ctrl+V)', !canPaste)}
     ${item('copy-to-db', '⧉', 'Sao chép sang Database khác…', !hasSelection)}
     ${item('create', '＋', 'Tạo bản sao lưu mới')}
-    ${item('delete', '⌫', 'Xóa bản sao lưu', !hasSelection)}
+    ${item('delete', '⌫', 'Xóa bản sao lưu', !hasSelection || selected?.pinned || selected?.annotationError)}
     <div class="context-menu-sep"></div>
     ${item('restore-file', '⇧', 'Phục hồi từ tệp SQL…')}
     ${item('export', '⇩', 'Xuất tệp SQL…', !hasSelection)}
@@ -3866,7 +3873,323 @@ function backupContextMenuHtml(hasSelection) {
     ${item('refresh', '↻', 'Làm mới')}`;
 }
 
+async function showBackupRetentionHistory() {
+  const profileId = app.connection?.id;
+  const database = app.database;
+  modal(`<section id="retentionHistoryView"><h2>Lịch sử dọn backup</h2><p>${esc(app.connection?.name || profileId || '')} · ${esc(database || '')}</p>
+    <p class="hint">Lưu tối đa 50 lượt trên máy này để đối chiếu. Lịch sử không khôi phục được các bản đã xóa và không phải log chống sửa đổi.</p>
+    <div id="retentionHistoryResult" role="status" aria-live="polite">Đang đọc lịch sử…</div><div class="actions"><button data-click="close-modal">Đóng</button></div></section>`, true);
+  const output = $('#retentionHistoryResult');
+  const matches = () => $('#retentionHistoryResult') === output && app.connection?.id === profileId && app.database === database;
+  try {
+    const records = await call(desktop.db.backupRetentionHistory({ profileId, database }));
+    if (!matches()) return;
+    const labels = { running: 'Đang chạy', completed: 'Hoàn tất', stopped: 'Đã dừng', failed: 'Có lỗi', incomplete: 'Chưa xác nhận kết thúc' };
+    output.innerHTML = records.map(record => `<details class="backup-retention-history"><summary>${esc(new Date(record.startedAt).toLocaleString('vi-VN'))} · ${esc(labels[record.state] || record.state)} · Đã ghi nhận xóa ${record.deleted.length}/${record.planned.length} bản</summary>
+      ${record.state === 'incomplete' ? '<p class="errorbox">Báo cáo chưa hoàn tất hoặc ứng dụng đã bị gián đoạn. Số bản hiển thị có thể chưa phản ánh các lần xóa đã thực hiện; hãy đối chiếu catalog. Không tự tiếp tục xóa.</p>' : ''}
+      ${record.state === 'running' ? '<p class="hint">Tác vụ vẫn đang chạy. Kết quả chi tiết sẽ có sau khi kết thúc; mở lại lịch sử để cập nhật.</p>' : ''}
+      ${['running', 'incomplete'].includes(record.state) ? `<h4>Danh sách dự kiến (${record.planned.length})</h4><ul>${record.planned.map(id => `<li>${esc(id)}</li>`).join('')}</ul>` : ''}
+      <p>Dung lượng SQL đã ghi nhận: ${formatBytes(record.reclaimedBytes)}${record.finishedAt ? ` · Kết thúc: ${esc(new Date(record.finishedAt).toLocaleString('vi-VN'))}` : ''}</p>
+      <p>Giới hạn: ${record.policy.maxCount === null ? 'Không giới hạn số bản' : `${esc(record.policy.maxCount)} bản`} · ${record.policy.maxAgeDays === null ? 'Không giới hạn tuổi' : `${esc(record.policy.maxAgeDays)} ngày`} · ${record.policy.maxBytes === null ? 'Không giới hạn dung lượng' : formatBytes(record.policy.maxBytes)}</p>
+      <h4>Đã xóa (${record.deleted.length})</h4><ul>${record.deleted.map(id => `<li>${esc(id)}</li>`).join('') || '<li>Chưa ghi nhận</li>'}</ul>
+      <h4>Chưa xóa (${record.remaining.length})</h4><ul>${record.remaining.map(id => `<li>${esc(id)}</li>`).join('') || '<li>Không có bản được ghi nhận trong danh sách này</li>'}</ul>
+      ${record.failed.length ? `<h4>Lỗi</h4><ul>${record.failed.map(error => `<li>${esc(error.id)} · ${esc(error.code)}${error.sqlDeleted ? ' · SQL đã xóa, cần kiểm tra metadata còn sót' : ''}</li>`).join('')}</ul>` : ''}</details>`).join('') || '<p>Chưa có lịch sử dọn backup cho database này.</p>';
+  } catch (error) { if (matches()) output.textContent = error.message; }
+}
+
+function previewBackupRetention() {
+  const profileId = app.connection?.id;
+  const database = app.database;
+  modal(`<section id="backupRetentionEditor"><h2>Xem trước dọn backup</h2>
+    <p>${esc(app.connection?.name || profileId || '')} · ${esc(database || '')}</p>
+    <p>Nhập ít nhất một giới hạn. Công cụ đề xuất các bản cũ nhất để đáp ứng đồng thời các giới hạn, luôn giữ bản ghim, bản mới nhất và bản mới nhất đã xác minh checksum.</p>
+    <label for="retentionCount">Số bản tối đa</label><input id="retentionCount" type="number" min="1" max="100000" step="1" value="10">
+    <label for="retentionAge">Tuổi tối đa (ngày)</label><input id="retentionAge" type="number" min="1" max="36500" step="1" placeholder="Không giới hạn">
+    <label for="retentionMiB">Tổng dung lượng tối đa (MiB)</label><input id="retentionMiB" type="number" min="0.00000095367431640625" max="8589934591" step="any" placeholder="Không giới hạn">
+    <p class="hint">Xem trước không xóa tệp. Nút Dọn yêu cầu xác nhận riêng và kiểm tra lại backup. Chưa tự chạy theo lịch. Dung lượng chỉ tính SQL; checksum không thay thế phục hồi thử.</p>
+    <p id="backupRetentionPolicyStatus" role="status" aria-live="polite">Đang đọc chính sách đã lưu…</p>
+    <div class="actions"><button data-click="close-modal">Đóng</button><button id="saveRetentionPolicyBtn" disabled>Lưu chính sách</button><button id="clearRetentionPolicyBtn" disabled>Xóa chính sách đã lưu</button><button id="previewRetentionBtn" class="primary">Xem trước (Ctrl+Enter)</button></div>
+    <button id="applyRetentionBtn" class="danger" disabled>Dọn các bản đã xem trước…</button>
+    <button id="stopRetentionBtn" disabled hidden>Dừng dọn backup</button>
+    <p id="retentionTaskStatus" role="status" aria-live="polite"></p>
+    <div id="backupRetentionResult" role="status" aria-live="polite"></div></section>`, true);
+  const editor = $('#backupRetentionEditor');
+  const output = $('#backupRetentionResult');
+  const button = $('#previewRetentionBtn');
+  const inputs = [$('#retentionCount'), $('#retentionAge'), $('#retentionMiB')];
+  const policyStatus = $('#backupRetentionPolicyStatus');
+  const saveButton = $('#saveRetentionPolicyBtn');
+  const clearButton = $('#clearRetentionPolicyBtn');
+  const applyButton = $('#applyRetentionBtn');
+  const stopButton = $('#stopRetentionBtn');
+  const taskStatus = $('#retentionTaskStatus');
+  let retentionTaskId = null;
+  let stopRequested = false;
+  let currentPlan = null;
+  let generation = 0;
+  let busy = false;
+  let policyBusy = false;
+  let policyLoaded = false;
+  let hasSavedPolicy = false;
+  const labels = { pinned: 'Đã ghim', active: 'Đang được dùng', newest: 'Bản mới nhất',
+    'latest-verified': 'Bản mới nhất đã xác minh checksum', 'metadata-error': 'Metadata lỗi',
+    'invalid-date': 'Ngày tạo không hợp lệ hoặc trong tương lai', 'invalid-size': 'Dung lượng không hợp lệ',
+    'checksum-mismatch': 'Checksum không khớp — cần kiểm tra', age: 'Quá tuổi', count: 'Vượt số bản', bytes: 'Vượt dung lượng' };
+  const warningLabels = { 'no-verified-backup': 'Chưa có bản ghi thành công và checksum đã xác minh: chưa đề xuất dọn. Hãy xác minh backup trước.',
+    'unknown-size': 'Có bản chưa xác định dung lượng; tổng hiển thị chưa gồm các bản này.',
+    'count-unmet': 'Chưa đạt giới hạn số bản vì có bản được bảo vệ.',
+    'bytes-unmet': 'Chưa đạt giới hạn dung lượng vì có bản được bảo vệ.',
+    'age-unmet': 'Còn bản quá tuổi được giữ lại.' };
+  const contextMatches = () => $('#backupRetentionResult') === output && app.connection?.id === profileId && app.database === database;
+  inputs.forEach(input => input.addEventListener('input', () => {
+    currentPlan = null; applyButton.disabled = true;
+    generation++; output.textContent = 'Giới hạn đã thay đổi. Hãy xem trước lại.';
+  }));
+  const readInputPolicy = () => {
+    const values = inputs.map(input => {
+      if (!input.validity.valid) throw new Error('Số bản/ngày phải là số nguyên dương; dung lượng phải tương ứng số byte nguyên.');
+      return input.value === '' ? null : Number(input.value);
+    });
+    const policy = { maxCount: values[0], maxAgeDays: values[1], maxBytes: values[2] === null ? null : values[2] * 1048576 };
+    if (Object.values(policy).every(value => value === null)
+        || Object.values(policy).some(value => value !== null && (!Number.isSafeInteger(value) || value < 1))) throw new Error('Hãy nhập ít nhất một giới hạn hợp lệ, dung lượng tương ứng số byte nguyên.');
+    return policy;
+  };
+  const setInputPolicy = policy => {
+    inputs[0].value = policy?.maxCount ?? (policy ? '' : '10');
+    inputs[1].value = policy?.maxAgeDays ?? '';
+    inputs[2].value = policy?.maxBytes === null || policy?.maxBytes === undefined ? '' : policy.maxBytes / 1048576;
+  };
+  const loadGeneration = generation;
+  void (async () => {
+    try {
+      const saved = await call(desktop.db.getBackupRetentionPolicy({ profileId, database }));
+      if (!contextMatches()) return;
+      policyLoaded = true;
+      hasSavedPolicy = Boolean(saved.policy);
+      if (generation === loadGeneration) setInputPolicy(saved.policy);
+      policyStatus.textContent = saved.policy ? `Có chính sách lưu cục bộ${generation !== loadGeneration ? '; giữ nguyên nội dung bạn đang nhập' : ''}. Lưu chính sách không tự xóa backup.` : 'Chưa lưu chính sách cho database này.';
+      saveButton.disabled = busy || policyBusy;
+      clearButton.disabled = busy || policyBusy || !saved.policy;
+    } catch (error) {
+      if (contextMatches()) policyStatus.textContent = `Không đọc được chính sách: ${error.message}. Nội dung hiện tại vẫn có thể xem trước.`;
+    }
+  })();
+  const changePolicy = async clear => {
+    if (busy || policyBusy || !policyLoaded) return;
+    if (!contextMatches()) { policyStatus.textContent = 'Kết nối hoặc database đã thay đổi. Hãy mở lại công cụ.'; return; }
+    let policy;
+    try { policy = clear ? null : readInputPolicy(); }
+    catch (error) { policyStatus.textContent = error.message; return; }
+    const request = ++generation;
+    currentPlan = null; applyButton.disabled = true;
+    const clearWasDisabled = clearButton.disabled;
+    policyBusy = true;
+    saveButton.disabled = clearButton.disabled = true;
+    inputs.forEach(input => { input.disabled = true; });
+    try {
+      const result = await call(clear
+        ? desktop.db.clearBackupRetentionPolicy({ profileId, database })
+        : desktop.db.saveBackupRetentionPolicy({ profileId, database, policy }));
+      if (!contextMatches() || request !== generation) return;
+      if (clear) setInputPolicy(null);
+      clearButton.disabled = !result.policy;
+      hasSavedPolicy = Boolean(result.policy);
+      policyStatus.textContent = clear ? 'Đã xóa chính sách lưu cục bộ. Backup được giữ nguyên.' : 'Đã lưu chính sách cho database này. Chưa bật tự động dọn backup.';
+      output.textContent = 'Hãy xem trước với giới hạn hiện tại.';
+    } catch (error) {
+      if (contextMatches() && request === generation) policyStatus.textContent = error.message;
+      clearButton.disabled = clearWasDisabled;
+    } finally {
+      policyBusy = false;
+      saveButton.disabled = false;
+      inputs.forEach(input => { input.disabled = false; });
+    }
+  };
+  saveButton.addEventListener('click', () => changePolicy(false));
+  clearButton.addEventListener('click', () => changePolicy(true));
+  const preview = async () => {
+    if (busy || policyBusy) return;
+    if (!contextMatches()) { output.textContent = 'Kết nối hoặc database đã thay đổi. Hãy mở lại công cụ.'; return; }
+    const request = ++generation;
+    currentPlan = null; applyButton.disabled = true;
+    busy = true; button.disabled = saveButton.disabled = clearButton.disabled = true;
+    output.textContent = 'Đang đọc catalog backup…';
+    try {
+      const plan = await call(desktop.db.previewBackupRetention({ profileId, database,
+        policy: readInputPolicy() }));
+      if (!contextMatches() || request !== generation) return;
+      currentPlan = plan;
+      applyButton.disabled = !plan.token || plan.removeCount > 100;
+      output.innerHTML = `<p><strong>Đề xuất dọn ${plan.removeCount}/${plan.totalCount} bản · ${formatBytes(plan.removeBytes)}</strong><br>Giữ ${plan.remainingCount} bản · ${formatBytes(plan.remainingBytes)}</p>
+        ${plan.removeCount > 100 ? '<p class="hint">Mỗi lần áp dụng tối đa 100 bản; hãy điều chỉnh giới hạn và xem trước lại.</p>' : ''}
+        ${plan.warnings.map(warning => `<p class="hint">${esc(warningLabels[warning] || warning)}</p>`).join('')}
+        <p class="hint">Kết quả tại ${esc(new Date(plan.plannedAt).toLocaleString('vi-VN'))}. Chưa có tệp nào bị xóa.</p>
+        ${plan.rows.length > 500 ? `<p class="hint">Hiển thị 500/${plan.rows.length} bản; thống kê tính trên toàn bộ catalog.</p>` : ''}
+    <div class="backup-retention-table"><table><thead><tr><th>Bản backup</th><th>Dung lượng</th><th>Đề xuất</th><th>Lý do</th></tr></thead><tbody>
+        ${plan.rows.slice(0, 500).map(row => `<tr><td>${esc(row.name)}</td><td>${row.protectedReasons.includes('invalid-size') ? 'Chưa xác định' : formatBytes(row.bytes)}</td><td>${row.action === 'remove' ? 'Có thể dọn' : 'Giữ'}</td><td>${esc([...row.protectedReasons, ...row.reasons].map(reason => labels[reason] || reason).join(' · ') || 'Trong giới hạn')}</td></tr>`).join('') || '<tr><td colspan="4">Chưa có backup.</td></tr>'}</tbody></table></div>`;
+    } catch (error) { if (contextMatches() && request === generation) output.textContent = error.message; }
+    finally {
+      busy = false; button.disabled = false;
+      saveButton.disabled = !policyLoaded;
+      clearButton.disabled = !policyLoaded || !hasSavedPolicy;
+    }
+  };
+  button.addEventListener('click', preview);
+  stopButton.addEventListener('click', async () => {
+    const taskId = retentionTaskId;
+    if (!taskId || !contextMatches() || stopRequested) return;
+    stopRequested = true; stopButton.disabled = true;
+    taskStatus.textContent = 'Đang yêu cầu dừng; các bản đã xóa sẽ không được hoàn tác…';
+    try {
+      const result = await call(desktop.db.cancelTask(profileId, taskId));
+      if (contextMatches() && retentionTaskId === taskId && !result.canceled) {
+        stopRequested = false;
+        taskStatus.textContent = 'Tác vụ đã kết thúc hoặc đang chờ xác nhận native.';
+      }
+    } catch (error) {
+      if (contextMatches() && retentionTaskId === taskId) { stopRequested = false; taskStatus.textContent = error.message; }
+    }
+  });
+  applyButton.addEventListener('click', async () => {
+    if (busy || policyBusy || !currentPlan?.token || !contextMatches()) return;
+    const token = currentPlan.token;
+    currentPlan = null; applyButton.disabled = true;
+    const request = ++generation;
+    const taskId = `retention-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    retentionTaskId = taskId; stopRequested = false;
+    stopButton.hidden = false; stopButton.disabled = true;
+    taskStatus.textContent = 'Chờ xác nhận danh sách backup…';
+    let finished = false, timer;
+    const poll = async () => {
+      if (finished || !contextMatches() || retentionTaskId !== taskId) return;
+      try {
+        const status = await call(desktop.db.backupRetentionStatus({ profileId, database, taskId }));
+        if (finished || !contextMatches() || retentionTaskId !== taskId) return;
+        if (status.running) {
+          const labels = { checking: 'Đang kiểm tra catalog', hashing: 'Đang xác minh bản giữ lại', deleting: 'Đang dọn', stopped: 'Đã dừng', failed: 'Dừng do lỗi', finished: 'Hoàn tất' };
+          taskStatus.textContent = `${status.stopping || stopRequested ? 'Đang dừng' : labels[status.phase] || 'Đang xử lý'} · Đã xóa ${status.deleted}/${status.total} bản · ${formatBytes(status.reclaimedBytes)} SQL${status.phase === 'hashing' ? ` · Đã đọc ${formatBytes(status.bytesRead || 0)}/${formatBytes(status.totalBytes || 0)}` : ''}`;
+          stopButton.disabled = Boolean(stopRequested || status.stopping);
+        }
+      } catch (error) { if (!finished && contextMatches()) taskStatus.textContent = `Không đọc được tiến độ: ${error.message}`; }
+      if (!finished && contextMatches() && retentionTaskId === taskId) timer = setTimeout(poll, 500);
+    };
+    busy = true; button.disabled = saveButton.disabled = clearButton.disabled = true;
+    inputs.forEach(input => { input.disabled = true; });
+    output.textContent = 'Đang chờ xác nhận danh sách và kiểm tra lại backup…';
+    try {
+      const pending = call(desktop.db.applyBackupRetention({ profileId, database, token, taskId }));
+      timer = setTimeout(poll, 500);
+      const result = await pending;
+      if (!contextMatches() || request !== generation) return;
+      taskStatus.textContent = result.stopped ? 'Đã dừng. Những bản chưa xử lý được giữ lại.' : result.canceled ? 'Đã hủy xác nhận.' : 'Tác vụ đã kết thúc.';
+      output.innerHTML = result.canceled ? '<p>Đã hủy. Hãy xem trước lại nếu muốn dọn.</p>'
+        : `<p>Đã xóa ${result.deleted.length} bản · ${formatBytes(result.reclaimedBytes)} SQL. Còn ${result.remaining.length} bản trong danh sách chưa xóa.</p>${result.failed.map(error => `<p class="errorbox">${esc(error.id)}: ${esc(error.message)}${error.sqlDeleted ? ' (SQL đã xóa; metadata có thể còn sót)' : ''}</p>`).join('')}<p>Hãy xem trước lại để tiếp tục. Thao tác xóa không được hoàn tác.</p>`;
+      if (result.historySaveError) output.innerHTML += `<p class="errorbox">Không lưu được báo cáo cuối: ${esc(result.historySaveError)}. Lịch sử có thể ghi nhận chưa kết thúc; hãy giữ kết quả hiện tại để đối chiếu.</p>`;
+      if (!result.canceled) await refreshBackupList();
+    } catch (error) { if (contextMatches() && request === generation) output.textContent = `${error.message} Hãy xem trước lại.`; }
+    finally {
+      finished = true; clearTimeout(timer);
+      if (retentionTaskId === taskId) retentionTaskId = null;
+      stopButton.hidden = true; stopButton.disabled = true;
+      busy = false; button.disabled = false;
+      saveButton.disabled = !policyLoaded;
+      clearButton.disabled = !policyLoaded || !hasSavedPolicy;
+      inputs.forEach(input => { input.disabled = false; });
+    }
+  });
+  editor.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void preview(); }
+  });
+  inputs[0].focus();
+}
+
+function editBackupAnnotations() {
+  const current = app.backups.find(entry => entry.id === app.selectedBackupId);
+  if (!current) return;
+  const profileId = app.connection?.id;
+  const database = app.database;
+  const contextMatches = () => app.connection?.id === profileId && app.database === database;
+  modal(`<section id="backupAnnotationEditor"><h2>Ghi chú và ghim backup</h2><p>${esc(current.name)}</p>
+    <label for="backupNoteInput">Ghi chú (tối đa 2.000 ký tự)</label>
+    <textarea id="backupNoteInput" rows="5" maxlength="2000">${esc(current.note || '')}</textarea>
+    <label><input id="backupPinnedInput" type="checkbox" ${current.pinned ? 'checked' : ''}> Ghim bản sao lưu</label>
+    <p class="hint">Bản ghim được bảo vệ khỏi thao tác xóa trong SqlPro. Muốn xóa, hãy bỏ ghim trước. Ghim và ghi chú được giữ khi sao chép sang database khác.</p>
+    <p id="backupAnnotationStatus" role="status" aria-live="polite"></p>
+    <div class="actions"><button data-click="close-modal">Hủy</button><button id="saveBackupAnnotations" class="primary">Lưu (Ctrl+Enter)</button></div></section>`);
+  const note = $('#backupNoteInput');
+  const pinned = $('#backupPinnedInput');
+  const status = $('#backupAnnotationStatus');
+  const button = $('#saveBackupAnnotations');
+  const editor = $('#backupAnnotationEditor');
+  let saving = false;
+  const save = async () => {
+    if (saving) return;
+    if (!contextMatches()) { status.textContent = 'Kết nối hoặc database đã thay đổi. Hãy mở lại ghi chú.'; return; }
+    saving = true;
+    button.disabled = note.disabled = pinned.disabled = true;
+    status.textContent = 'Đang lưu…';
+    try {
+      const result = await call(desktop.db.updateBackupAnnotations({ profileId, database, id: current.id,
+        patch: { note: note.value, pinned: pinned.checked } }));
+      if (!contextMatches() || $('#backupAnnotationStatus') !== status) return;
+      app.backups = app.backups.map(entry => entry.id === current.id ? { ...entry, ...result, annotationError: undefined } : entry);
+      closeModal();
+      if (mode === 'backups') {
+        const scrollTop = $('.backup-manager-table')?.scrollTop || 0;
+        renderBackupsView();
+        const table = $('.backup-manager-table');
+        if (table) table.scrollTop = scrollTop;
+        const row = [...document.querySelectorAll('[data-backup-row]')].find(element => element.dataset.backupRow === current.id);
+        row?.focus({ preventScroll: true });
+      }
+      toast('Đã lưu ghi chú và trạng thái ghim.');
+    } catch (error) {
+      if ($('#backupAnnotationStatus') === status) status.textContent = error.message;
+    } finally {
+      saving = false;
+      button.disabled = note.disabled = pinned.disabled = false;
+    }
+  };
+  button.addEventListener('click', save);
+  editor.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void save(); }
+  });
+  note.focus();
+}
+
 async function runBackupManagerAction(action) {
+  if (action === 'retention-history') return showBackupRetentionHistory();
+  if (action === 'retention-preview') return previewBackupRetention();
+  if (action === 'annotations') return editBackupAnnotations();
+  if (action === 'trial-recovery') {
+    const profileId = app.connection?.id;
+    modal('<h2>Database phục hồi thử cần kiểm tra</h2><p id="trialRecoveryLoading" role="status">Đang đọc nhật ký…</p><div class="actions"><button data-click="close-modal">Đóng</button></div>');
+    const loading = $('#trialRecoveryLoading');
+    let records;
+    try { records = await call(desktop.db.listTrialRecovery(profileId)); }
+    catch (error) { if ($('#trialRecoveryLoading') === loading) loading.textContent = error.message; return; }
+    if (app.connection?.id !== profileId || $('#trialRecoveryLoading') !== loading) return;
+    modal(`<div class="modal-card"><div class="modal-header"><h3>Database phục hồi thử cần kiểm tra (${records.length})</h3><button class="close-btn" data-click="close-modal" aria-label="Đóng">✕</button></div>
+      <div class="modal-body"><p>Nhật ký cục bộ ghi trước khi tạo database. Mỗi lần dọn sẽ kiểm tra đúng đích và marker sở hữu. Database thiếu marker cần được kiểm tra thủ công.</p>
+      ${records.map(record => `<p><strong>${esc(record.database)}</strong><br>${esc(record.startedAt)}<br><button data-trial-cleanup="${esc(record.id)}" ${!record.targetMatches || connectionIsReadOnly() ? 'disabled' : ''}>Kiểm tra và dọn</button> ${record.targetMatches ? '' : 'Đích kết nối đã thay đổi'}</p>`).join('') || '<p>Không có nhật ký database thử còn sót trên kết nối này.</p>'}
+      <p id="trialRecoveryStatus" role="status" aria-live="polite"></p></div></div>`);
+    const dialog = $('#modal');
+    const status = $('#trialRecoveryStatus');
+    dialog.querySelectorAll('[data-trial-cleanup]').forEach(button => button.addEventListener('click', async () => {
+      if (app.connection?.id !== profileId) return;
+      button.disabled = true;
+      status.textContent = 'Đang kiểm tra…';
+      try {
+        const result = await call(desktop.db.cleanupTrialRecovery({ profileId, id: button.dataset.trialCleanup }));
+        if ($('#trialRecoveryStatus') !== status || app.connection?.id !== profileId) return;
+        status.textContent = result.canceled ? 'Đã hủy.' : 'Đã xác nhận database tạm được dọn.';
+        if (!result.canceled) { button.textContent = 'Đã dọn'; return; }
+      } catch (error) { if ($('#trialRecoveryStatus') === status) status.textContent = error.message; }
+      button.disabled = false;
+    }));
+    return;
+  }
   if(action==='cancel-trial'){
     const output=$('#backupTrialReport');
     if(output?.dataset.taskId){await call(desktop.db.cancelTask(output.dataset.profileId,output.dataset.taskId));
@@ -3886,8 +4209,8 @@ async function runBackupManagerAction(action) {
       if(result.canceled){output.textContent='Đã hủy phục hồi thử.';return;}
       const report=result.report;
       const statuses={verified:'Đã đối chiếu thành công',unverified:'Chưa đủ điều kiện xác minh',failed:'Thất bại',cancelled:'Đã hủy',timeout:'Vượt thời gian cho phép'};
-      const cleanups={removed:'Đã xóa', 'not-created':'Chưa tạo', 'manual-required':'Cần dọn thủ công'};
-      output.innerHTML=`<p>Kết quả: ${esc(statuses[report.status] || report.status)} · Dọn database tạm: ${esc(cleanups[report.cleanup] || report.cleanup)}</p>${report.error?`<p>${esc(report.error)}</p>`:''}${report.cleanup!=='removed'&&report.cleanup!=='not-created'?`<p>Database cần kiểm tra: <strong>${esc(report.database)}</strong> · ${esc(report.cleanupError || '')}</p>`:''}${report.reportSaveError?`<p>Không lưu được báo cáo: ${esc(report.reportSaveError)}</p>`:''}<p class="backup-checksum">SHA-256: ${esc(report.checksum || 'Chưa xác định')}</p>`;
+      const cleanups={removed:'Đã xóa', 'not-created':'Chưa tạo', 'manual-required':'Cần dọn thủ công', 'check-required':'Cần kiểm tra nhật ký database thử'};
+      output.innerHTML=`<p>Kết quả: ${esc(statuses[report.status] || report.status)} · Dọn database tạm: ${esc(cleanups[report.cleanup] || report.cleanup)}</p>${report.error?`<p>${esc(report.error)}</p>`:''}${report.cleanup!=='removed'&&report.cleanup!=='not-created'?`<p>Database cần kiểm tra: <strong>${esc(report.database)}</strong> · ${esc(report.cleanupError || '')}</p>`:''}${report.journalError?`<p>Không dọn được nhật ký: ${esc(report.journalError)}. Kiểm tra mục Database thử còn sót.</p>`:''}${report.reportSaveError?`<p>Không lưu được báo cáo: ${esc(report.reportSaveError)}</p>`:''}<p class="backup-checksum">SHA-256: ${esc(report.checksum || 'Chưa xác định')}</p>`;
     }catch(error){if($('#backupTrialReport')===output)output.textContent=error.message;}
     finally{output.dataset.loading='false';}
     return;
@@ -3978,6 +4301,9 @@ async function runBackupManagerAction(action) {
   if (action === 'rename' && app.selectedBackupId) {
     const current = app.backups.find((entry) => entry.id === app.selectedBackupId);
     if (!current) return;
+    const profileId = app.connection?.id || null;
+    const database = app.database;
+    const id = current.id;
     modal(`<h2>Đổi tên bản sao lưu</h2>
       <label>Tên hiển thị mới</label>
       <input id="renameBackupInput" value="${esc(current.name)}" maxlength="120" autofocus>
@@ -3986,22 +4312,30 @@ async function runBackupManagerAction(action) {
         <button data-click="close-modal">Hủy</button>
         <button class="primary" id="confirmRenameBackupBtn">Đổi tên</button>
       </div>`);
-    $('#confirmRenameBackupBtn')?.addEventListener('click', async () => {
-      const name = $('#renameBackupInput')?.value.trim();
+    const input = $('#renameBackupInput');
+    const button = $('#confirmRenameBackupBtn');
+    const matches = () => $('#renameBackupInput') === input && app.connection?.id === profileId && app.database === database;
+    let saving = false;
+    button?.addEventListener('click', async () => {
+      if (saving) return;
+      if (!matches()) return toast('Kết nối hoặc database đã thay đổi. Hãy mở lại hộp thoại.', 'error');
+      const name = input?.value.trim();
       if (!name) return toast('Vui lòng nhập tên bản sao lưu.', 'error');
+      saving = true; button.disabled = true;
       try {
         await call(desktop.db.renameBackup({
-          profileId: app.connection?.id || null,
-          database: app.database,
-          id: app.selectedBackupId,
+          profileId,
+          database,
+          id,
           name
         }));
+        if (!matches()) return;
         closeModal();
         toast('Đã đổi tên bản sao lưu.');
         await refreshBackupList();
       } catch (error) {
-        toast(error.message, 'error');
-      }
+        if (matches()) toast(error.message, 'error');
+      } finally { saving = false; button.disabled = false; }
     });
     return;
   }
@@ -4042,14 +4376,19 @@ async function runBackupManagerAction(action) {
   }
   if (action === 'delete' && app.selectedBackupId) {
     const id = app.selectedBackupId;
+    const profileId = app.connection?.id || null;
+    const database = app.database;
+    const contextMatches = () => app.connection?.id === profileId && app.database === database;
     const confirmed = await confirmAction('Xóa bản sao lưu?', `Tệp backup ${id} sẽ bị xóa khỏi máy.`, 'Xóa');
     if (!confirmed) return;
+    if (!contextMatches()) return toast('Kết nối hoặc database đã thay đổi. Hãy chọn lại bản backup.', 'error');
     try {
       await call(desktop.db.deleteBackup({
-        profileId: app.connection?.id || null,
-        database: app.database,
+        profileId,
+        database,
         id
       }));
+      if (!contextMatches()) return;
       app.selectedBackupId = null;
       await refreshBackupList();
       toast('Đã xóa bản sao lưu.');

@@ -51,6 +51,33 @@ test('trial refuses to drop a database with mismatched ownership marker',async()
   }finally{await fs.rm(dir,{recursive:true,force:true});}
 });
 
+test('trial persists ownership before CREATE and retains ambiguous create failures for recovery', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-trial-journal-order-'));
+  const filePath = path.join(dir, 'backup.sql');
+  await fs.writeFile(filePath, 'CREATE TABLE `t` (`id` int) ENGINE=InnoDB;');
+  try {
+    for (const scenario of ['journal-failure', 'ambiguous-create', 'success']) {
+      let saved, removed = false, commands = 0;
+      const journal = {
+        prepare(record) { if (scenario === 'journal-failure') throw new Error('disk full'); saved = record; return 'fixture-id'; },
+        remove(id) { assert.equal(id, 'fixture-id'); removed = true; }
+      };
+      const session = { profile: {}, scanRestoreInventoryInWorker: async () => ({}),
+        async raw(sql) {
+          commands++;
+          assert.ok(saved, 'journal must exist before server mutation');
+          if (scenario === 'ambiguous-create') throw new Error('connection lost after send');
+          return { rows: [{ token: saved.token }] };
+        }, restoreDatabase: async () => ({ verification: { status: 'verified' } }) };
+      const report = await runRestoreTrial({ session, filePath, journal });
+      assert.equal(removed, scenario === 'success');
+      if (scenario === 'journal-failure') assert.equal(commands, 0);
+      if (scenario === 'ambiguous-create') assert.equal(report.recoveryId, 'fixture-id');
+      assert.equal(JSON.stringify(report).includes(saved?.token || 'no-token-sentinel'), false);
+    }
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
 test('cancelling before work starts creates no database and returns a cancelled report',async()=>{
   let commands=0;
   const session={profile:{},raw:async()=>{commands++;},cancelTask:()=>false};

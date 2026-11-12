@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }), readOnlyProfiles = [], productionProfiles = [] } = {}) {
+function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }), readOnlyProfiles = [], productionProfiles = [], trialRecovery, backupCatalog = {}, retentionStore, retentionApply, onConnect, retentionHistory = { read: () => [], begin: () => 'history-fixture', finish() {} } } = {}) {
   const handlers = new Map(), sessions = [];
   let chooseFile = async () => ({ filePath: '/review/export.json' });
   let chooseOpen = async () => ({ canceled: true, filePaths: [] });
@@ -15,7 +15,7 @@ function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }
   let finish;
   class Session {
     constructor(profile) { this.profile = profile; this.canceled = []; sessions.push(this); }
-    async connect() { this.connection = {}; }
+    async connect() { this.connection = {}; onConnect?.(this); }
     async close() { this.dead = true; }
     async listDatabases() { return ['demo']; }
     async useDatabase() {}
@@ -50,13 +50,20 @@ function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }
         normalizeFileFormat: (format) => (['csv', 'tsv', 'json'].includes(format) ? format : 'csv')
       };
       if (id === './store.cjs') return { getWithSecrets: (id) => ({ id, ssh: {}, readOnly: readOnlyProfiles.includes(id), environment:productionProfiles.includes(id)?'production':'local' }), resetLocalData: reset };
+      if (id === './restore-trial-journal.cjs' && trialRecovery) return {
+        ...require(path.join(root, id)), createTrialJournal: () => trialRecovery.journal,
+        cleanupTrialDatabase: trialRecovery.cleanup
+      };
       if (id === './sync.cjs') return sync;
       if (id === './navicat.cjs') return {};
       if (id === './backup-file.cjs') return { saveBackupFile: (_file, run) => run(async () => {}) };
-      if (id === './backup-catalog.cjs') return { backupDirectory: () => '/review/backups', backupName: () => 'test.sql' };
+      if (id === './backup-catalog.cjs') return { backupDirectory: () => '/review/backups', backupName: () => 'test.sql', ...backupCatalog };
+      if (id === './backup-retention-store.cjs' && retentionStore) return { createRetentionStore: () => retentionStore };
+      if (id === './backup-retention-apply.cjs' && retentionApply) return { BackupRetentionApply: class { constructor() { return retentionApply; } } };
+      if (id === './backup-retention-history.cjs') return { createRetentionHistory: () => retentionHistory };
       if (id === 'node:fs') return { ...fs, mkdirSync() {}, writeFileSync() {}, renameSync() {}, promises: { ...fs.promises, mkdir: async () => {} } };
       return require(id.startsWith('./') ? path.join(root, id) : id);
-    }, __dirname: root, process, Buffer, console, setTimeout, clearTimeout
+    }, __dirname: root, process, Buffer, console, setTimeout, clearTimeout, AbortController
   });
   return {
     call: (name, payload, options) => handlers.get(name)({ sender: null }, payload, options),
@@ -68,6 +75,176 @@ function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }
   };
 }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+test('trial rechecks read-only policy after asynchronous connection opens', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlpro-review-trial-policy-'));
+  const file = path.join(directory, 'backup.sql');
+  fs.writeFileSync(file, 'SELECT 1;');
+  try {
+    const readOnlyProfiles = [];
+    const r = setup({ readOnlyProfiles, onConnect: () => { readOnlyProfiles.push('p1'); }, backupCatalog: { resolveBackup: async () => file } });
+    r.productionDialog(async () => ({ response: 1 }));
+    const result = await r.call('db:trial-backup', { profileId: 'p1', database: 'demo', id: 'fixture', taskId: 'trial-policy' });
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, 'CONNECTION_READ_ONLY');
+    assert.equal(r.sessions.length, 1);
+    assert.equal(r.sessions[0].dead, true);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('retention history starts before apply, preserves results when report save fails and marks old running records incomplete', async () => {
+  const events = [];
+  const id = '20260101000000-aaaaaaaa.sql';
+  const record = { id: 'history-id', state: 'running' };
+  const r = setup({ retentionHistory: {
+    read: () => [record],
+    begin: () => { events.push('begin'); return record.id; },
+    finish: () => { events.push('finish'); throw new Error('report disk full'); }
+  }, retentionApply: {
+    consume: () => ({ database: 'demo', plan: { policy: { maxCount: 1 }, removeBytes: 9, rows: [{ id, name: 'Old', action: 'remove' }] } }),
+    apply: async () => { events.push('apply'); return { deleted: [id], remaining: [], failed: [], reclaimedBytes: 9 }; }
+  } });
+  r.productionDialog(async () => ({ response: 1 }));
+  const result = (await r.call('db:apply-backup-retention', { profileId: 'p1', database: 'demo', token: 'token', taskId: 'history-task' })).data;
+  assert.deepEqual(events, ['begin', 'apply', 'finish']);
+  assert.equal(result.deleted[0], id);
+  assert.equal(result.historySaveError, 'report disk full');
+  const records = (await r.call('db:backup-retention-history', { profileId: 'p1', database: 'demo' })).data;
+  assert.equal(records[0].state, 'incomplete');
+  assert.equal(record.state, 'running', 'display state must not rewrite stored evidence');
+});
+
+test('history write failure prevents cleanup from starting', async () => {
+  let applied = false;
+  const r = setup({ retentionHistory: { begin: () => { throw new Error('disk full'); } }, retentionApply: {
+    consume: () => ({ database: 'demo', plan: { rows: [{ id: 'old', action: 'remove' }] } }),
+    apply: async () => { applied = true; }
+  } });
+  r.productionDialog(async () => ({ response: 1 }));
+  assert.equal((await r.call('db:apply-backup-retention', { profileId: 'p1', database: 'demo', taskId: 'history-task', token: 'token' })).ok, false);
+  assert.equal(applied, false);
+});
+
+test('retention apply requires native confirmation, consumes before confirmation and releases transfer on failure', async () => {
+  let used = false, applied = 0;
+  const entry = { database: 'demo', plan: { removeBytes: 9, rows: [{ id: 'old', name: 'Old backup', action: 'remove' }] } };
+  const r = setup({ retentionApply: {
+    consume: (profileId, database, token) => {
+      assert.equal(profileId, 'p1'); assert.equal(database, 'demo'); assert.equal(token, 'issued');
+      if (used) throw new Error('consumed'); used = true; return entry;
+    },
+    apply: async () => { applied++; throw new Error('fixture changed'); }
+  } });
+  const payload = { profileId: 'p1', database: 'demo', token: 'issued', taskId: 'retention-fixture', ids: ['forged'] };
+  assert.equal((await r.call('db:apply-backup-retention', payload)).data.canceled, true);
+  assert.equal(applied, 0);
+  assert.equal((await r.call('db:apply-backup-retention', payload)).ok, false);
+  used = false;
+  r.productionDialog(async (_window, options) => {
+    assert.equal(options.defaultId, 0); assert.match(options.detail, /Old backup/);
+    return { response: 1 };
+  });
+  assert.equal((await r.call('db:apply-backup-retention', payload)).ok, false);
+  assert.equal(applied, 1);
+  used = false;
+  assert.equal((await r.call('db:apply-backup-retention', payload)).ok, false);
+  assert.equal(applied, 2, 'prior failure must release transfer slot');
+  assert.equal(r.sessions.length, 0, 'local cleanup must not commit or open a DB session');
+});
+
+test('retention status and cancel are scoped and abort only the cleanup stream', async () => {
+  let finish, options;
+  const r = setup({ retentionApply: {
+    consume: () => ({ database: 'demo', plan: { removeBytes: 9, rows: [{ id: 'old', name: 'Old', action: 'remove' }] } }),
+    apply: async (_entry, control) => {
+      options = control;
+      control.onProgress({ phase: 'hashing', bytesRead: 64, totalBytes: 128, deleted: 0, total: 1, reclaimedBytes: 0 });
+      return new Promise(resolve => { finish = resolve; });
+    }
+  } });
+  r.productionDialog(async () => ({ response: 1 }));
+  const payload = { profileId: 'p1', database: 'demo', token: 'issued', taskId: 'cleanup-task' };
+  const pending = r.call('db:apply-backup-retention', payload);
+  await tick();
+  assert.equal((await r.call('db:backup-retention-status', { ...payload, taskId: 'other' })).data.running, false);
+  assert.equal((await r.call('db:backup-retention-status', { ...payload, database: 'other' })).data.running, false);
+  const status = (await r.call('db:backup-retention-status', payload)).data;
+  assert.equal(status.phase, 'hashing'); assert.equal(status.bytesRead, 64);
+  assert.equal((await r.call('db:cancel-task', { ...payload, profileId: 'other' })).data.canceled, false);
+  assert.equal(options.signal.aborted, false);
+  assert.equal((await r.call('db:cancel-task', payload)).data.canceled, true);
+  assert.equal(options.signal.aborted, true); assert.equal(options.isCanceled(), true);
+  assert.equal((await r.call('db:backup-retention-status', payload)).data.stopping, true);
+  finish({ stopped: true, deleted: [], remaining: ['old'], failed: [], reclaimedBytes: 0 });
+  await pending;
+  assert.equal((await r.call('db:backup-retention-status', payload)).data.running, false);
+  assert.equal(r.sessions.length, 0);
+});
+
+test('retention policy IPC uses captured profile and database for local settings', async () => {
+  const calls = [];
+  const r = setup({ retentionStore: {
+    read: (...args) => { calls.push(['read', ...args]); return { policy: null }; },
+    save: (...args) => { calls.push(['save', ...args]); return { policy: args[2] }; },
+    clear: (...args) => { calls.push(['clear', ...args]); return { policy: null }; }
+  } });
+  for (const operation of ['get', 'save', 'clear']) {
+    const result = await r.call(`db:${operation}-backup-retention-policy`, { profileId: 'p1', database: 'demo', policy: { maxCount: 4 } });
+    assert.equal(result.ok, true);
+    assert.equal(calls.at(-1)[1], 'p1');
+    assert.equal(calls.at(-1)[2], 'demo');
+  }
+  assert.equal((await r.call('db:save-backup-retention-policy', { profileId: 'p1', database: '' })).ok, false);
+  assert.equal(calls.length, 3);
+});
+
+test('retention preview reads the scoped catalog, ignores renderer inventory and performs no writes', async () => {
+  const catalogCalls = [];
+  const r = setup({ retentionApply: { preview: async (profileId, database, policy) => {
+    catalogCalls.push([profileId, database]);
+    return require('../electron/backup-retention.cjs').planBackupRetention([
+      { id: 'only', name: 'Keep me', bytes: 100, createdAt: '2026-01-01T00:00:00Z', verification: { fileWritten: true, checksum: 'verified' } }
+    ], policy);
+  } } });
+  const result = await r.call('db:preview-backup-retention', { profileId: 'p1', database: 'demo',
+    policy: { maxCount: 1 }, entries: [{ id: 'forged' }] });
+  assert.equal(result.ok, true);
+  assert.equal(result.data.totalCount, 1);
+  assert.equal(result.data.rows[0].id, 'only');
+  assert.equal(result.data.removeCount, 0);
+  assert.deepEqual(catalogCalls[0], ['p1', 'demo']);
+  assert.equal((await r.call('db:preview-backup-retention', { profileId: 'p1', database: '', policy: { maxCount: 1 } })).ok, false);
+});
+
+test('trial recovery requires policy and confirmation, and closes only its own session', async () => {
+  const { targetIdentity } = require('../electron/restore-trial-journal.cjs');
+  const profile = { id: 'p1', ssh: {}, readOnly: false, environment: 'local' };
+  const record = { id: 'a'.repeat(32), profileId: 'p1', database: 'sqlpro_trial_fixture', target: targetIdentity(profile) };
+  let cleaned = 0, removed = 0;
+  const trialRecovery = {
+    journal: { read: () => record, remove: () => { removed++; } },
+    cleanup: async (session, value, actual) => {
+      assert.equal(value, record); assert.equal(actual.id, 'p1');
+      assert.equal(session.profile.id, 'p1'); cleaned++;
+      return { cleanup: 'removed' };
+    }
+  };
+  const denied = setup({ readOnlyProfiles: ['p1'], trialRecovery });
+  assert.equal((await denied.call('db:cleanup-trial-recovery', { profileId: 'p1', id: record.id })).ok, false);
+  assert.equal(denied.sessions.length, 0);
+  const r = setup({ trialRecovery });
+  assert.equal((await r.call('db:cleanup-trial-recovery', { profileId: 'p1', id: record.id })).data.canceled, true);
+  assert.equal(cleaned, 0);
+  await r.call('db:connect', 'p1');
+  r.sessions[0].inTransaction = true;
+  r.productionDialog(async () => ({ response: 1 }));
+  assert.equal((await r.call('db:cleanup-trial-recovery', { profileId: 'p2', id: record.id })).ok, false);
+  assert.equal((await r.call('db:cleanup-trial-recovery', { profileId: 'p1', id: record.id })).data.cleanup, 'removed');
+  assert.equal(cleaned, 1); assert.equal(removed, 1);
+  assert.equal(r.sessions[0].dead, undefined);
+  assert.equal(r.sessions[0].inTransaction, true);
+  assert.equal(r.sessions[1].dead, true);
+});
 const waitFor = async (predicate) => {
   for (let attempt = 0; attempt < 200; attempt += 1) {
     if (predicate()) return;

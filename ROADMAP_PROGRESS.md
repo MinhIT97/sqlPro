@@ -2,6 +2,86 @@
 
 Cập nhật: 12/11/2026. Đối chiếu `DATABASE_PRODUCT_ROADMAP.md`. Đợt 1 được chốt trong commit phát triển local; chưa phát hành. Xem commit bằng git log và báo cáo review bên dưới.
 
+## Review và chốt đợt 2
+
+Đã review toàn bộ thay đổi so với `0fa0ab7`, sửa 9 nhóm lỗi về context rename/delete, va chạm khi copy, read-only sau trial connect, preview chồng nhau/quota metadata, recovery modal đến muộn, tính nhất quán history, controls khi load policy chậm và kiểu ngày. Chi tiết: [CODE_REVIEW_BATCH_2.md](CODE_REVIEW_BATCH_2.md). Check qua 59/59 nhóm; server syntax/diff qua. Electron/website/server smoke và MySQL thực chưa được kiểm chứng lại trong lượt review do duyệt quyền ngoài sandbox lỗi token. Chưa phát hành.
+
+Đã tạo commit local đợt 2 gồm 31 tệp, chưa push. Lượt commit trước bị chặn bởi `.git/index.lock` chỉ đọc và lỗi refresh token; lượt tiếp theo đã thành công. Chưa chạy lại các kiểm tra ngoài sandbox nêu trên.
+
+## 12/11 — Lịch sử kết quả dọn backup
+
+- Backups có **Lịch sử dọn backup…** đọc theo profile/database, xem số bản/byte SQL đã ghi nhận xóa, các bản chưa xóa, policy và mã lỗi. Dùng details/summary hỗ trợ bàn phím; escape mọi nội dung, chặn phản hồi cũ khi đổi database/hộp thoại. Không cần kết nối DB để đọc báo cáo.
+- `backup-retention-history.cjs` ghi record trước apply và kết quả cuối sau khi hoàn tất/dừng/lỗi. Nếu không ghi được record đầu thì chưa dọn; lỗi ghi kết quả cuối vẫn trả kết quả thật cùng cảnh báo `historySaveError`, giữ record chưa kết thúc để kiểm tra. Native Cancel không tạo lượt lịch sử vì chưa bắt đầu tác vụ.
+- Lưu version 1 atomic 0600, tối đa 50 record/1 MiB theo scope, ưu tiên giữ record chưa kết thúc và bỏ report hoàn tất cũ nhất. Đầy 50 record chưa kết thúc thì báo lỗi, không tự xóa bằng chứng. Tệp hỏng/symlink/version lạ bị từ chối, không tự ghi đè. Chỉ lưu ID backup, giới hạn, timestamps, số byte và error code; không lưu SQL, token, raw error message hoặc secret.
+- Record còn running nhưng không trùng tác vụ main đang chạy được hiển thị **Chưa xác nhận kết thúc**, kèm danh sách dự kiến và cảnh báo số đã xóa có thể chưa được cập nhật. Không suy thành thành công hoặc tự tiếp tục xóa sau restart. Đây là lịch sử local phục vụ đối chiếu, không phải log chống sửa đổi hoặc recovery journal bảo đảm từng unlink.
+- `npm run check` qua 58/58 nhóm, server syntax và diff check qua. Test có reopen/scope/quota, giữ bằng chứng chưa xong, lỗi publish, corrupt metadata, code-only errors, fail-before-apply, báo cáo cuối lỗi vẫn giữ kết quả, render escape/stale context. Electron smoke thêm mở chi tiết bằng Enter và layout; **chưa thực thi** vì automatic approval review tiếp tục báo refresh token bị thu hồi. Website/server smoke ngoài sandbox chưa chạy lại; cần đăng xuất/đăng nhập để phục hồi kiểm chứng.
+- Giới hạn: chưa checkpoint mỗi unlink, chưa kiểm chứng power loss/Windows và chưa có export báo cáo. Trạng thái incomplete cần đối chiếu catalog thủ công; không đủ căn cứ khẳng định chính xác số đã xóa nếu ứng dụng crash trước khi lưu report cuối. G3.4 và audit chung G8.1 còn một phần.
+
+## 12/11 — Tiến độ và dừng tác vụ retention
+
+- Luồng dọn có taskId riêng và endpoint status theo đúng profile/database/taskId. Renderer hỏi tiến độ mỗi 500 ms, mỗi lần chỉ có một request; dừng polling khi task kết thúc hoặc context/hộp thoại thay đổi. Không đưa token hoặc đường dẫn tệp vào status.
+- UI hiển thị giai đoạn kiểm tra catalog, byte đọc khi hash bản giữ lại, số bản đã xóa/tổng số và byte SQL đã dọn. **Dừng dọn backup** chỉ bật khi main báo tác vụ đang chạy; lúc xác nhận native có thể chọn Hủy ngay trên dialog.
+- Cancel abort stream hash bằng AbortSignal và kiểm tra cờ giữa các tệp/các lượt snapshot, đồng thời giữ transfer slot tới khi cleanup trả kết quả. Nếu SQL vừa bị xóa thì vẫn dọn các sidecar tương ứng trước khi dừng ở tệp kế tiếp; báo riêng metadata lỗi. Đã xóa không được rollback; báo `stopped` và danh sách chưa xử lý kể cả khi hủy trước lần xóa đầu tiên. Thời gian chờ lấy khóa hoặc một lệnh filesystem đang thực hiện vẫn là hủy hợp tác.
+- `npm run check` qua 57/57 nhóm; server syntax và diff check qua. Test mới có abort trong lúc đọc hash 4 MiB trước xóa, dừng giữa tệp, status/cancel sai scope, không tác động session SQL và renderer ngừng polling sau thay hộp thoại. Electron smoke thêm tiến độ + Enter trên nút Dừng, **chưa thực thi** vì automatic approval review tiếp tục báo refresh token bị thu hồi. Website/server smoke ngoài sandbox chưa chạy lại; cần đăng xuất/đăng nhập để phục hồi kiểm chứng.
+- G3.4 chưa hoàn tất: chưa tự dọn sau backup mới/scheduler, chưa benchmark lớn và chưa kiểm chứng crash/Windows file locking. Đóng hộp thoại ngừng xem tiến độ nhưng không tự hủy thao tác đang chạy; cần dùng Dừng trước khi đóng nếu muốn ngừng.
+
+## 12/11 — Áp dụng retention thủ công sau khi xem trước
+
+- Công cụ có **Dọn các bản đã xem trước…**: xác nhận native mặc định Hủy, liệt kê tên/ID/database/dung lượng SQL và cảnh báo không thể hoàn tác. Main chỉ nhận token, không nhận danh sách xóa từ renderer. Token một lần, TTL 2 phút, tối đa 8 scope đang chờ; preview mới cùng scope vô hiệu preview cũ. Bản kế hoạch giữ snapshot riêng, không sửa được qua response.
+- `backup-retention-apply.cjs` chụp file identity của SQL/manifest/name/trial và catalog hai lần khi preview. Apply giữ khóa metadata theo thứ tự trên toàn catalog, kiểm tra snapshot và hash lại bản `latest-verified` được giữ, rồi so identity các tệp còn lại trước từng lần xóa. Ghim/đổi tên/sửa SQL/metadata hoặc thêm/xóa backup sau preview yêu cầu xem trước lại. Chỉ bản được planner đánh dấu remove mới là candidate; catalog tối đa 2.000 bản, mỗi lần áp dụng tối đa 100 bản, xóa từ cũ nhất.
+- Main giữ transfer slot suốt apply, không mở/commit phiên DB; từ chối khi transfer hoặc scan đang dùng backup. Scan mới bị chặn trong lúc dọn; verify/copy/export dùng cùng khóa với metadata/delete để tránh xóa giữa lúc đọc. Hủy transfer retention không gọi cancelTask của SQL Editor. Hủy giữa các tệp báo phần đã xóa, không hứa hoàn tác.
+- Báo cáo trả ID đã xóa, byte SQL, lỗi từng bản và danh sách chưa xóa; dừng ở lỗi đầu tiên. Lỗi sidecar ghi rõ SQL đã xóa nhưng metadata có thể còn. Preview/edit/save policy vô hiệu hóa nút Dọn cũ; sau Hủy/lỗi/hoàn tất phải xem trước lại. Xóa chỉ tác động các tệp SQL/sidecar catalog trên máy này; chính sách và recovery journal riêng được giữ.
+- Check 57/57 nhóm và server syntax/diff check qua. Test filesystem thật trong thư mục tạm: apply thành công, replay/TTL/scope, pin/SQL/manifest/addition drift, hash anchor sai, lỗi unlink, lỗi metadata, hủy giữa tệp và response mutation. Test IPC: native Cancel, token consumed trước dialog, failure release và không mở DB session. Renderer VM: token payload, invalidation và Cancel. Electron/website/server smoke ngoài sandbox **chưa chạy**: automatic approval review tiếp tục từ chối thực thi do refresh token bị thu hồi; cần đăng xuất/đăng nhập lại. Không dùng smoke cũ làm bằng chứng cho thao tác xóa mới.
+- Giới hạn: đây là dọn thủ công, chưa tự dọn sau backup mới hoặc theo lịch. Chưa kiểm chứng kill/power loss ở mọi điểm và Windows file locking; xóa có thể để sidecar mồ côi nếu crash. Khóa bảo vệ thao tác trong cùng tiến trình SqlPro; không phải khóa độc quyền với phần mềm ngoài, vẫn còn cửa sổ giữa kiểm tra identity và unlink. Chưa benchmark catalog lớn; G3.4 chưa hoàn tất toàn tiêu chí.
+
+## 12/11 — Lưu chính sách retention theo database
+
+- Công cụ retention có **Lưu chính sách** và **Xóa chính sách đã lưu**. Mỗi profile/database giữ cấu hình riêng, mở lại nạp số bản/tuổi/dung lượng đã lưu; xóa cấu hình giữ nguyên mọi tệp backup. Chính sách chỉ dùng để điền giới hạn xem trước, chưa bật tự động dọn hay scheduler.
+- `backup-retention-store.cjs` lưu `retention-policy.json` version 1 trong thư mục catalog đã hash theo profile/database. Validate bằng policy dùng chung; ghi atomic 0600; tệp hỏng, symlink, quá 4 KiB hoặc version chưa hỗ trợ báo lỗi và giữ nguyên. Lỗi publish giữ cấu hình cũ, dọn tệp tạm. Thiếu tệp trả về chưa có chính sách, không tự ghi mặc định.
+- Renderer giữ profile/database và identity vùng hiển thị; nạp chậm không ghi đè draft đã sửa. Lưu lỗi giữ nội dung nhập, chống submit trùng và kiểm tra đầu vào trước khi disable controls. Nạp cấu hình lỗi vẫn cho preview nhưng khóa ghi/xóa cấu hình để tránh ghi đè bằng giá trị mặc định. Giới hạn byte lưu chính xác, hiển thị MiB có phần lẻ khi cần.
+- `npm run check` qua 56/56 nhóm; server syntax và diff check qua. Test repository có round-trip/restart, cách ly profile/database, clear không xóa backup, lỗi ghi và metadata hỏng; test IPC/renderer VM có target capture, draft và lỗi lưu. Electron smoke bổ sung lưu/mở lại/xóa cấu hình, nhưng **chưa chạy được**: automatic approval review tiếp tục báo refresh token bị thu hồi; lệnh không được thực thi. Website/server smoke ngoài sandbox cũng chưa chạy lại; cần đăng xuất/đăng nhập để phục hồi bước duyệt quyền. Không coi kết quả đợt cũ là kiểm chứng UI mới.
+- G3.4 vẫn còn execution plan bất biến, xác minh lại trước apply và tự dọn sau backup thành công; scheduler ở G3.3 chưa triển khai. Chính sách lưu cục bộ, chưa đồng bộ qua vault.
+
+## 12/11 — Xem trước retention backup
+
+- Backups có **Xem trước dọn backup…** theo số bản, tuổi (ngày) và tổng dung lượng SQL (MiB). Có thể bỏ trống từng giới hạn, phải nhập ít nhất một giới hạn nguyên dương; các giới hạn được xét đồng thời, ưu tiên đề xuất bản cũ nhất. Hiển thị số bản/dung lượng giữ và đề xuất dọn, lý do từng bản và giới hạn chưa đạt. Bảng giới hạn 500 dòng DOM, thống kê vẫn theo toàn catalog.
+- Module thuần `backup-retention.cjs` không ghi/xóa tệp. Main đọc catalog đúng profile/database, không tin danh sách từ renderer và từ chối xem trước khi có transfer. Bản ghim, đang dùng, mới nhất và bản mới nhất có fileWritten + checksum verified được giữ. Metadata lỗi, checksum mismatch, ngày không hợp lệ/tương lai hoặc dung lượng không hợp lệ được bảo vệ; thiếu bản thành công đã xác minh thì không đề xuất dọn. Tổng dung lượng chưa rõ được cảnh báo riêng.
+- Preview có context profile/database, generation khi sửa giới hạn và identity vùng hiển thị; phản hồi cũ không ghi đè hộp thoại hoặc chính sách mới. Hỗ trợ Ctrl+Enter, escape tên backup và lý do. Đây là công cụ đọc catalog, không xác minh lại hash ngay trong preview và không phải quyền cho phép xóa.
+- Unit/policy kiểm tra giới hạn, giữ bản bảo vệ, count/age/bytes, đồng hồ tương lai, metadata lỗi, thiếu bằng chứng, số vượt phạm vi chính xác và input bất biến. Test IPC xác nhận catalog do main đọc; renderer VM kiểm tra payload, escape và phản hồi stale. Electron smoke đã thêm kiểm tra tương tác/layout nhưng **chưa chạy được**: automatic approval review báo refresh token đã bị thu hồi, nên lệnh Electron/website/server test ngoài sandbox không được thực thi. Cần đăng xuất/đăng nhập lại để chạy kiểm chứng này; không dùng kết quả smoke đợt trước làm bằng chứng cho UI mới.
+- G3.4 còn một phần: chưa lưu chính sách, chưa tự dọn sau backup mới, chưa có execution token/snapshot để áp dụng an toàn hoặc scheduler. Chưa xóa tệp nào qua retention trong đợt này.
+- Kết quả thực thi được: `npm run check` 55/55 nhóm, server syntax và `git diff --check` qua. Đợt này không thay SQL/database, không chạy lại MySQL integration.
+
+## 12/11 — Ghi chú, ghim và bảo toàn metadata backup
+
+- Backups có **Ghi chú / Ghim**: ghi chú nhiều dòng tối đa 2.000 ký tự, ghim/bỏ ghim và lưu bằng Ctrl+Enter. Nội dung được escape khi hiển thị; lỗi lưu giữ nguyên bản nháp. Lưu thành công giữ selection/focus và vị trí cuộn bảng; phản hồi đến muộn không tác động hộp thoại/database mới.
+- Bản ghim không thể xóa qua catalog service, kể cả gọi IPC trực tiếp. Toolbar/menu vô hiệu hóa xóa, phải bỏ ghim trước. Tệp metadata hỏng báo lỗi và chặn xóa/ghi đè/sao chép để tránh mất trạng thái bảo vệ; giữ nguyên tệp để kiểm tra thủ công.
+- Module `backup-annotations.cjs` đọc metadata tên cũ `{name}` và ghi bản version 1 gồm name/note/pinned vào cùng `.name.json` (tối đa 16 KiB, ghi atomic 0600). Khóa theo đường dẫn tuần tự hóa đổi tên/ghi chú/ghim/xóa, không làm mất field khi chỉnh đồng thời. SQL/checksum/manifest không đổi khi sửa ghi chú.
+- Sao chép nội bộ sang database/kết nối khác giữ tên, ghi chú và ghim; ghi metadata trước khi công bố SQL. Lỗi ghi metadata hoặc công bố SQL không để lại backup chưa được ghim trong catalog. Báo cáo phục hồi thử không được chuyển thành bằng chứng đã kiểm tra trên máy chủ đích. Xuất tệp SQL vẫn chỉ xuất SQL, không đóng gói ghi chú.
+- Check 53/53 nhóm; Electron 52/52 có kiểm tra Ctrl+Enter, lỗi ghi, phản hồi stale, pin và XSS; website 14/14, server 17/17 và syntax qua. Test catalog bao gồm migration tên cũ, chỉnh đồng thời, chặn xóa bản ghim, giữ metadata khi copy, metadata hỏng, ENOSPC giả lập và cleanup khi công bố copy lỗi. Đợt này không thay SQL/database nên không chạy lại MySQL thực.
+- Đây là phần bổ sung G2.1 và nền cho G3.4. Chưa có retention tự động hoặc scheduler; ghim bảo vệ thao tác trong SqlPro, không ngăn xóa tệp từ bên ngoài. Các nhóm roadmap chưa đủ nghiệm thu vẫn giữ trạng thái chưa hoàn tất.
+
+## 12/11 — Nhật ký phục hồi thử sau khi ứng dụng bị tắt đột ngột
+
+- Ghi một record mã hóa có xác thực vào `restore-trial-journal/` trước CREATE DATABASE; file riêng 0600, ghi tạm/flush/rename. Record chứa schema, marker/token và fingerprint đích, không đưa marker/token vào renderer. Ghi nhật ký lỗi thì không tạo schema. Khi CREATE lỗi không rõ server đã thực hiện chưa, giữ nhật ký và báo cần kiểm tra.
+- Backups có nút **Database thử còn sót…** để đọc nhật ký của profile. Dọn dùng phiên riêng, xác nhận native mặc định Hủy, kiểm tra lại policy/profile/TTL và transfer slot; chỉ DROP sau khi marker/token khớp. Thiếu/sai marker giữ nguyên để kiểm tra thủ công. Schema đã không còn thì cho kết thúc record sau truy vấn xác nhận. Không tự quét/xóa database theo prefix hoặc tự dọn lúc khởi động.
+- Giữ nhật ký khi dọn lỗi hoặc kết quả CREATE mơ hồ; xóa record sau khi xác nhận cleanup. Mất khóa local không tạo khóa thay thế nếu còn journal mã hóa. Tệp journal hỏng được giữ lại và báo lỗi, không lặng lẽ bỏ qua. Đổi host/port/user/SSH/TLS chặn cleanup; đổi tên profile không đổi đích.
+- Kiểm chứng: check 53/53 nhóm; Electron 51/51 có Enter trên nút cleanup, chặn đích thay đổi và layout nhỏ; MySQL 8.4 thực 22/22 gồm mở lại journal, thiếu/sai marker và cleanup đúng sở hữu; website 14/14, server 17/17 và server syntax qua. Test IPC xác nhận chỉ đọc, Hủy và cleanup phiên riêng không tác động transaction SQL Editor. MySQL thử độc lập trên tmpfs, không dùng database ứng dụng thật.
+- Giới hạn: mới mô phỏng mở lại nhật ký giữa các phiên và lỗi CREATE mơ hồ; chưa thử kill tiến trình Electron ở mọi điểm hoặc sự cố mất điện. Journal cục bộ không còn sau mất/xóa userData; không nhận diện trial được tạo trước tính năng này. Database tạo xong nhưng chưa có marker cần DBA kiểm tra thủ công. Chưa có quota đĩa/RAM server, hash toàn bộ nội dung, MariaDB hoặc installed-build smoke; G2 chưa được đánh dấu hoàn tất.
+
+## Phạm vi còn lại sau đợt này
+
+Roadmap có 51 đầu việc. G0–G2 còn baseline dữ liệu lớn/ma trận DB/bộ cài và phần hoàn thiện backup; chưa đủ căn cứ đếm tất cả là đã nghiệm thu. G3–G9 có **36 đầu việc chưa hoàn tất trong 7 nhóm**:
+
+| Nhóm | Đầu việc | Phạm vi |
+| --- | ---: | --- |
+| G3 | 6 | Phục hồi chọn đối tượng, lịch backup, retention, nén/mã hóa và bản sao ngoài máy |
+| G4 | 5 | Đo và tối ưu hiệu năng, dữ liệu lớn |
+| G5 | 6 | SQL Editor, filter, EXPLAIN và chẩn đoán; một số phần đã có |
+| G6 | 4 | So sánh schema, migration và kiểm tra drift |
+| G7 | 5 | So sánh dữ liệu và đồng bộ có preview |
+| G8 | 5 | Audit, tách module, UX, thử người dùng và tài liệu |
+| G9 | 5 | Recovery/sync, bảo mật, CI và kiểm chứng phát hành |
+
 ## Review và chốt đợt 1
 
 Đã rà soát, sửa các lỗi về validator trial SET/default function, schema cache khi confirm Production, query chen ngang, SQL preview bị cắt sớm, cancel/stat race, giới hạn byte copy thực và timeout cleanup. Chi tiết bằng chứng, kết quả test và các giới hạn còn lại ở `CODE_REVIEW_BATCH_1.md`. Check 52/52 nhóm, Electron 51/51, MySQL 8.4 thực 21/21, website 14/14 và server 17/17 đều qua trước khi chốt commit phát triển đợt 1. Cleanup trial hiện có timeout 15 giây từng lệnh marker/drop; các ghi chú chưa có cleanup timeout ở các đợt trước bên dưới là trạng thái lịch sử.

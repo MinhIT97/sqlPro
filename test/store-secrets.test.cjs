@@ -17,6 +17,8 @@ function setup() {
     require(id) {
       if (id === 'electron') return { app: { getPath: () => '/fixture' }, safeStorage };
       if (id === 'node:fs') return {
+        readdirSync(directory) { return [...files.keys()].filter(file => path.dirname(file) === directory).map(file => path.basename(file)); },
+        lstatSync(file) { return { isFile: () => true, size: Buffer.byteLength(files.get(file)) }; },
         readFileSync(file) {
           if (file === key && readError) { const error = readError; readError = null; throw error; }
           if (!files.has(file)) throw Object.assign(new Error('missing fixture'), { code: 'ENOENT' });
@@ -52,6 +54,15 @@ test('environment is preserved through save, legacy normalization and encrypted 
   }
   assert.equal(normalizeVault({ connections: [{ id: 'old', host: 'production.example' }] }).connections[0].environment, 'unclassified');
   assert.equal(normalizeVault({ connections: [{ id: 'bad', environment: '<script>' }] }).connections[0].environment, 'unclassified');
+});
+
+test('an encrypted trial journal prevents replacing a missing local key', () => {
+  const r = setup();
+  const sealed = r.store.seal('trial ownership fixture');
+  r.files.set(path.join('/fixture/restore-trial-journal', `${'a'.repeat(32)}.json`), JSON.stringify(sealed));
+  r.files.delete(r.key);
+  assert.throws(() => r.store.seal('new secret'), { code: 'LOCAL_KEY_MISSING' });
+  assert.equal(r.files.has(r.key), false);
 });
 
 test('read-only policy survives editing and sync; old profiles remain writable', () => {

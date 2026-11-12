@@ -19,11 +19,22 @@ const { ProductionApprovals, redactSql, parameterSummary } = require('./producti
 const productionApprovals = new ProductionApprovals();
 const { BackupInspection } = require('./backup-inspection.cjs');
 const { runRestoreTrial, createTrialControl } = require('./restore-trial.cjs');
+const { createTrialJournal, cleanupTrialDatabase, targetIdentity } = require('./restore-trial-journal.cjs');
+const { normalizeRetentionPolicy } = require('./backup-retention.cjs');
+const { withAnnotationLock } = require('./backup-annotations.cjs');
+const { createRetentionStore } = require('./backup-retention-store.cjs');
+const { createRetentionHistory } = require('./backup-retention-history.cjs');
+const { BackupRetentionApply } = require('./backup-retention-apply.cjs');
+let retentionApplyService;
+function retentionApply() {
+  if (!retentionApplyService) retentionApplyService = new BackupRetentionApply({ root: app.getPath('userData') });
+  return retentionApplyService;
+}
 const backupInspection = new BackupInspection({
   stat:(filePath)=>fs.promises.stat(filePath),
   scan:(options)=>new DatabaseSession({}).scanRestoreInventoryInWorker({...options,dropExisting:false})
 });
-const { backupDirectory, backupName, listBackups, resolveBackup, copyBackup, verifyBackup, renameBackup } = require('./backup-catalog.cjs');
+const { backupDirectory, backupName, listBackups, resolveBackup, copyBackup, verifyBackup, renameBackup, updateBackupAnnotations, deleteBackup } = require('./backup-catalog.cjs');
 
 const MAX_RENDERER_STATE_BYTES = 2 * 1024 * 1024;
 const MAX_IMPORT_BYTES = 20 * 1024 * 1024;
@@ -129,7 +140,8 @@ function transferLabel(operation) {
     backup: 'sao lưu',
     restore: 'phục hồi',
     import: 'nhập dữ liệu',
-    export: 'xuất dữ liệu'
+    export: 'xuất dữ liệu',
+    'backup-retention': 'dọn backup cục bộ'
   }[operation] || 'database';
 }
 
@@ -278,6 +290,7 @@ function confirmActiveTransactions(action = 'ngắt kết nối') {
 }
 
 function cancelDatabaseTransfer(transfer) {
+  if (transfer.operation === 'backup-retention') { transfer.canceled = true; transfer.controller?.abort(); return true; }
   if(transfer.trialControl){transfer.canceled=true;return transfer.trialControl.cancel();}
   const session = transfer.session || openSessions.get(transfer.profileId)?.session;
   const canceled = session?.cancelTask(transfer.taskId) || transfer.pending;
@@ -1399,16 +1412,90 @@ handle('db:list-backups', async (payload, legacyDatabase) => {
   return listBackups(app.getPath('userData'), current.profileId, database);
 });
 
+for (const operation of ['get', 'save', 'clear']) {
+  handle(`db:${operation}-backup-retention-policy`, async (payload) => {
+    if (!payload || typeof payload.database !== 'string' || !payload.database) throw new Error('Chưa chọn database.');
+    const current = await ensureSession(payload.profileId);
+    const repository = createRetentionStore(app.getPath('userData'));
+    if (operation === 'get') return repository.read(current.profileId, payload.database);
+    if (operation === 'clear') return repository.clear(current.profileId, payload.database);
+    return repository.save(current.profileId, payload.database, payload.policy);
+  });
+}
+
+handle('db:preview-backup-retention', async (payload) => {
+  if (activeDatabaseTransfer) throw new Error('Một tác vụ database đang chạy. Hãy đợi tác vụ hoàn tất.');
+  if (!payload || typeof payload.database !== 'string' || !payload.database) throw new Error('Chưa chọn database.');
+  const policy = normalizeRetentionPolicy(payload.policy);
+  const current = await ensureSession(payload.profileId);
+  const plan = await retentionApply().preview(current.profileId, payload.database, policy);
+  if (activeDatabaseTransfer) throw new Error('Một tác vụ database vừa bắt đầu. Hãy xem trước lại sau khi hoàn tất.');
+  return plan;
+});
+
+handle('db:apply-backup-retention', async (payload) => {
+  if (activeDatabaseTransfer || backupInspection.active) throw new Error('Có tác vụ đang dùng backup. Hãy đợi hoàn tất.');
+  if (!payload || typeof payload.database !== 'string' || !payload.database) throw new Error('Chưa chọn database.');
+  if (typeof payload.taskId !== 'string' || !payload.taskId || payload.taskId.length > 120) throw new Error('Thiếu mã tác vụ dọn backup.');
+  const profileId = resolveProfileId(payload.profileId);
+  const profile = store.getWithSecrets(profileId);
+  const entry = retentionApply().consume(profileId, payload.database, payload.token);
+  const candidates = entry.plan.rows.filter(row => row.action === 'remove').reverse();
+  if (candidates.length > 100) throw new Error('Mỗi lần dọn tối đa 100 bản. Hãy điều chỉnh giới hạn và xem trước lại.');
+  const confirmation = await dialog.showMessageBox(mainWindow, {
+    type: 'warning', title: 'Dọn bản backup cục bộ', message: `Xóa ${candidates.length} bản backup đã xem trước?`,
+    detail: `Kết nối: ${profile.name || profileId}\nDatabase: ${entry.database}\nDung lượng SQL: ${entry.plan.removeBytes} byte\n${candidates.map(row => `${row.name} (${row.id})`).join('\n')}\n\nThao tác xóa tệp cục bộ và metadata, không thể hoàn tác trong SqlPro. Bản ghim và bản giữ lại được kiểm tra lại trước khi dọn; tác vụ dừng ở lỗi đầu tiên.`,
+    buttons: ['Hủy', 'Xóa các bản đã liệt kê'], defaultId: 0, cancelId: 0, noLink: true
+  });
+  if (confirmation.response !== 1) return { canceled: true };
+  if (productionProfileFingerprint(store.getWithSecrets(profileId)) !== productionProfileFingerprint(profile)) throw new Error('Kết nối đã thay đổi. Hãy xem trước lại.');
+  if (backupInspection.active) throw new Error('Đang đọc backup. Hãy đợi hoàn tất rồi xem trước lại.');
+  const controller = new AbortController();
+  const transfer = claimDatabaseTransfer({ profileId, taskId: payload.taskId, database: payload.database,
+    operation: 'backup-retention', controller, progress: { phase: 'checking', total: candidates.length, deleted: 0, reclaimedBytes: 0 } });
+  const history = createRetentionHistory(app.getPath('userData'));
+  let historyId;
+  try {
+    historyId = history.begin(profileId, payload.database, entry.plan);
+    transfer.historyId = historyId;
+    const result = await retentionApply().apply(entry, { isCanceled: () => transfer.canceled === true,
+      signal: controller.signal, onProgress: progress => { if (activeDatabaseTransfer === transfer) transfer.progress = progress; } });
+    try { history.finish(profileId, payload.database, historyId, result); }
+    catch (error) { result.historySaveError = error.message; }
+    return { ...result, historyId };
+  } catch (error) {
+    if (historyId) {
+      try { history.finish(profileId, payload.database, historyId, { deleted: [], reclaimedBytes: 0,
+        remaining: candidates.map(row => row.id), failed: [{ id: candidates[0].id, sqlDeleted: false, code: error.code || 'BACKUP_RETENTION_FAILED' }] }); }
+      catch { /* Preserve the running record as evidence of an incomplete report. */ }
+    }
+    throw error;
+  }
+  finally { if (activeDatabaseTransfer === transfer) activeDatabaseTransfer = null; }
+});
+
+handle('db:backup-retention-history', payload => {
+  if (!payload || typeof payload.database !== 'string' || !payload.database) throw new Error('Chưa chọn database.');
+  const profileId = resolveProfileId(payload.profileId);
+  store.getWithSecrets(profileId);
+  const transfer = activeDatabaseTransfer;
+  return createRetentionHistory(app.getPath('userData')).read(profileId, payload.database).map(record => ({ ...record,
+    state: record.state === 'running' && !(transfer?.profileId === profileId && transfer.database === payload.database
+      && transfer.operation === 'backup-retention' && transfer.historyId === record.id) ? 'incomplete' : record.state }));
+});
+
+handle('db:backup-retention-status', payload => {
+  const transfer = activeDatabaseTransfer;
+  if (!transfer || transfer.operation !== 'backup-retention' || !payload?.taskId
+      || transfer.profileId !== payload.profileId || transfer.taskId !== payload.taskId || transfer.database !== payload.database) return { running: false };
+  return { running: true, stopping: transfer.canceled, ...transfer.progress };
+});
+
 handle('db:delete-backup', async (payload) => {
   if (activeDatabaseTransfer) throw new Error('Một tác vụ database đang chạy. Hãy đợi tác vụ hoàn tất.');
   if (!payload || typeof payload.database !== 'string' || !payload.database) throw new Error('Chưa chọn database.');
   const current = await ensureSession(payload.profileId);
-  const filePath = await resolveBackup(app.getPath('userData'), current.profileId, payload.database, payload.id);
-  await fs.promises.unlink(filePath);
-  await fs.promises.rm(manifestPathFor(filePath), { force: true });
-  await fs.promises.rm(`${filePath}.name.json`, { force: true });
-  await fs.promises.rm(`${filePath}.trial.json`, { force: true });
-  return { deleted: true };
+  return deleteBackup(app.getPath('userData'), current.profileId, payload.database, payload.id);
 });
 
 handle('db:rename-backup', async (payload) => {
@@ -1416,6 +1503,13 @@ handle('db:rename-backup', async (payload) => {
   if (!payload || typeof payload.database !== 'string' || !payload.database) throw new Error('Chưa chọn database.');
   const current = await ensureSession(payload.profileId);
   return renameBackup(app.getPath('userData'), current.profileId, payload.database, payload.id, payload.name);
+});
+
+handle('db:update-backup-annotations', async (payload) => {
+  if (activeDatabaseTransfer) throw new Error('Một tác vụ database đang chạy. Hãy đợi tác vụ hoàn tất.');
+  if (!payload || typeof payload.database !== 'string' || !payload.database) throw new Error('Chưa chọn database.');
+  const current = await ensureSession(payload.profileId);
+  return updateBackupAnnotations(app.getPath('userData'), current.profileId, payload.database, payload.id, payload.patch);
 });
 
 handle('db:verify-backup', async (payload) => {
@@ -1426,14 +1520,57 @@ handle('db:verify-backup', async (payload) => {
 });
 
 handle('db:inspect-backup', async (payload) => {
+  if (activeDatabaseTransfer?.operation === 'backup-retention') throw new Error('Đang dọn backup. Hãy đợi hoàn tất.');
   if (!payload || typeof payload.database !== 'string' || !payload.database) throw new Error('Chưa chọn database.');
   const current = await ensureSession(payload.profileId);
   const filePath = await resolveBackup(app.getPath('userData'), current.profileId, payload.database, payload.id);
+  if (activeDatabaseTransfer?.operation === 'backup-retention') throw new Error('Đang dọn backup. Hãy đợi hoàn tất.');
   return backupInspection.inspect({profileId:current.profileId,database:payload.database,id:payload.id,filePath,taskId:payload.taskId});
 });
 
 handle('db:cancel-inspect-backup',(payload)=>backupInspection.cancel(payload?.profileId,payload?.taskId));
 handle('db:inspect-backup-status',(payload)=>backupInspection.status(payload?.profileId,payload?.taskId));
+
+function trialJournal() {
+  return createTrialJournal({ directory: jsonPath('restore-trial-journal'), seal: store.seal, unseal: store.unseal });
+}
+
+handle('db:list-trial-recovery', (payload) => {
+  const profile = store.getWithSecrets(payload?.profileId);
+  return trialJournal().list(profile);
+});
+
+handle('db:cleanup-trial-recovery', async (payload) => {
+  const profileId = checkConnectionPolicy(payload?.profileId);
+  const profile = store.getWithSecrets(profileId);
+  const journal = trialJournal();
+  const record = journal.read(payload?.id);
+  if (record.profileId !== profileId || record.target !== targetIdentity(profile)) throw new Error('Nhật ký không thuộc đích kết nối này.');
+  const started = Date.now();
+  const confirmation = await dialog.showMessageBox(mainWindow, {
+    type: 'warning', title: 'Dọn database phục hồi thử', message: 'Kiểm tra và xóa database tạm còn sót?',
+    detail: `Kết nối: ${profile.name || profileId}\nMáy chủ: ${profile.host}:${profile.port || 3306}\nDatabase: ${record.database}\nChỉ xóa khi marker sở hữu khớp với nhật ký đã mã hóa. Nếu marker thiếu hoặc sai, database được giữ lại để kiểm tra thủ công.`,
+    buttons: ['Hủy', 'Kiểm tra và dọn'], defaultId: 0, cancelId: 0, noLink: true
+  });
+  if (confirmation.response !== 1) return { canceled: true };
+  checkConnectionPolicy(profileId);
+  if (Date.now() - started > 120000 || productionProfileFingerprint(store.getWithSecrets(profileId)) !== productionProfileFingerprint(profile)) throw new Error('Kết nối hoặc xác nhận đã thay đổi. Hãy thực hiện lại.');
+  const transfer = claimDatabaseTransfer({ profileId, operation: 'trial-recovery', pending: true });
+  let session;
+  try {
+    session = new DatabaseSession(runtimeProfile(profile)); transfer.session = session;
+    await session.connect();
+    if (transfer.canceled) throw new Error('Đã hủy dọn database thử.');
+    checkConnectionPolicy(profileId);
+    if (productionProfileFingerprint(store.getWithSecrets(profileId)) !== productionProfileFingerprint(profile)) throw new Error('Kết nối đã thay đổi trong khi mở phiên dọn database thử.');
+    transfer.pending = false;
+    const result = await cleanupTrialDatabase(session, record, profile);
+    journal.remove(record.id);
+    return result;
+  } finally {
+    try { await session?.close(); } finally { if (activeDatabaseTransfer === transfer) activeDatabaseTransfer = null; }
+  }
+});
 
 handle('db:trial-backup',async(payload)=>{
   if(activeDatabaseTransfer)throw Object.assign(new Error('Một tác vụ database đang chạy. Hãy đợi hoàn tất.'),{code:'SESSION_BUSY'});
@@ -1462,11 +1599,16 @@ handle('db:trial-backup',async(payload)=>{
   try {
     session=new DatabaseSession(runtimeProfile(profile));transfer.session=session;
     await session.connect();
+    checkConnectionPolicy(profileId);
+    if (productionProfileFingerprint(store.getWithSecrets(profileId)) !== productionProfileFingerprint(profile)) throw new Error('Kết nối đã thay đổi trong khi mở phiên phục hồi thử.');
     const control=createTrialControl(session,taskId);
     transfer.trialControl=control;
     if(transfer.canceled)control.cancel();
     transfer.pending=false;
-    const report=await runRestoreTrial({session,filePath,taskId,control,onProgress:progress=>sendDbProgress({...progress,taskId,profileId})});
+    const journal = trialJournal();
+    const report=await runRestoreTrial({session,filePath,taskId,control,
+      journal: { prepare: ownership => journal.prepare(profile, ownership), remove: id => journal.remove(id) },
+      onProgress:progress=>sendDbProgress({...progress,taskId,profileId})});
     const reportPath=`${filePath}.trial.json`;
     const temporary=`${reportPath}.${crypto.randomBytes(8).toString('hex')}.part`;
     try {await fs.promises.writeFile(temporary,JSON.stringify(report,null,2),{flag:'wx',mode:0o600});await fs.promises.rename(temporary,reportPath);}
@@ -1487,7 +1629,7 @@ handle('db:export-backup', async (payload) => {
   });
   if (result.canceled || !result.filePath) return { canceled: true };
   if (path.resolve(result.filePath) === path.resolve(source)) return { canceled: false, filePath: source };
-  await fs.promises.copyFile(source, result.filePath);
+  await withAnnotationLock(source, () => fs.promises.copyFile(source, result.filePath));
   return { canceled: false, filePath: result.filePath };
 });
 

@@ -132,8 +132,54 @@ handle('db:backup', (payload) => {
   return result;
 });
 handle('db:list-backups', () => ok([]));
+const retentionCalls = [];
+let savedRetentionPolicy = null;
+handle('db:get-backup-retention-policy', () => ok({ policy: savedRetentionPolicy }));
+handle('db:save-backup-retention-policy', payload => { savedRetentionPolicy = payload.policy; return ok({ policy: savedRetentionPolicy }); });
+handle('db:clear-backup-retention-policy', () => { savedRetentionPolicy = null; return ok({ policy: null }); });
+let holdRetention = false;
+let pendingRetention;
+const retentionFixture = {
+  token: 'retention-smoke-token',
+  plannedAt: '2026-11-12T12:00:00Z', removeCount: 1, totalCount: 3, remainingCount: 2,
+  removeBytes: 100, remainingBytes: 200, warnings: ['count-unmet'], rows: [
+    { id: 'old', name: '<img src=x onerror=alert(1)>', bytes: 100, action: 'remove', reasons: ['age'], protectedReasons: [] },
+    { id: 'pin', name: 'Quan trọng', bytes: 100, action: 'keep', reasons: [], protectedReasons: ['pinned'] },
+    { id: 'new', name: 'Mới nhất', bytes: 100, action: 'keep', reasons: [], protectedReasons: ['newest', 'latest-verified'] }
+  ]
+};
+handle('db:preview-backup-retention', payload => {
+  retentionCalls.push(payload);
+  if (holdRetention) return new Promise(resolve => { pendingRetention = resolve; });
+  return ok(retentionFixture);
+});
+let holdRetentionApply = false;
+let pendingRetentionApply;
+handle('db:apply-backup-retention', payload => holdRetentionApply
+  ? new Promise(resolve => { pendingRetentionApply = { payload, resolve }; }) : ok({ canceled: true }));
+handle('db:backup-retention-status', payload => ok({ running: Boolean(pendingRetentionApply && payload.taskId === pendingRetentionApply.payload.taskId),
+  phase: 'hashing', bytesRead: 64, totalBytes: 128, deleted: 0, total: 1, reclaimedBytes: 0 }));
+handle('db:backup-retention-history', () => ok([{ id: 'history-fixture', state: 'incomplete', startedAt: '2026-11-12T12:00:00Z', finishedAt: null,
+  planned: ['20260101000000-aaaaaaaa.sql'], deleted: [], remaining: ['20260101000000-aaaaaaaa.sql'], failed: [], reclaimedBytes: 0,
+  policy: { maxCount: 1, maxAgeDays: null, maxBytes: null } }]));
+const annotationCalls = [];
+let annotationFailure = false;
+let holdAnnotations = false;
+let pendingAnnotations;
+handle('db:update-backup-annotations', payload => {
+  annotationCalls.push(payload);
+  if (annotationFailure) return { ok: false, error: { code: 'ENOSPC', message: 'Không đủ dung lượng lưu ghi chú.' } };
+  if (holdAnnotations) return new Promise(resolve => { pendingAnnotations = resolve; });
+  return ok({ id: payload.id, ...payload.patch });
+});
 let pendingInspection;
 let pendingTrial;
+const trialRecoveryCalls = [];
+handle('db:list-trial-recovery', () => ok([
+  { id: 'a'.repeat(32), database: 'sqlpro_trial_owned', startedAt: '2026-11-12T00:00:00Z', targetMatches: true },
+  { id: 'b'.repeat(32), database: 'sqlpro_trial_changed', startedAt: '2026-11-12T00:00:00Z', targetMatches: false }
+]));
+handle('db:cleanup-trial-recovery', payload => { trialRecoveryCalls.push(payload); return ok({ cleanup: 'removed' }); });
 handle('db:trial-backup',payload=>new Promise(resolve=>{pendingTrial={payload,resolve};}));
 handle('db:inspect-backup',()=>new Promise(resolve=>{pendingInspection=resolve;}));
 handle('db:inspect-backup-status',()=>ok({running:true,cancelling:false,bytes:50,totalBytes:100,statements:3}));
@@ -141,6 +187,10 @@ handle('db:cancel-inspect-backup',()=>{pendingInspection?.({ok:false,error:{code
 handle('file:save-text', () => ({ canceled: false }));
 handle('db:export-query', (payload) => new Promise((resolve) => { pendingQueryExport = { payload, resolve }; }));
 handle('db:cancel-task', (payload) => {
+  if (pendingRetentionApply && payload.taskId === pendingRetentionApply.payload.taskId && payload.profileId === pendingRetentionApply.payload.profileId) {
+    pendingRetentionApply.resolve(ok({ stopped: true, deleted: [], remaining: ['old'], failed: [], reclaimedBytes: 0 }));
+    pendingRetentionApply = null; return ok({ canceled: true });
+  }
   if(pendingTrial && payload.taskId===pendingTrial.payload.taskId && payload.profileId===pendingTrial.payload.profileId){
     pendingTrial.resolve(ok({report:{status:'cancelled',cleanup:'removed',database:'sqlpro_trial_fixture',checksum:'abc'}}));pendingTrial=null;return ok({canceled:true});
   }
@@ -719,7 +769,136 @@ app.whenReady().then(async () => {
     await evaluate("$('#backupInventory [data-backup-action=cancel-inspect]').click()");
     await evaluate('window.__inspectionPromise');
     assert.match(await evaluate("$('#backupInventory').textContent"),/Đã hủy quét/);
+    await evaluate("runBackupManagerAction('trial-recovery')");
+    assert.equal(await evaluate("document.querySelectorAll('[data-trial-cleanup]:disabled').length"), 1);
+    await evaluate("document.querySelector('[data-trial-cleanup]:not(:disabled)').focus()");
+    assert.equal(await evaluate("document.activeElement.hasAttribute('data-trial-cleanup')"), true);
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#trialRecoveryStatus').textContent.includes('Đã xác nhận')");
+    assert.equal(trialRecoveryCalls.length, 1);
+    assert.equal(trialRecoveryCalls[0].id, 'a'.repeat(32));
+    assert.equal(await evaluate("$('#modal .modal-card').scrollWidth <= $('#modal .modal-card').clientWidth"), true);
+    await evaluate('closeModal()');
     await evaluate("app.backups=[]; app.selectedBackupId=null; mode='query'; renderQueryView();");
+  });
+
+  await check('backup notes save by keyboard, pin protects deletion and failures preserve the draft', async () => {
+    await evaluate(`window.__annotationDatabase=app.database; mode='backups';
+      app.selectedBackupId='20261111000000-1234abcd.sql'; app.backups=[{
+        id:app.selectedBackupId,name:'Trước nâng cấp',bytes:2048,createdAt:'2026-11-11T00:00:00Z',note:'',pinned:false
+      }];renderBackupsView();runBackupManagerAction('annotations');`);
+    assert.equal(await evaluate('document.activeElement.id'), 'backupNoteInput');
+    await evaluate(`$('#backupNoteInput').value='Trước nâng cấp\\n<img src=x onerror=alert(1)>';$('#backupPinnedInput').checked=true;`);
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return', modifiers: ['control'] });
+    await until("!$('#modal').open");
+    assert.equal(annotationCalls.at(-1).patch.pinned, true);
+    assert.equal(await evaluate("document.querySelector('[data-backup-action=delete]').disabled"), true);
+    assert.equal(await evaluate("Boolean(document.querySelector('[data-backup-row] [aria-label=\"Đã ghim\"]'))"), true);
+    assert.equal(await evaluate("document.querySelectorAll('.backup-user-note img').length"), 0);
+    assert.equal(await evaluate("document.activeElement.dataset.backupRow"), '20261111000000-1234abcd.sql');
+    assert.equal(await evaluate("document.querySelector('.backup-details').scrollWidth <= document.querySelector('.backup-details').clientWidth"), true);
+    annotationFailure = true;
+    await evaluate("runBackupManagerAction('annotations');$('#backupNoteInput').value='Bản nháp chưa lưu';$('#backupPinnedInput').checked=false;$('#saveBackupAnnotations').click()");
+    await until("$('#backupAnnotationStatus').textContent.includes('Không đủ dung lượng')");
+    assert.equal(await evaluate("$('#backupNoteInput').value"), 'Bản nháp chưa lưu');
+    assert.equal(await evaluate('app.backups[0].pinned'), true);
+    assert.equal(await evaluate("$('#saveBackupAnnotations').disabled"), false);
+    annotationFailure = false;
+    await evaluate("$('#saveBackupAnnotations').click()");
+    await until("!$('#modal').open");
+    assert.equal(await evaluate("document.querySelector('[data-backup-action=delete]').disabled"), false);
+    holdAnnotations = true;
+    await evaluate("runBackupManagerAction('annotations');$('#saveBackupAnnotations').click()");
+    await until("$('#saveBackupAnnotations').disabled");
+    await evaluate("app.database='other-database';modal('<h2 id=annotationReplacement>Hộp thoại mới</h2>')");
+    pendingAnnotations(ok({ note: 'late result', pinned: true }));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(await evaluate("Boolean($('#annotationReplacement')) && $('#modal').open"), true);
+    assert.equal(await evaluate('app.backups[0].pinned'), false);
+    holdAnnotations = false;
+    await evaluate("closeModal();app.database=window.__annotationDatabase;app.backups=[];app.selectedBackupId=null;mode='query';renderQueryView()");
+  });
+
+  await check('retention preview explains protected backups, validates limits and discards stale results', async () => {
+    const deletedBefore = calls.filter(call => call.name === 'db:delete-backup').length;
+    await evaluate("mode='backups';renderBackupsView();runBackupManagerAction('retention-preview')");
+    assert.equal(await evaluate('document.activeElement.id'), 'retentionCount');
+    await evaluate("$('#retentionCount').value='1';$('#retentionAge').value='30';$('#retentionMiB').value='2'");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return', modifiers: ['control'] });
+    await until("Boolean($('#backupRetentionResult table'))");
+    assert.deepEqual(retentionCalls.at(-1).policy, { maxCount: 1, maxAgeDays: 30, maxBytes: 2097152 });
+    assert.match(await evaluate("$('#backupRetentionResult').textContent"), /Đã ghim/);
+    assert.match(await evaluate("$('#backupRetentionResult').textContent"), /Chưa có tệp nào bị xóa/);
+    assert.equal(await evaluate("$('#backupRetentionResult').querySelectorAll('img').length"), 0);
+    assert.equal(await evaluate("$('#backupRetentionEditor').scrollWidth <= $('#backupRetentionEditor').clientWidth"), true);
+    assert.equal(await evaluate("$('#applyRetentionBtn').disabled"), false);
+    await evaluate("$('#applyRetentionBtn').click()");
+    await until("$('#backupRetentionResult').textContent.includes('Đã hủy')");
+    assert.equal(calls.filter(call => call.name === 'db:apply-backup-retention').at(-1).args[0].token, 'retention-smoke-token');
+    assert.equal(await evaluate("$('#applyRetentionBtn').disabled"), true);
+    holdRetentionApply = true;
+    await evaluate("$('#previewRetentionBtn').click()");
+    await until("!$('#applyRetentionBtn').disabled");
+    await evaluate("$('#applyRetentionBtn').click()");
+    await until("!$('#stopRetentionBtn').disabled");
+    assert.match(await evaluate("$('#retentionTaskStatus').textContent"), /Đang xác minh/);
+    await evaluate("$('#stopRetentionBtn').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#retentionTaskStatus').textContent.includes('Đã dừng')");
+    await until("$('#stopRetentionBtn').hidden");
+    holdRetentionApply = false;
+    await until("!$('#saveRetentionPolicyBtn').disabled");
+    await evaluate("$('#saveRetentionPolicyBtn').click()");
+    await until("$('#backupRetentionPolicyStatus').textContent.includes('Đã lưu chính sách')");
+    assert.deepEqual(savedRetentionPolicy, { maxCount: 1, maxAgeDays: 30, maxBytes: 2097152 });
+    await evaluate("closeModal();runBackupManagerAction('retention-preview')");
+    await until("!$('#saveRetentionPolicyBtn').disabled");
+    assert.equal(await evaluate("$('#retentionCount').value"), '1');
+    assert.equal(await evaluate("$('#retentionAge').value"), '30');
+    assert.equal(await evaluate("$('#retentionMiB').value"), '2');
+    await evaluate("$('#clearRetentionPolicyBtn').click()");
+    await until("$('#backupRetentionPolicyStatus').textContent.includes('Đã xóa chính sách')");
+    assert.equal(savedRetentionPolicy, null);
+    const before = retentionCalls.length;
+    await evaluate("$('#retentionCount').value='0';$('#previewRetentionBtn').click()");
+    await until("$('#backupRetentionResult').textContent.includes('số nguyên dương')");
+    assert.equal(retentionCalls.length, before);
+    holdRetention = true;
+    await evaluate("$('#retentionCount').value='2';$('#previewRetentionBtn').click()");
+    await until("$('#previewRetentionBtn').disabled");
+    await evaluate("$('#retentionCount').value='5';$('#retentionCount').dispatchEvent(new Event('input',{bubbles:true}))");
+    pendingRetention(ok(retentionFixture));
+    await until("!$('#previewRetentionBtn').disabled");
+    assert.match(await evaluate("$('#backupRetentionResult').textContent"), /Giới hạn đã thay đổi/);
+    await evaluate("$('#previewRetentionBtn').click()");
+    await until("$('#previewRetentionBtn').disabled");
+    await evaluate("modal('<h2 id=retentionReplacement>Hộp thoại mới</h2>')");
+    pendingRetention(ok(retentionFixture));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(await evaluate("Boolean($('#retentionReplacement')) && $('#modal').open"), true);
+    assert.equal(calls.filter(call => call.name === 'db:delete-backup').length, deletedBefore);
+    holdRetention = false;
+    await evaluate("closeModal();mode='query';renderQueryView()");
+  });
+
+  await check('retention history distinguishes incomplete reports and expands with the keyboard', async () => {
+    await evaluate("mode='backups';renderBackupsView();runBackupManagerAction('retention-history')");
+    await until("Boolean($('#retentionHistoryResult details'))");
+    assert.match(await evaluate("$('#retentionHistoryResult').textContent"), /Chưa xác nhận kết thúc/);
+    assert.equal(await evaluate("$('#retentionHistoryView').scrollWidth <= $('#retentionHistoryView').clientWidth"), true);
+    await evaluate("$('#retentionHistoryResult summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#retentionHistoryResult details').open");
+    assert.match(await evaluate("$('#retentionHistoryResult details').textContent"), /20260101000000-aaaaaaaa.sql/);
+    await evaluate("closeModal();mode='query';renderQueryView()");
   });
 
   await check('backup includes routines, events and the strip-DEFINER option', async () => {

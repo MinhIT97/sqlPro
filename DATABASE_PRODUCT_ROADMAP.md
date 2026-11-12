@@ -4,6 +4,8 @@ Ngày lập: 11/11/2026. Baseline đọc từ workspace phiên bản 0.3.12, g�
 
 ## 1. Mục tiêu và cách dùng
 
+Cập nhật 12/11/2026 sau đợt 1: roadmap có 51 đầu việc trong 10 nhóm. G0–G2 đã triển khai nhiều phần nhưng chưa đủ toàn bộ tiêu chí nghiệm thu. G3–G9 còn **7 nhóm lớn với 36 đầu việc chưa hoàn tất**; một số phần nền như gợi ý SQL/EXPLAIN đã có. Không đồng nhất số checkbox với số tính năng chưa có hoặc dùng nó để suy phần trăm hoàn thành. Tiến độ và bằng chứng mới nhất ở [ROADMAP_PROGRESS.md](ROADMAP_PROGRESS.md).
+
 Đưa SqlPro thành công cụ quản trị MySQL/MariaDB hằng ngày: giảm thao tác nhầm, kiểm soát transaction, backup có thể phục hồi được, vận hành database lớn mà giao diện vẫn phản hồi, và hỗ trợ so sánh/migration có thể xem xét trước khi chạy.
 
 Tài liệu này cập nhật thứ tự ưu tiên sau đánh giá ngày 11/11 và bao phủ toàn bộ đề xuất trong cuộc trao đổi. `IMPLEMENTATION_PLAN.md` là tham chiếu lịch sử và các tình huống lỗi chi tiết; khi mô tả hiện trạng khác nhau, phải xác minh code/test trước khi tạo ticket. Không coi mục cũ là chưa làm chỉ vì chưa có dấu hoàn tất.

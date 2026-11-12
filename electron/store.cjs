@@ -137,6 +137,19 @@ function hasLocalSecrets() {
   if (profiles.some((profile) => [profile.password, profile.sshPassword, profile.sshPassphrase, profile.ssl?.passphrase]
     .some((secret) => secret?.alg === 'local'))) return true;
   try {
+    const directory = path.join(app.getPath('userData'), 'restore-trial-journal');
+    const files = fs.readdirSync(directory);
+    if (files.length > 1000) throw new Error('Nhật ký vượt giới hạn.');
+    for (const file of files.filter(name => /^[a-f0-9]{32}\.json$/.test(name))) {
+      const filePath = path.join(directory, file);
+      const stat = fs.lstatSync(filePath);
+      if (!stat.isFile() || stat.size > 65536) throw new Error('Nhật ký không hợp lệ.');
+      if (JSON.parse(fs.readFileSync(filePath, 'utf8')).alg === 'local') return true;
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw secretError('LOCAL_KEY_READ_FAILED', 'Không kiểm tra được nhật ký phục hồi thử. Giữ nguyên khóa và dữ liệu.', error);
+  }
+  try {
     const session = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'sync-session.json'), 'utf8'));
     return [session.tokenSealed, session.vaultKeySealed].some((secret) => secret?.alg === 'local');
   } catch (error) {

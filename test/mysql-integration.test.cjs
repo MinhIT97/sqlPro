@@ -10,6 +10,8 @@ const path = require('node:path');
 const { DatabaseSession } = require('../electron/database.cjs');
 const { saveBackupFile, readManifest } = require('../electron/backup-file.cjs');
 const {runRestoreTrial}=require('../electron/restore-trial.cjs');
+const crypto = require('node:crypto');
+const { createTrialJournal, cleanupTrialDatabase } = require('../electron/restore-trial-journal.cjs');
 
 test('MySQL integration: snapshots, precise import, typed keys, full export and cancellation', {
   skip: !process.env.SQLPRO_TEST_MYSQL_PORT,
@@ -42,6 +44,37 @@ test('MySQL integration: snapshots, precise import, typed keys, full export and 
         assert.equal(remaining.length,0);
         assert.equal((await admin.query('SELECT value FROM parents WHERE id=1'))[0][0].value,'before-parent');
       }finally{await fs.rm(directory,{recursive:true,force:true});}
+    });
+
+    await t.test('restart recovery verifies ownership and never drops a schema with missing or wrong marker', async () => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-real-recovery-'));
+      const recoveryProfile = { ...profile, id: database };
+      const ownership = {
+        database: `sqlpro_trial_${crypto.randomBytes(16).toString('hex')}`,
+        marker: `owner_${crypto.randomBytes(12).toString('hex')}`,
+        token: crypto.randomBytes(32).toString('hex')
+      };
+      const options = { directory, seal: value => ({ data: Buffer.from(value).toString('base64') }),
+        unseal: value => Buffer.from(value.data, 'base64').toString('utf8') };
+      try {
+        const id = createTrialJournal(options).prepare(recoveryProfile, ownership);
+        await admin.query(`CREATE DATABASE \`${ownership.database}\``);
+        const worker = await session();
+        const journal = createTrialJournal(options);
+        const record = journal.read(id);
+        await assert.rejects(() => cleanupTrialDatabase(worker, record, recoveryProfile));
+        await admin.query(`CREATE TABLE \`${ownership.database}\`.\`${ownership.marker}\` (token VARCHAR(64) NOT NULL) ENGINE=InnoDB`);
+        await admin.query(`INSERT INTO \`${ownership.database}\`.\`${ownership.marker}\` VALUES (?)`, ['wrong']);
+        await assert.rejects(() => cleanupTrialDatabase(worker, record, recoveryProfile), /Marker/);
+        await admin.query(`UPDATE \`${ownership.database}\`.\`${ownership.marker}\` SET token=?`, [ownership.token]);
+        assert.equal((await cleanupTrialDatabase(worker, record, recoveryProfile)).cleanup, 'removed');
+        assert.equal((await cleanupTrialDatabase(worker, record, recoveryProfile)).cleanup, 'already-removed');
+        journal.remove(id);
+        assert.deepEqual(journal.list(recoveryProfile), []);
+      } finally {
+        await admin.query(`DROP DATABASE IF EXISTS \`${ownership.database}\``);
+        await fs.rm(directory, { recursive: true, force: true });
+      }
     });
 
     await t.test('row write preview reads metadata without changing data and matches the executed plans',async () => {

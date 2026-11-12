@@ -706,6 +706,14 @@ dialog select{width:100%}
 .backup-manager:has(.backup-details) .backup-manager-table{min-height:100px;max-height:230px}
 .backup-details{padding:16px;border-top:1px solid var(--border,#dfe7e5);max-height:45vh;overflow:auto;color:var(--text,#314641);background:var(--bg,#fff)}
 .backup-details h3{margin:0 0 14px;overflow-wrap:anywhere}
+.backup-user-note{white-space:pre-wrap;overflow-wrap:anywhere}
+.backup-note-preview{display:inline-block;max-width:340px;white-space:normal;overflow-wrap:anywhere;color:var(--muted,#7a8d87)}
+.backup-retention-table{max-height:35vh;overflow:auto}
+.backup-retention-history{margin:12px 0;padding:10px;border:1px solid var(--border,#dfe7e5);border-radius:6px;overflow-wrap:anywhere}
+.backup-retention-history summary{cursor:pointer;font-weight:600}
+.backup-retention-history ul{max-height:160px;overflow:auto}
+.backup-retention-table table{width:100%;border-collapse:collapse;font-size:12px}
+.backup-retention-table th,.backup-retention-table td{padding:8px;text-align:left;overflow-wrap:anywhere;border-bottom:1px solid var(--border,#dfe7e5)}
 .backup-details h4{margin:14px 0 8px}
 .backup-details-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin:0}
 .backup-details-grid dt{font-size:11px;color:var(--muted,#7a8d87);margin-bottom:4px}

@@ -4,7 +4,9 @@ const fs = require('node:fs/promises');
 const { constants } = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { readManifest, sha256File, writeManifest, fileIdentity, sameFileIdentity } = require('./backup-file.cjs');
+const { readManifest, sha256File, writeManifest, fileIdentity, sameFileIdentity, manifestPathFor } = require('./backup-file.cjs');
+
+const { normalizeBackupDisplayName, normalizeAnnotations, readAnnotations, writeAnnotations, withAnnotationLock } = require('./backup-annotations.cjs');
 
 const BACKUP_NAME = /^\d{14}-[0-9a-f]{8}\.sql$/;
 
@@ -19,7 +21,7 @@ function backupName(date = new Date()) {
   return `${timestamp}-${crypto.randomBytes(4).toString('hex')}.sql`;
 }
 
-async function listBackups(root, profileId, database) {
+async function listBackups(root, profileId, database, { maxEntries = Infinity } = {}) {
   const directory = backupDirectory(root, profileId, database);
   let files;
   try {
@@ -28,7 +30,9 @@ async function listBackups(root, profileId, database) {
     if (error.code === 'ENOENT') return [];
     throw error;
   }
-  const entries = await Promise.all(files.filter((file) => file.isFile() && BACKUP_NAME.test(file.name))
+  const backupFiles = files.filter(file => file.isFile() && BACKUP_NAME.test(file.name));
+  if (backupFiles.length > maxEntries) throw new Error(`Catalog vượt giới hạn ${maxEntries} bản cho thao tác này.`);
+  const entries = await Promise.all(backupFiles
     .map(async (file) => {
       const filePath = path.join(directory, file.name);
       const stats = await fs.stat(filePath);
@@ -41,15 +45,10 @@ async function listBackups(root, profileId, database) {
           trial={status:report.status,cleanup:report.cleanup,finishedAt:report.finishedAt,checksum:report.checksum,database:report.database};
         }
       }catch { /* A report is optional and never changes checksum verification. */ }
-      let displayName;
-      try {
-        const nameStats = await fs.lstat(`${filePath}.name.json`);
-        if (!nameStats.isFile() || nameStats.size > 4096) throw Object.assign(new Error('Tên backup không hợp lệ.'), { code: 'INVALID_BACKUP_NAME' });
-        const metadata = JSON.parse(await fs.readFile(`${filePath}.name.json`, 'utf8'));
-        displayName = normalizeBackupDisplayName(metadata.name);
-      } catch (error) {
-        if (error.code !== 'ENOENT' && !(error instanceof SyntaxError) && error.code !== 'INVALID_BACKUP_NAME') throw error;
-      }
+      let annotations = { note: '', pinned: false };
+      let annotationError;
+      try { annotations = await readAnnotations(filePath); }
+      catch (error) { annotationError = error.message; }
       const legacy = !manifest;
       const verification = manifest
         ? { ...manifest.verification, checksum: sameFileIdentity(manifest.verification?.file, fileIdentity(stats))
@@ -57,7 +56,10 @@ async function listBackups(root, profileId, database) {
         : { fileWritten: true, checksum: 'missing', restore: 'not-tested' };
       return {
         id: file.name,
-        name: displayName || file.name.slice(0, 14),
+        name: annotations.name || file.name.slice(0, 14),
+        note: annotations.note,
+        pinned: annotations.pinned,
+        ...(annotationError ? { annotationError } : {}),
         bytes: stats.size,
         createdAt: manifest?.createdAt || stats.mtime.toISOString(),
         checksum: manifest?.checksum?.value || null,
@@ -81,28 +83,48 @@ async function resolveBackup(root, profileId, database, id) {
   return filePath;
 }
 
-function normalizeBackupDisplayName(value) {
-  if (typeof value !== 'string' || !value.trim() || value.trim().length > 120 || /[\x00-\x1f\x7f]/.test(value)) {
-    throw Object.assign(new Error('Tên bản sao lưu phải có từ 1 đến 120 ký tự và không chứa ký tự điều khiển.'), { code: 'INVALID_BACKUP_NAME' });
-  }
-  return value.trim();
+async function updateBackupAnnotations(root, profileId, database, id, patch) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)
+      || Object.keys(patch).some(key => !['name', 'note', 'pinned'].includes(key))
+      || Object.keys(patch).length === 0) throw new Error('Thay đổi ghi chú backup không hợp lệ.');
+  if (Object.values(patch).some(value => value === undefined)) throw new Error('Thiếu giá trị ghi chú backup.');
+  const changes = { ...patch };
+  normalizeAnnotations(changes);
+  const filePath = await resolveBackup(root, profileId, database, id);
+  return withAnnotationLock(filePath, async () => {
+    await resolveBackup(root, profileId, database, id);
+    const current = await readAnnotations(filePath);
+    const annotations = await writeAnnotations(filePath, { ...current, ...changes });
+    return { id, ...annotations };
+  });
 }
 
 async function renameBackup(root, profileId, database, id, value) {
   const name = normalizeBackupDisplayName(value);
-  const filePath = await resolveBackup(root, profileId, database, id);
-  const target = `${filePath}.name.json`;
-  const temporary = `${target}.${crypto.randomBytes(8).toString('hex')}.part`;
-  try {
-    await fs.writeFile(temporary, JSON.stringify({ name }), { flag: 'wx', mode: 0o600 });
-    await fs.rename(temporary, target);
-  } finally {
-    await fs.rm(temporary, { force: true });
-  }
+  await updateBackupAnnotations(root, profileId, database, id, { name });
   return { id, name };
 }
 
+async function deleteBackup(root, profileId, database, id) {
+  const filePath = await resolveBackup(root, profileId, database, id);
+  return withAnnotationLock(filePath, async () => {
+    await resolveBackup(root, profileId, database, id);
+    const annotations = await readAnnotations(filePath);
+    if (annotations.pinned) throw Object.assign(new Error('Bản sao lưu đang được ghim. Hãy bỏ ghim trước khi xóa.'), { code: 'BACKUP_PINNED' });
+    await fs.unlink(filePath);
+    await fs.rm(manifestPathFor(filePath), { force: true });
+    await fs.rm(`${filePath}.name.json`, { force: true });
+    await fs.rm(`${filePath}.trial.json`, { force: true });
+    return { deleted: true };
+  });
+}
+
 async function verifyBackup(root, profileId, database, id) {
+  const filePath = await resolveBackup(root, profileId, database, id);
+  return withAnnotationLock(filePath, () => verifyBackupFile(root, profileId, database, id));
+}
+
+async function verifyBackupFile(root, profileId, database, id) {
   const filePath = await resolveBackup(root, profileId, database, id);
   const stats = await fs.stat(filePath);
   const { manifest, error } = await readManifest(filePath);
@@ -145,7 +167,14 @@ async function verifyBackup(root, profileId, database, id) {
   };
 }
 
-async function copyBackup(root, sourceProfileId, targetProfileId, sourceDatabase, targetDatabase, id) {
+async function copyBackup(...args) {
+  const sourceDatabase = args.length === 5 ? args[2] : args[3];
+  const id = args.length === 5 ? args[4] : args[5];
+  const filePath = await resolveBackup(args[0], args[1], sourceDatabase, id);
+  return withAnnotationLock(filePath, () => copyBackupFile(...args));
+}
+
+async function copyBackupFile(root, sourceProfileId, targetProfileId, sourceDatabase, targetDatabase, id) {
   let srcProf = sourceProfileId;
   let tgtProf = targetProfileId;
   let srcDb = sourceDatabase;
@@ -165,6 +194,7 @@ async function copyBackup(root, sourceProfileId, targetProfileId, sourceDatabase
 
   const sourceFile = await resolveBackup(root, srcProf, srcDb, backupId);
   const sourceStat = await fs.stat(sourceFile);
+  const annotations = await readAnnotations(sourceFile);
   const sourceManifest = await readManifest(sourceFile);
   const targetDir = backupDirectory(root, tgtProf, tgtDb);
   await fs.mkdir(targetDir, { recursive: true, mode: 0o700 });
@@ -172,7 +202,14 @@ async function copyBackup(root, sourceProfileId, targetProfileId, sourceDatabase
   const targetFile = path.join(targetDir, newId);
   const temporaryFile = path.join(targetDir, `.${newId}.${crypto.randomBytes(8).toString('hex')}.part`);
   let targetChecksum = null;
+  let annotationPublished = false;
   try {
+    for (const suffix of ['', '.json', '.name.json', '.trial.json']) {
+      try {
+        await fs.lstat(`${targetFile}${suffix}`);
+        throw Object.assign(new Error('Mã backup đích đã tồn tại. Hãy sao chép lại để tạo mã mới.'), { code: 'EEXIST' });
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
     await fs.copyFile(sourceFile, temporaryFile, constants.COPYFILE_EXCL);
     const [copiedStat, currentSourceStat] = await Promise.all([fs.stat(temporaryFile), fs.stat(sourceFile)]);
     if (copiedStat.size !== sourceStat.size || currentSourceStat.size !== sourceStat.size ||
@@ -200,9 +237,15 @@ async function copyBackup(root, sourceProfileId, targetProfileId, sourceDatabase
     } finally {
       await handle.close();
     }
-    await fs.rename(temporaryFile, targetFile);
+    await writeAnnotations(targetFile, annotations, { exclusive: true });
+    annotationPublished = true;
+    // Atomic no-replace publication: an ID collision must never replace an
+    // existing backup or its pin metadata.
+    await fs.link(temporaryFile, targetFile);
+    await fs.rm(temporaryFile, { force: true }).catch(() => {});
   } catch (error) {
     await fs.rm(temporaryFile, { force: true }).catch(() => {});
+    if (annotationPublished) await fs.rm(`${targetFile}.name.json`, { force: true }).catch(() => {});
     throw error;
   }
   let manifestPath = null;
@@ -228,7 +271,9 @@ async function copyBackup(root, sourceProfileId, targetProfileId, sourceDatabase
   const stats = await fs.stat(targetFile);
   return {
     id: newId,
-    name: newId.slice(0, 14),
+    name: annotations.name || newId.slice(0, 14),
+    note: annotations.note,
+    pinned: annotations.pinned,
     bytes: stats.size,
     createdAt: stats.mtime.toISOString(),
     filePath: targetFile,
@@ -242,4 +287,4 @@ async function copyBackup(root, sourceProfileId, targetProfileId, sourceDatabase
   };
 }
 
-module.exports = { backupDirectory, backupName, listBackups, resolveBackup, copyBackup, verifyBackup, renameBackup };
+module.exports = { backupDirectory, backupName, listBackups, resolveBackup, copyBackup, verifyBackup, renameBackup, updateBackupAnnotations, deleteBackup };

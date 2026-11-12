@@ -12,6 +12,10 @@ const { saveBackupFile, readManifest } = require('../electron/backup-file.cjs');
 const {runRestoreTrial}=require('../electron/restore-trial.cjs');
 const crypto = require('node:crypto');
 const { createTrialJournal, cleanupTrialDatabase } = require('../electron/restore-trial-journal.cjs');
+const { backupDirectory, listBackups } = require('../electron/backup-catalog.cjs');
+const { BackupRetentionApply } = require('../electron/backup-retention-apply.cjs');
+const { runAutomaticRetention } = require('../electron/backup-retention-auto.cjs');
+const { createScheduleStore, BackupScheduler } = require('../electron/backup-scheduler.cjs');
 
 test('MySQL integration: snapshots, precise import, typed keys, full export and cancellation', {
   skip: !process.env.SQLPRO_TEST_MYSQL_PORT,
@@ -75,6 +79,88 @@ test('MySQL integration: snapshots, precise import, typed keys, full export and 
         await admin.query(`DROP DATABASE IF EXISTS \`${ownership.database}\``);
         await fs.rm(directory, { recursive: true, force: true });
       }
+    });
+
+    await t.test('scheduled backup writes all visible object groups on its own session and preserves editor transaction', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-real-scheduler-'));
+      const profileId = 'integration-scheduler';
+      const repository = createScheduleStore(root);
+      const due = Date.now() + 3600000;
+      repository.save({ profileId, database, enabled: true, intervalHours: 24, nextRunAt: new Date(due).toISOString(),
+        timeZone: 'Asia/Bangkok', target: 'a'.repeat(64) });
+      const editor = await session();
+      await admin.query('CREATE VIEW scheduler_items AS SELECT id, value FROM parents');
+      await admin.query('CREATE PROCEDURE scheduler_count() SELECT COUNT(*) FROM parents');
+      await admin.query('CREATE EVENT scheduler_refresh ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 DAY DISABLE DO SELECT 1');
+      await editor.runQuery('START TRANSACTION');
+      const id = '20261112130000-abcdef01.sql';
+      let runs = 0;
+      const scheduler = new BackupScheduler({ repository, now: () => due, isBusy: () => false,
+        run: async (schedule, taskId) => {
+          runs++;
+          const writer = await session();
+          try {
+            const directory = backupDirectory(root, profileId, database);
+            await fs.mkdir(directory, { recursive: true });
+            const selection = { includeStructure: true, includeData: true,
+              tables: (await writer.listTables(database)).map(item => item.name),
+              routines: (await writer.listRoutines(database)).map(item => `${item.type}:${item.name}`),
+              events: (await writer.listEvents(database)).map(item => item.name) };
+            const stats = await saveBackupFile(path.join(directory, id), write => writer.backupDatabase({ database, taskId, ...selection }, write, () => {}),
+              { exclusive: true, source: { profileId, database, serverVersion: writer.version, target: 'a'.repeat(64) }, selection });
+            return { ...stats, id };
+          } finally { await writer.close(); }
+        } });
+      try {
+        await scheduler.tick(); await scheduler.tick();
+        const schedule = repository.read()[0];
+        assert.equal(schedule.lastRun.status, 'completed', schedule.lastRun.errorCode);
+        assert.equal(runs, 1); assert.equal(schedule.lastRun.backupId, id);
+        const catalog = await listBackups(root, profileId, database);
+        assert.equal(catalog.length, 1);
+        const { manifest, error } = await readManifest(path.join(backupDirectory(root, profileId, database), id));
+        assert.equal(error, null);
+        assert.equal(manifest.result.tables, 2); assert.equal(manifest.result.views, 1);
+        assert.equal(manifest.result.procedures, 1); assert.equal(manifest.result.events, 1);
+        assert.equal(editor.inTransaction, true);
+        assert.equal((await admin.query('SELECT value FROM parents WHERE id=1'))[0][0].value, 'before-parent');
+        await editor.runQuery('ROLLBACK');
+      } finally {
+        if (editor.inTransaction) await editor.runQuery('ROLLBACK');
+        await admin.query('DROP EVENT scheduler_refresh');
+        await admin.query('DROP PROCEDURE scheduler_count');
+        await admin.query('DROP VIEW scheduler_items');
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+
+    await t.test('automatic retention after real backups preserves the new backup and older broader scope', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-real-auto-retention-'));
+      const profileId = 'integration-auto';
+      const directory = backupDirectory(root, profileId, database);
+      await fs.mkdir(directory, { recursive: true });
+      const ids = ['20260101000000-aaaaaaaa.sql', '20260201000000-bbbbbbbb.sql', '20260301000000-cccccccc.sql', '20260115000000-dddddddd.sql'];
+      let stats;
+      try {
+        const writer = await session();
+        for (let index = 0; index < ids.length; index++) {
+          const tables = index === 0 ? ['parents', 'children'] : ['parents'];
+          const file = path.join(directory, ids[index]);
+          const selection = { includeStructure: true, includeData: true, tables, routines: [], events: [] };
+          const saved = await saveBackupFile(file, write => writer.backupDatabase({ database, ...selection }, write, () => {}),
+            { exclusive: true, source: { profileId, database, serverVersion: writer.version, target: (index === 3 ? 'b' : 'a').repeat(64) }, selection });
+          if (index === 2) stats = saved;
+          const manifest = JSON.parse(await fs.readFile(`${file}.json`, 'utf8'));
+          manifest.createdAt = new Date(Date.UTC(2026, index === 3 ? 0 : index, index === 3 ? 15 : 1)).toISOString();
+          await fs.writeFile(`${file}.json`, JSON.stringify(manifest));
+        }
+        const result = await runAutomaticRetention({ root, profileId, database, backupId: ids[2], stats,
+          settings: { policy: { maxCount: 1 }, automaticAfterBackup: true }, service: new BackupRetentionApply({ root }) });
+        assert.equal(result.status, 'completed', result.reason);
+        assert.deepEqual(result.deleted, [ids[1]]);
+        assert.deepEqual((await listBackups(root, profileId, database)).map(row => row.id), [ids[2], ids[3], ids[0]]);
+        assert.equal((await admin.query('SELECT value FROM parents WHERE id=1'))[0][0].value, 'before-parent');
+      } finally { await fs.rm(root, { recursive: true, force: true }); }
     });
 
     await t.test('row write preview reads metadata without changing data and matches the executed plans',async () => {

@@ -15,31 +15,33 @@ function createRetentionStore(root) {
     const file = location(profileId, database);
     let stat;
     try { stat = fs.lstatSync(file); }
-    catch (error) { if (error.code === 'ENOENT') return { policy: null, updatedAt: null }; throw error; }
+    catch (error) { if (error.code === 'ENOENT') return { policy: null, updatedAt: null, automaticAfterBackup: false }; throw error; }
     if (!stat.isFile() || stat.size > 4096) throw new Error('Tệp chính sách retention không hợp lệ. Giữ nguyên tệp để kiểm tra.');
     const value = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (!value || value.version !== 1 || typeof value.updatedAt !== 'string' || !Number.isFinite(Date.parse(value.updatedAt))) throw new Error('Định dạng chính sách retention chưa được hỗ trợ.');
-    return { policy: normalizeRetentionPolicy(value.policy), updatedAt: value.updatedAt };
+    if (value.automaticAfterBackup !== undefined && typeof value.automaticAfterBackup !== 'boolean') throw new Error('Trạng thái tự dọn backup không hợp lệ.');
+    return { policy: normalizeRetentionPolicy(value.policy), updatedAt: value.updatedAt, automaticAfterBackup: value.automaticAfterBackup === true };
   }
-  function save(profileId, database, input) {
+  function save(profileId, database, input, { automaticAfterBackup = false } = {}) {
+    if (typeof automaticAfterBackup !== 'boolean') throw new Error('Trạng thái tự dọn backup không hợp lệ.');
     const policy = normalizeRetentionPolicy(input);
     const file = location(profileId, database);
     // Do not silently replace corrupt or future-version settings.
     read(profileId, database);
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    const value = { version: 1, policy, updatedAt: new Date().toISOString() };
+    const value = { version: 1, policy, automaticAfterBackup, updatedAt: new Date().toISOString() };
     const temporary = `${file}.${crypto.randomBytes(8).toString('hex')}.part`;
     try {
       fs.writeFileSync(temporary, JSON.stringify(value, null, 2), { flag: 'wx', mode: 0o600 });
       fs.renameSync(temporary, file);
     } finally { fs.rmSync(temporary, { force: true }); }
-    return { policy, updatedAt: value.updatedAt };
+    return { policy, updatedAt: value.updatedAt, automaticAfterBackup };
   }
   function clear(profileId, database) {
     const file = location(profileId, database);
     read(profileId, database);
     fs.rmSync(file, { force: true });
-    return { policy: null, updatedAt: null };
+    return { policy: null, updatedAt: null, automaticAfterBackup: false };
   }
   return { read, save, clear };
 }

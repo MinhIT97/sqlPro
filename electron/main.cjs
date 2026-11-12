@@ -24,6 +24,39 @@ const { normalizeRetentionPolicy } = require('./backup-retention.cjs');
 const { withAnnotationLock } = require('./backup-annotations.cjs');
 const { createRetentionStore } = require('./backup-retention-store.cjs');
 const { createRetentionHistory } = require('./backup-retention-history.cjs');
+const { exportRetentionHistory } = require('./backup-retention-export.cjs');
+const { runAutomaticRetention } = require('./backup-retention-auto.cjs');
+const { createScheduleStore, BackupScheduler, scheduleId, validateSchedule } = require('./backup-scheduler.cjs');
+let scheduleServices;
+let schedulerReady = false;
+let backupContextGeneration = 0;
+
+function backupSchedules() {
+  if (scheduleServices) return scheduleServices;
+  const repository = createScheduleStore(app.getPath('userData'));
+  const scheduler = new BackupScheduler({ repository, isBusy: () => Boolean(activeDatabaseTransfer), run: runScheduledBackup });
+  scheduleServices = { repository, scheduler };
+  return scheduleServices;
+}
+
+function stopBackupSchedules() {
+  backupContextGeneration++;
+  scheduleServices?.scheduler.stop();
+  if (activeDatabaseTransfer?.scheduleId || activeDatabaseTransfer?.operation === 'backup-retention') cancelDatabaseTransfer(activeDatabaseTransfer);
+}
+
+async function runScheduledBackup(schedule, taskId) {
+  const scope = { operation: 'backup', scheduled: true, taskId, profileId: schedule.profileId, database: schedule.database };
+  try {
+    const result = await runCatalogBackup(scope, schedule);
+    sendDbProgress({ ...scope, stage: 'scheduled-finish', status: result.canceled ? 'canceled' : 'completed',
+      needsReview: Boolean(result.manifestError || ['failed', 'stopped'].includes(result.retention?.status) || result.retention?.historySaveError) });
+    return result;
+  } catch (error) {
+    sendDbProgress({ ...scope, stage: 'scheduled-finish', status: 'failed' });
+    throw error;
+  }
+}
 const { BackupRetentionApply } = require('./backup-retention-apply.cjs');
 let retentionApplyService;
 function retentionApply() {
@@ -480,7 +513,7 @@ function createWindow() {
     }
     saveWindowState();
   });
-  mainWindow.on('closed', () => { mainWindow = undefined; });
+  mainWindow.on('closed', () => { stopBackupSchedules(); mainWindow = undefined; });
 }
 
 function validateState(value) {
@@ -867,10 +900,13 @@ handle('account:login', (payload) => {
   return sync.login(payload);
 });
 
-handle('account:logout', () => sync.logout());
+handle('account:logout', () => { stopBackupSchedules(); return sync.logout(); });
 
 handle('account:reset-local', async () => {
+  stopBackupSchedules();
   await sync.logout();
+  const repository = backupSchedules().repository;
+  for (const schedule of repository.read()) repository.update(schedule.id, schedule.revision, item => ({ ...item, enabled: false }));
   await closeAllSessions();
   const { backupName } = store.resetLocalData();
   writeJson('renderer-state.json', {});
@@ -1343,7 +1379,7 @@ handle('db:import-file', async (payload) => {
   }
 });
 
-handle('db:backup', async (payload) => {
+async function runCatalogBackup(payload, scheduled = null) {
   if (activeDatabaseTransfer) throw new Error('Một tác vụ database đang chạy. Hãy đợi tác vụ hoàn tất.');
   if (!payload || typeof payload !== 'object') throw new Error('Tham số không hợp lệ.');
   if (typeof payload.database !== 'string' || !payload.database) throw new Error('Chưa chọn database để sao lưu.');
@@ -1363,25 +1399,52 @@ handle('db:backup', async (payload) => {
   const profileId = payload.profileId || activeSession?.profileId;
   if (!profileId) throw new Error('Chưa chọn kết nối để sao lưu.');
   const transfer = claimDatabaseTransfer({ taskId, profileId, operation: 'backup', pending: true });
+  const generation = backupContextGeneration;
+  if (scheduled) transfer.scheduleId = scheduled.id;
+  const retentionRepository = createRetentionStore(app.getPath('userData'));
+  let retentionSettings, retentionSettingsError;
+  try { retentionSettings = retentionRepository.read(profileId, requested.database); }
+  catch (error) { retentionSettingsError = error.message; }
   let session;
   try {
-    session = new DatabaseSession(runtimeProfile(store.getWithSecrets(profileId)));
+    const backupProfile = store.getWithSecrets(profileId);
+    const checkSchedule = () => {
+      if (!scheduled) return;
+      const { repository, scheduler } = backupSchedules();
+      const current = repository.read().find(item => item.id === scheduled.id);
+      if (scheduler.stopped || transfer.canceled || !current?.enabled || current.revision !== scheduled.revision || current.lastRun?.taskId !== taskId) throw Object.assign(new Error('Lịch backup đã dừng hoặc thay đổi.'), { code: 'BACKUP_CANCELED' });
+      if (targetIdentity(store.getWithSecrets(profileId)) !== scheduled.target) throw Object.assign(new Error('Đích kết nối đã thay đổi. Hãy lưu lại lịch backup.'), { code: 'SCHEDULE_TARGET_CHANGED' });
+    };
+    checkSchedule();
+    session = new DatabaseSession(runtimeProfile(backupProfile));
     transfer.session = session;
     await session.connect();
+    checkSchedule();
     if (transfer.canceled) return { canceled: true, id: null, filePath: null };
+    if (scheduled) {
+      requested.tables = (await session.listTables(requested.database)).map(item => item.name);
+      checkSchedule();
+      requested.routines = (await session.listRoutines(requested.database)).map(item => `${item.type}:${item.name}`);
+      checkSchedule();
+      requested.events = (await session.listEvents(requested.database)).map(item => item.name);
+      if ([requested.tables, requested.routines, requested.events].some(items => items.length > 2000)) throw new Error('Lịch backup hiện hỗ trợ tối đa 2.000 đối tượng mỗi nhóm.');
+      checkSchedule();
+    }
     const directory = backupDirectory(app.getPath('userData'), profileId, requested.database);
     await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
     const id = backupName();
     const filePath = path.join(directory, id);
     const stats = await saveBackupFile(filePath, (write) => {
       if (transfer.canceled) throw Object.assign(new Error('Đã hủy sao lưu.'), { code: 'BACKUP_CANCELED' });
+      checkSchedule();
       transfer.pending = false;
       return session.backupDatabase(requested, write,
         (progress) => sendDbProgress({ ...progress, taskId, profileId, database: requested.database }));
     }, {
       appName: 'SqlPro',
       appVersion: typeof app.getVersion === 'function' ? app.getVersion() : null,
-      source: { profileId, database: requested.database, serverVersion: session.version || null },
+      exclusive: true,
+      source: { profileId, database: requested.database, serverVersion: session.version || null, target: targetIdentity(backupProfile) },
       selection: {
         includeStructure: requested.includeStructure,
         includeData: requested.includeData,
@@ -1392,7 +1455,32 @@ handle('db:backup', async (payload) => {
         events: requested.events
       }
     });
-    return { canceled: false, id, filePath, ...stats };
+    let retention = retentionSettingsError ? { status: 'failed', reason: `Không đọc được chính sách tự dọn: ${retentionSettingsError}` } : { status: 'disabled' };
+    if (retentionSettings?.automaticAfterBackup) {
+      if (backupInspection.active) retention = { status: 'skipped', reason: 'Có lượt đọc backup đang chạy. Chưa tự dọn.' };
+      else {
+        const controller = new AbortController();
+        transfer.operation = 'backup-retention'; transfer.controller = controller; transfer.database = requested.database;
+        transfer.progress = { phase: 'checking', total: 0, deleted: 0, reclaimedBytes: 0 };
+        if (transfer.canceled) controller.abort();
+        retention = await runAutomaticRetention({ root: app.getPath('userData'), profileId, database: requested.database,
+          backupId: id, stats, settings: retentionSettings, service: retentionApply(), signal: controller.signal,
+          onHistory: historyId => { transfer.historyId = historyId; },
+          isCanceled: () => transfer.canceled || generation !== backupContextGeneration, checkContext: () => {
+            checkSchedule();
+            if (generation !== backupContextGeneration) throw Object.assign(new Error('Phiên ứng dụng đã thay đổi. Dừng dọn backup.'), { code: 'BACKUP_RETENTION_CANCELLED' });
+            if (productionProfileFingerprint(store.getWithSecrets(profileId)) !== productionProfileFingerprint(backupProfile)) throw new Error('Kết nối đã thay đổi trong khi sao lưu. Không tự dọn thêm.');
+            if (JSON.stringify(retentionRepository.read(profileId, requested.database)) !== JSON.stringify(retentionSettings)) throw new Error('Chính sách đã thay đổi trong khi sao lưu. Không tự dọn thêm.');
+            if (backupInspection.active) throw new Error('Có lượt đọc backup vừa bắt đầu. Dừng tự dọn.');
+          }, onProgress: progress => {
+            if (activeDatabaseTransfer !== transfer) return;
+            transfer.progress = progress;
+            sendDbProgress({ operation: 'backup', stage: 'retention', taskId, profileId, database: requested.database,
+              percent: 100, message: `Đang tự dọn backup: ${progress.deleted}/${progress.total} bản đã xóa` });
+          } });
+      }
+    }
+    return { canceled: false, id, filePath, ...stats, retention };
   } catch (error) {
     if (error && error.code === 'BACKUP_CANCELED') {
       return { canceled: true, id: null, filePath: null, ...(error.partial || {}) };
@@ -1402,6 +1490,67 @@ handle('db:backup', async (payload) => {
     try { await session?.close(); }
     finally { if (activeDatabaseTransfer === transfer) activeDatabaseTransfer = null; }
   }
+}
+
+handle('db:backup', payload => runCatalogBackup(payload));
+
+handle('db:get-backup-schedule', payload => {
+  if (!payload || typeof payload.database !== 'string') throw new Error('Chưa chọn database.');
+  const profileId = resolveProfileId(payload.profileId);
+  const profile = store.getWithSecrets(profileId);
+  const { repository, scheduler } = backupSchedules();
+  const schedule = repository.read().find(item => item.id === scheduleId(profileId, payload.database));
+  return { schedule: schedule ? { ...schedule, target: undefined, targetMatches: schedule.target === targetIdentity(profile) } : null,
+    paused: scheduler.stopped, schedulerError: scheduler.error };
+});
+
+handle('db:save-backup-schedule', async payload => {
+  if (!payload || typeof payload.database !== 'string') throw new Error('Chưa chọn database.');
+  const profileId = resolveProfileId(payload.profileId);
+  const profile = store.getWithSecrets(profileId);
+  const id = scheduleId(profileId, payload.database);
+  const { repository, scheduler } = backupSchedules();
+  if (activeDatabaseTransfer) throw new Error('Đang có tác vụ database. Hãy đợi hoàn tất trước khi lưu lịch.');
+  const before = JSON.stringify(repository.read());
+  const generation = scheduler.generation;
+  const candidate = validateSchedule({ id, profileId, database: payload.database, enabled: true,
+    intervalHours: payload.intervalHours, nextRunAt: payload.nextRunAt, timeZone: payload.timeZone,
+    target: targetIdentity(profile), revision: crypto.randomBytes(16).toString('hex'), lastRun: null });
+  const started = Date.now();
+  if (Date.parse(candidate.nextRunAt) <= started) throw new Error('Lần chạy đầu phải trong tương lai.');
+  const confirmation = await dialog.showMessageBox(mainWindow, {
+    type: 'question', title: 'Bật lịch backup khi app đang mở', message: 'Lưu và bật lịch backup cho database này?',
+    detail: `Kết nối: ${profile.name || profileId}\nMáy chủ: ${profile.host || ''}:${profile.port || 3306}\nDatabase: ${candidate.database}\nChu kỳ: mỗi ${candidate.intervalHours} giờ trôi qua\nBắt đầu: ${new Intl.DateTimeFormat('vi-VN', { timeZone: candidate.timeZone, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(candidate.nextRunAt))} (${candidate.timeZone})\n\nSao lưu cấu trúc và dữ liệu của toàn bộ bảng/view/routine/event mà tài khoản nhìn thấy, vào catalog local bằng phiên riêng. Chỉ chạy khi app mở; quá hạn 60 giây thì ghi nhận bỏ lỡ, không chạy bù và không tự retry. Chính sách tự dọn đã bật cũng được áp dụng sau backup thành công. Không tự chấp nhận SSH host key hoặc bỏ kiểm tra TLS khi chạy nền.`,
+    buttons: ['Hủy', 'Lưu và bật lịch'], defaultId: 0, cancelId: 0, noLink: true
+  });
+  if (confirmation.response !== 1) return { canceled: true };
+  if (Date.now() - started > 120000 || generation !== scheduler.generation || activeDatabaseTransfer || JSON.stringify(repository.read()) !== before
+      || productionProfileFingerprint(store.getWithSecrets(profileId)) !== productionProfileFingerprint(profile)) throw new Error('Kết nối/lịch hoặc xác nhận đã thay đổi. Hãy lưu lại.');
+  const saved = repository.save(candidate);
+  if (schedulerReady) { scheduler.recover(); scheduler.start(); }
+  return { schedule: { ...saved, target: undefined, targetMatches: true } };
+});
+
+handle('db:pause-backup-schedule', payload => {
+  if (!payload || typeof payload.database !== 'string') throw new Error('Chưa chọn database.');
+  const profileId = resolveProfileId(payload.profileId);
+  store.getWithSecrets(profileId);
+  const id = scheduleId(profileId, payload.database);
+  const repository = backupSchedules().repository;
+  const schedule = repository.read().find(item => item.id === id);
+  if (schedule) repository.update(id, schedule.revision, item => ({ ...item, enabled: false }));
+  if (activeDatabaseTransfer?.scheduleId === id) cancelDatabaseTransfer(activeDatabaseTransfer);
+  return { paused: true };
+});
+
+handle('db:delete-backup-schedule', payload => {
+  if (!payload || typeof payload.database !== 'string') throw new Error('Chưa chọn database.');
+  const profileId = resolveProfileId(payload.profileId);
+  store.getWithSecrets(profileId);
+  const id = scheduleId(profileId, payload.database);
+  if (activeDatabaseTransfer?.scheduleId === id) throw new Error('Lịch đang chạy. Hãy tạm dừng và đợi kết thúc trước khi xóa lịch.');
+  backupSchedules().repository.remove(id);
+  return { deleted: true };
 });
 
 handle('db:list-backups', async (payload, legacyDatabase) => {
@@ -1415,11 +1564,32 @@ handle('db:list-backups', async (payload, legacyDatabase) => {
 for (const operation of ['get', 'save', 'clear']) {
   handle(`db:${operation}-backup-retention-policy`, async (payload) => {
     if (!payload || typeof payload.database !== 'string' || !payload.database) throw new Error('Chưa chọn database.');
+    if (operation !== 'get' && activeDatabaseTransfer) throw new Error('Đang có tác vụ database. Hãy đợi hoàn tất trước khi đổi chính sách.');
+    const generation = backupContextGeneration;
     const current = await ensureSession(payload.profileId);
     const repository = createRetentionStore(app.getPath('userData'));
     if (operation === 'get') return repository.read(current.profileId, payload.database);
+    if (generation !== backupContextGeneration) throw new Error('Phiên ứng dụng đã thay đổi. Hãy mở lại chính sách.');
+    if (activeDatabaseTransfer) throw new Error('Đang có tác vụ database. Hãy đợi hoàn tất trước khi đổi chính sách.');
     if (operation === 'clear') return repository.clear(current.profileId, payload.database);
-    return repository.save(current.profileId, payload.database, payload.policy);
+    const policy = normalizeRetentionPolicy(payload.policy);
+    const automaticAfterBackup = payload.automaticAfterBackup === undefined ? false : payload.automaticAfterBackup;
+    if (typeof automaticAfterBackup !== 'boolean') throw new Error('Trạng thái tự dọn không hợp lệ.');
+    const before = repository.read(current.profileId, payload.database);
+    const profile = store.getWithSecrets(current.profileId);
+    if (automaticAfterBackup && (!before.automaticAfterBackup || JSON.stringify(before.policy) !== JSON.stringify(policy))) {
+      const started = Date.now();
+      const confirmation = await dialog.showMessageBox(mainWindow, {
+        type: 'warning', title: 'Bật tự dọn backup', message: 'Tự xóa backup cũ sau khi backup mới thành công?',
+        detail: `Kết nối: ${profile.name || current.profileId}\nDatabase: ${payload.database}\nGiới hạn: ${policy.maxCount ?? 'không giới hạn'} bản; ${policy.maxAgeDays ?? 'không giới hạn'} ngày; ${policy.maxBytes ?? 'không giới hạn'} byte SQL.\n\nChỉ dọn các bản cùng nguồn và cùng phạm vi lựa chọn với bản mới. Luôn giữ bản ghim và bản mới đã xác minh checksum. Mỗi lượt tối đa 100 bản; lỗi/hủy dừng phần còn lại, không hoàn tác tệp đã xóa. Những lần backup tiếp theo trên máy này sẽ áp dụng chính sách mà không hỏi lại.`,
+        buttons: ['Hủy', 'Bật tự dọn theo chính sách'], defaultId: 0, cancelId: 0, noLink: true
+      });
+      if (confirmation.response !== 1) return { canceled: true };
+      if (Date.now() - started > 120000 || generation !== backupContextGeneration || productionProfileFingerprint(store.getWithSecrets(current.profileId)) !== productionProfileFingerprint(profile)
+          || JSON.stringify(repository.read(current.profileId, payload.database)) !== JSON.stringify(before)) throw new Error('Cấu hình hoặc xác nhận đã thay đổi. Hãy lưu lại chính sách.');
+    }
+    if (activeDatabaseTransfer) throw new Error('Tác vụ database vừa bắt đầu. Hãy đợi hoàn tất.');
+    return repository.save(current.profileId, payload.database, policy, { automaticAfterBackup });
   });
 }
 
@@ -1440,6 +1610,7 @@ handle('db:apply-backup-retention', async (payload) => {
   const profileId = resolveProfileId(payload.profileId);
   const profile = store.getWithSecrets(profileId);
   const entry = retentionApply().consume(profileId, payload.database, payload.token);
+  const generation = backupContextGeneration;
   const candidates = entry.plan.rows.filter(row => row.action === 'remove').reverse();
   if (candidates.length > 100) throw new Error('Mỗi lần dọn tối đa 100 bản. Hãy điều chỉnh giới hạn và xem trước lại.');
   const confirmation = await dialog.showMessageBox(mainWindow, {
@@ -1448,7 +1619,7 @@ handle('db:apply-backup-retention', async (payload) => {
     buttons: ['Hủy', 'Xóa các bản đã liệt kê'], defaultId: 0, cancelId: 0, noLink: true
   });
   if (confirmation.response !== 1) return { canceled: true };
-  if (productionProfileFingerprint(store.getWithSecrets(profileId)) !== productionProfileFingerprint(profile)) throw new Error('Kết nối đã thay đổi. Hãy xem trước lại.');
+  if (generation !== backupContextGeneration || productionProfileFingerprint(store.getWithSecrets(profileId)) !== productionProfileFingerprint(profile)) throw new Error('Phiên ứng dụng hoặc kết nối đã thay đổi. Hãy xem trước lại.');
   if (backupInspection.active) throw new Error('Đang đọc backup. Hãy đợi hoàn tất rồi xem trước lại.');
   const controller = new AbortController();
   const transfer = claimDatabaseTransfer({ profileId, taskId: payload.taskId, database: payload.database,
@@ -1459,6 +1630,9 @@ handle('db:apply-backup-retention', async (payload) => {
     historyId = history.begin(profileId, payload.database, entry.plan);
     transfer.historyId = historyId;
     const result = await retentionApply().apply(entry, { isCanceled: () => transfer.canceled === true,
+      checkContext: () => {
+        if (generation !== backupContextGeneration || productionProfileFingerprint(store.getWithSecrets(profileId)) !== productionProfileFingerprint(profile)) throw Object.assign(new Error('Phiên ứng dụng hoặc kết nối đã thay đổi. Dừng dọn backup.'), { code: 'BACKUP_RETENTION_CHANGED' });
+      },
       signal: controller.signal, onProgress: progress => { if (activeDatabaseTransfer === transfer) transfer.progress = progress; } });
     try { history.finish(profileId, payload.database, historyId, result); }
     catch (error) { result.historySaveError = error.message; }
@@ -1482,6 +1656,27 @@ handle('db:backup-retention-history', payload => {
   return createRetentionHistory(app.getPath('userData')).read(profileId, payload.database).map(record => ({ ...record,
     state: record.state === 'running' && !(transfer?.profileId === profileId && transfer.database === payload.database
       && transfer.operation === 'backup-retention' && transfer.historyId === record.id) ? 'incomplete' : record.state }));
+});
+
+handle('db:export-backup-retention-history', async payload => {
+  if (!payload || typeof payload.database !== 'string' || !payload.database) throw new Error('Chưa chọn database.');
+  const profileId = resolveProfileId(payload.profileId);
+  const profile = store.getWithSecrets(profileId);
+  const database = payload.database;
+  const generation = backupContextGeneration;
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Xuất lịch sử dọn backup',
+    defaultPath: `sqlpro-retention-history-${new Date().toISOString().slice(0, 10)}.json`,
+    filters: [{ name: 'Báo cáo JSON', extensions: ['json'] }]
+  });
+  if (result.canceled || !result.filePath) return { canceled: true };
+  if (generation !== backupContextGeneration || productionProfileFingerprint(store.getWithSecrets(profileId)) !== productionProfileFingerprint(profile)) throw new Error('Phiên ứng dụng hoặc kết nối đã thay đổi. Hãy mở lại lịch sử để xuất.');
+  const records = createRetentionHistory(app.getPath('userData')).read(profileId, database);
+  const transfer = activeDatabaseTransfer;
+  const activeHistoryId = transfer?.profileId === profileId && transfer.database === database
+    && transfer.operation === 'backup-retention' ? transfer.historyId : null;
+  return exportRetentionHistory({ filePath: result.filePath, userData: app.getPath('userData'),
+    records, appVersion: app.getVersion(), activeHistoryId });
 });
 
 handle('db:backup-retention-status', payload => {
@@ -1732,6 +1927,10 @@ app.whenReady().then(() => {
   buildMenu();
   sync.init({ notify: syncNotifier() });
   createWindow();
+  schedulerReady = true;
+  const { scheduler } = backupSchedules();
+  try { scheduler.recover(); scheduler.start(); }
+  catch (error) { scheduler.error = error.message; scheduler.stop(); }
   sync.startup().catch(() => undefined);
 });
 
@@ -1745,6 +1944,7 @@ app.on('before-quit', (event) => {
     return;
   }
   isQuitting = true;
+  stopBackupSchedules();
   sync.shutdown();
   sessionRegistry.closeAll().catch(() => undefined);
   activeSession = null;

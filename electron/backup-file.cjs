@@ -47,7 +47,10 @@ function buildManifest(checksum, stats, options = {}) {
     source: {
       profileId: safeText(source.profileId, 120),
       database: safeText(source.database, 64),
-      serverVersion: safeText(source.serverVersion, 120)
+      serverVersion: safeText(source.serverVersion, 120),
+      // Older manifests have no target identity and remain readable. They must
+      // not be assumed to belong to a profile's newly configured server.
+      target: typeof source.target === 'string' && /^[a-f0-9]{64}$/.test(source.target) ? source.target : null
     },
     selection: {
       includeStructure: selection.includeStructure !== false,
@@ -78,7 +81,7 @@ function buildManifest(checksum, stats, options = {}) {
   };
 }
 
-async function writeManifest(filePath, manifest) {
+async function writeManifest(filePath, manifest, { exclusive = false } = {}) {
   const target = manifestPathFor(filePath);
   const temporary = temporaryName(target);
   let handle;
@@ -88,7 +91,8 @@ async function writeManifest(filePath, manifest) {
     await handle.sync();
     await handle.close();
     handle = null;
-    await fs.rename(temporary, target);
+    if (exclusive) { await fs.link(temporary, target); await fs.unlink(temporary); }
+    else await fs.rename(temporary, target);
     return target;
   } catch (error) {
     if (handle) {
@@ -103,6 +107,8 @@ async function readManifest(filePath) {
   const target = manifestPathFor(filePath);
   let text;
   try {
+    const stat = await fs.lstat(target);
+    if (!stat.isFile() || stat.size > 2 * 1024 * 1024) return { manifest: null, error: 'Manifest không phải tệp thường hoặc vượt 2 MiB.', path: target };
     text = await fs.readFile(target, 'utf8');
   } catch (error) {
     if (error.code === 'ENOENT') return { manifest: null, error: null, path: target };
@@ -150,7 +156,8 @@ async function saveBackupFile(filePath, produce, options = {}) {
       throw new Error('Tệp chưa được ghi đầy đủ. Hãy kiểm tra dung lượng ổ đĩa và thử lại.');
     }
     const checksum = hash.digest('hex');
-    await fs.rename(temporary, filePath);
+    if (options.exclusive === true) { await fs.link(temporary, filePath); await fs.unlink(temporary); }
+    else await fs.rename(temporary, filePath);
     const result = {
       ...stats,
       checksum,
@@ -160,7 +167,7 @@ async function saveBackupFile(filePath, produce, options = {}) {
       const manifest = buildManifest(checksum, stats, options);
       manifest.verification.file = fileIdentity(await fs.stat(filePath));
       try {
-        result.manifestPath = await writeManifest(filePath, manifest);
+        result.manifestPath = await writeManifest(filePath, manifest, { exclusive: options.exclusive === true });
       } catch (error) {
         result.manifestError = `Không ghi được manifest checksum: ${error.message}`;
         result.verification = { fileWritten: true, checksum: 'unverified', restore: 'not-tested' };

@@ -18,7 +18,7 @@ test('ghi đầy đủ backup, checksum và manifest bên cạnh tệp SQL', asy
       await write('INSERT INTO t VALUES (1);\n');
       return { bytes: Buffer.byteLength(content), rows: 1, objects: 1 };
     }, {
-      source: { database: 'sample', serverVersion: '8.4.0' },
+      source: { database: 'sample', serverVersion: '8.4.0', target: 'a'.repeat(64), password: 'not-in-manifest' },
       selection: { tables: ['t'] }
     });
     assert.equal((await fs.stat(target)).size, stats.bytes);
@@ -29,6 +29,8 @@ test('ghi đầy đủ backup, checksum và manifest bên cạnh tệp SQL', asy
     const { manifest, error } = await readManifest(target);
     assert.equal(error, null);
     assert.equal(manifest.source.database, 'sample');
+    assert.equal(manifest.source.target, 'a'.repeat(64));
+    assert.equal(manifest.source.password, undefined);
     assert.equal(manifest.selection.tables[0], 't');
     assert.equal(manifest.verification.restore, 'not-tested');
   } finally {
@@ -65,4 +67,50 @@ test('giữ file cũ khi backup mới bị lỗi', async () => {
   } finally {
     await fs.rm(folder, { recursive: true, force: true });
   }
+});
+
+test('exclusive catalog publication never replaces an existing SQL file or its metadata', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-backup-collision-'));
+  const target = path.join(folder, 'sample.sql');
+  try {
+    await fs.writeFile(target, 'original SQL');
+    await fs.writeFile(`${target}.json`, 'original metadata');
+    await assert.rejects(saveBackupFile(target, async write => { await write('SELECT 1;'); return { bytes: 9 }; }, { exclusive: true }), { code: 'EEXIST' });
+    assert.equal(await fs.readFile(target, 'utf8'), 'original SQL');
+    assert.equal(await fs.readFile(`${target}.json`, 'utf8'), 'original metadata');
+    assert.equal((await fs.readdir(folder)).length, 2);
+    await fs.unlink(target);
+    const result = await saveBackupFile(target, async write => { await write('SELECT 1;'); return { bytes: 9 }; }, { exclusive: true });
+    assert.match(result.manifestError, /EEXIST/);
+    assert.equal(result.verification.checksum, 'unverified');
+    assert.equal(await fs.readFile(`${target}.json`, 'utf8'), 'original metadata');
+    assert.equal(await fs.readFile(target, 'utf8'), 'SELECT 1;');
+  } finally { await fs.rm(folder, { recursive: true, force: true }); }
+});
+
+test('exclusive backup publishes a stable file identity and retains explicit overwrite behavior for exports', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-backup-publish-'));
+  const target = path.join(folder, 'sample.sql');
+  try {
+    await saveBackupFile(target, async write => { await write('SELECT 1;'); return { bytes: 9 }; }, { exclusive: true });
+    const { manifest } = await readManifest(target);
+    const { fileIdentity, sameFileIdentity } = require('../electron/backup-file.cjs');
+    assert.equal(sameFileIdentity(manifest.verification.file, fileIdentity(await fs.stat(target))), true);
+    await saveBackupFile(target, async write => { await write('SELECT 2;'); return { bytes: 9 }; });
+    assert.equal(await fs.readFile(target, 'utf8'), 'SELECT 2;');
+  } finally { await fs.rm(folder, { recursive: true, force: true }); }
+});
+
+test('oversized or symlink manifest remains untouched and returns an error', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-backup-manifest-limit-'));
+  const target = path.join(folder, 'sample.sql');
+  try {
+    await fs.writeFile(`${target}.json`, 'x'.repeat(2 * 1024 * 1024 + 1));
+    assert.match((await readManifest(target)).error, /2 MiB/);
+    await fs.unlink(`${target}.json`);
+    const original = path.join(folder, 'original.json');
+    await fs.writeFile(original, 'original'); await fs.symlink(original, `${target}.json`);
+    assert.match((await readManifest(target)).error, /tệp thường/);
+    assert.equal(await fs.readFile(original, 'utf8'), 'original');
+  } finally { await fs.rm(folder, { recursive: true, force: true }); }
 });

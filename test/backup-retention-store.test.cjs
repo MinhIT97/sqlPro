@@ -31,6 +31,23 @@ test('retention policy persists independently per profile/database and clear pre
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test('legacy policy stays manual; automatic opt-in survives reopen and can be disabled', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlpro-retention-opt-in-'));
+  try {
+    const store = createRetentionStore(root);
+    store.save('p1', 'db', { maxCount: 3 });
+    const file = path.join(backupDirectory(root, 'p1', 'db'), 'retention-policy.json');
+    const legacy = JSON.parse(fs.readFileSync(file, 'utf8'));
+    delete legacy.automaticAfterBackup; fs.writeFileSync(file, JSON.stringify(legacy));
+    assert.equal(store.read('p1', 'db').automaticAfterBackup, false);
+    store.save('p1', 'db', { maxCount: 3 }, { automaticAfterBackup: true });
+    assert.equal(createRetentionStore(root).read('p1', 'db').automaticAfterBackup, true);
+    assert.throws(() => store.save('p1', 'db', { maxCount: 3 }, { automaticAfterBackup: 'true' }));
+    store.save('p1', 'db', { maxCount: 3 });
+    assert.equal(store.read('p1', 'db').automaticAfterBackup, false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('retention store preserves corrupt/future metadata and prior policy after atomic write failure', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlpro-retention-failure-'));
   const originalRename = fs.renameSync;

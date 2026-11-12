@@ -25,7 +25,7 @@ Ngày review: 12/11/2026. Baseline: `0fa0ab7` (đợt 1). Phạm vi: toàn bộ 
 
 ## Kiểm tra
 
-| Kiểm tra | Kết quả trong lượt review |
+| Kiểm tra | Kết quả review trước khi commit |
 | --- | --- |
 | `npm run check` | Qua 59/59 nhóm test file, gồm các regression mới; test MySQL thực vẫn opt-in riêng |
 | `npm --prefix server run check` | Qua |
@@ -36,17 +36,23 @@ Ngày review: 12/11/2026. Baseline: `0fa0ab7` (đợt 1). Phạm vi: toàn bộ 
 | MySQL 8.4 integration | Chưa chạy lại trong review này; 22/22 ở lượt triển khai journal là bằng chứng lịch sử, không phải kết quả mới |
 | MariaDB, installed Windows/Linux, benchmark lớn | Chưa kiểm chứng |
 
-Lỗi duyệt quyền là lỗi xác thực của môi trường, không phải kết luận thao tác không an toàn. Cần đăng xuất/đăng nhập lại trước khi chạy các kiểm tra ngoài sandbox. Không dùng smoke đợt cũ để khẳng định UI đợt 2 đã qua.
+Khi review trước commit, lỗi duyệt quyền là lỗi xác thực của môi trường. Kết quả chạy lại sau khi quyền được khôi phục được ghi bên dưới.
+
+### Kiểm chứng bổ sung 12/11 sau commit `bd0b78e`
+
+- Electron 54/54, website 14/14, server 17/17 qua trên commit đợt 2. MySQL 8.4 thực chạy lại 22/22, không skip, trong container độc lập tmpfs trên 13317; container đã dọn, không dùng DB ứng dụng thật.
+- Lượt tiếp theo bổ sung xuất lịch sử JSON: check 60/60 và Electron 54/54 qua, gồm nút xuất bằng Enter; server syntax/diff qua. Chi tiết phạm vi mới và test ở `ROADMAP_PROGRESS.md`.
+- Các trạng thái “chưa chạy” trong bảng review trước commit là lịch sử; hiện không còn lỗi token chặn kiểm tra này. Các giới hạn nền tảng/dữ liệu lớn bên dưới vẫn áp dụng.
 
 ## Giới hạn còn lại
 
-- Còn cần Electron/website/server smoke và MySQL integration tại revision chốt trước khi phát hành. Chưa build installer hoặc push.
+- Electron/website/server và MySQL đã chạy bổ sung như trên; khi chốt revision phát hành vẫn cần đối chiếu kiểm tra đúng revision đó. Chưa build installer hoặc push.
 - Copy yêu cầu filesystem hỗ trợ hard link trong cùng thư mục; filesystem không hỗ trợ sẽ báo lỗi và giữ bản nguồn. Chưa kiểm chứng trên Windows hoặc volume ngoài. Không fallback sang ghi đè tệp đã tồn tại.
 - Khóa catalog chỉ bảo vệ trong cùng tiến trình SqlPro; không loại trừ hoàn toàn thay đổi từ chương trình khác giữa stat và unlink. Không xem SQL filter/trial như sandbox chống mọi tác động gián tiếp của server.
 - Journal ownership không bảo đảm tự dọn nếu crash sau CREATE trước marker; trường hợp đó vẫn cần DBA kiểm tra. Mất userData/khóa có thể mất khả năng nhận diện.
 - Retention/history ghi atomic nhưng chưa có checkpoint bền vững mỗi unlink hoặc kiểm chứng mất điện. Báo cáo incomplete cần đối chiếu catalog; không tự tiếp tục xóa hoặc hứa rollback các bản đã xóa.
-- Retention còn dọn thủ công; chưa scheduler, tự dọn sau backup mới hoặc benchmark catalog/dữ liệu lớn. Code orchestration/view trong main/app vẫn cần tách tiếp theo roadmap; không coi G2/G3/G8 đã hoàn tất.
+- Tại commit đợt 2 retention còn thủ công; workspace sau đó đã bổ sung auto-retention, export JSON và scheduler interval MVP (xem `ROADMAP_PROGRESS.md`). Chưa benchmark catalog/dữ liệu lớn hoặc nghiệm thu toàn bộ G3. Code orchestration/view trong main/app vẫn cần tách tiếp theo roadmap; không coi G2/G3/G8 đã hoàn tất.
 
 Thông điệp commit đợt 2: `feat: complete SqlPro batch 2 backup retention and recovery`.
 
-Trạng thái chốt: đã tạo commit local gồm 31 tệp, chưa push. Lượt thử trước bị chặn bởi filesystem chỉ đọc và lỗi refresh token của automatic approval review; lượt commit tiếp theo đã được thực thi thành công. Các giới hạn kiểm chứng ở bảng trên vẫn còn hiệu lực.
+Trạng thái chốt: đã tạo commit local `bd0b78e` gồm 31 tệp, chưa push. Lượt thử trước bị chặn bởi filesystem chỉ đọc và lỗi refresh token của automatic approval review; lượt commit tiếp theo đã thành công. Kiểm chứng bổ sung sau commit được ghi ở mục trên; các giới hạn còn lại vẫn áp dụng.

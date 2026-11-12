@@ -13,6 +13,28 @@ function changed() {
   return Object.assign(new Error('Catalog backup đã thay đổi. Hãy xem trước lại; chưa dọn thêm tệp.'), { code: 'BACKUP_RETENTION_CHANGED' });
 }
 
+function backupScopeKey(entry) {
+  const selection = entry.selection;
+  if (!entry.source?.profileId || !entry.source?.database || !selection || !entry.result
+      || typeof entry.source.target !== 'string' || !/^[a-f0-9]{64}$/.test(entry.source.target)) return null;
+  const lists = ['tables', 'routines', 'events'].map(key => {
+    const list = selection[key];
+    if (!Array.isArray(list) || list.length >= 2000 || list.some(name => typeof name !== 'string' || !name || name.length >= 200)) return null;
+    return [...new Set(list)].sort();
+  });
+  if (lists.some(list => list === null) || ['includeStructure', 'includeData', 'dropTables', 'stripDefiner'].some(key => typeof selection[key] !== 'boolean')) return null;
+  const counts = ['tables', 'views', 'triggers', 'procedures', 'functions', 'events'].map(key => entry.result[key]);
+  if (counts.some(value => !Number.isSafeInteger(value) || value < 0)) return null;
+  // A missing, deduplicated or truncated inventory cannot prove that the new
+  // backup covers these objects. In particular tables:null used to be stored as [].
+  if (lists[0].length !== counts[0] + counts[1] || lists[1].length !== counts[3] + counts[4] || lists[2].length !== counts[5]
+      || lists[1].some(name => !/^(procedure|function):[\s\S]+$/.test(name))
+      || lists[1].filter(name => name.startsWith('procedure:')).length !== counts[3]
+      || lists[1].filter(name => name.startsWith('function:')).length !== counts[4]) return null;
+  return JSON.stringify([entry.source.profileId, entry.source.database, entry.source.target,
+    selection.includeStructure, selection.includeData, selection.dropTables, selection.stripDefiner, lists, counts]);
+}
+
 async function snapshot(root, profileId, database, check = () => {}) {
   check();
   const entries = await listBackups(root, profileId, database, { maxEntries: 2000 });
@@ -44,19 +66,28 @@ class BackupRetentionApply {
     this.pending = new Map();
   }
 
-  async preview(profileId, database, policy) {
+  async preview(profileId, database, policy, { requiredBackupId = null } = {}) {
     if (this.previewBusy) throw Object.assign(new Error('Đang đọc catalog để xem trước. Hãy đợi hoàn tất rồi thử lại.'), { code: 'SESSION_BUSY' });
     this.previewBusy = true;
-    try { return await this.preparePreview(profileId, database, policy); }
+    try { return await this.preparePreview(profileId, database, policy, requiredBackupId); }
     finally { this.previewBusy = false; }
   }
 
-  async preparePreview(profileId, database, policy) {
+  async preparePreview(profileId, database, policy, requiredBackupId) {
     for (const [token, plan] of this.pending) if (plan.expiresAt <= this.now()) this.pending.delete(token);
     for (const [token, plan] of this.pending) if (plan.profileId === profileId && plan.database === database) this.pending.delete(token);
     if (this.pending.size >= 8) throw new Error('Có quá nhiều bản xem trước đang chờ. Hãy đợi 2 phút rồi thử lại.');
     const before = await snapshot(this.root, profileId, database);
-    const plan = planBackupRetention(before.entries, policy, { now: this.now() });
+    let differentScopeIds = [];
+    if (requiredBackupId) {
+      const anchor = before.entries.find(entry => entry.id === requiredBackupId);
+      const key = anchor && backupScopeKey(anchor);
+      if (!key || anchor.source.profileId !== profileId || anchor.source.database !== database
+          || anchor.verification?.fileWritten !== true || anchor.verification?.checksum !== 'verified') throw new Error('Backup mới chưa đủ metadata/checksum để tự dọn.');
+      differentScopeIds = before.entries.filter(entry => backupScopeKey(entry) !== key).map(entry => entry.id);
+    }
+    const plan = planBackupRetention(before.entries, policy, { now: this.now(), differentScopeIds });
+    if (requiredBackupId && !plan.rows.some(row => row.id === requiredBackupId && row.protectedReasons.includes('newest') && row.protectedReasons.includes('latest-verified'))) throw new Error('Backup mới chưa phải bản mới nhất đã xác minh. Không tự dọn.');
     const after = await snapshot(this.root, profileId, database);
     if (before.identity !== after.identity) throw changed();
     if (plan.blocked || !plan.removeCount || plan.removeCount > 100) return plan;
@@ -76,15 +107,18 @@ class BackupRetentionApply {
     return plan;
   }
 
-  async apply(entry, { isCanceled = () => false, signal, onProgress = () => {} } = {}) {
+  async apply(entry, { isCanceled = () => false, signal, onProgress = () => {}, checkContext = () => {} } = {}) {
     const { profileId, database, plan } = entry;
     const candidates = plan.rows.filter(row => row.action === 'remove').reverse();
     const result = { deleted: [], failed: [], remaining: [], reclaimedBytes: 0, stopped: false };
     const check = () => {
       if (isCanceled() || signal?.aborted) throw Object.assign(new Error('Đã dừng dọn backup.'), { code: 'BACKUP_RETENTION_CANCELLED' });
+      checkContext();
     };
-    const progress = (phase, details = {}) => onProgress({ phase, total: candidates.length,
-      deleted: result.deleted.length, reclaimedBytes: result.reclaimedBytes, ...details });
+    const progress = (phase, details = {}) => {
+      try { onProgress({ phase, total: candidates.length, deleted: result.deleted.length, reclaimedBytes: result.reclaimedBytes, ...details }); }
+      catch { /* Display progress must not erase a confirmed deletion result. */ }
+    };
     if (entry.expiresAt <= this.now()) throw new Error('Xác nhận quá 2 phút. Hãy xem trước lại.');
     const paths = entry.snapshot.files.map(file => path.join(backupDirectory(this.root, profileId, database), file.id)).sort();
     try {

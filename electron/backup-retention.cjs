@@ -16,12 +16,13 @@ function normalizeRetentionPolicy(value) {
 }
 
 // Planning only. Never use a displayed plan as authorization to delete files.
-function planBackupRetention(entries, input, { now = Date.now(), activeIds = [] } = {}) {
+function planBackupRetention(entries, input, { now = Date.now(), activeIds = [], differentScopeIds = [] } = {}) {
   const policy = normalizeRetentionPolicy(input);
   if (!Array.isArray(entries) || !Number.isFinite(now)) throw new Error('Danh sách backup hoặc thời gian không hợp lệ.');
   const seen = new Set();
   const byId = new Map();
   const active = new Set(activeIds);
+  const differentScope = new Set(differentScopeIds);
   const rows = entries.map(entry => {
     if (!entry || typeof entry.id !== 'string' || seen.has(entry.id)) throw new Error('Mã backup bị thiếu hoặc trùng.');
     seen.add(entry.id);
@@ -31,6 +32,7 @@ function planBackupRetention(entries, input, { now = Date.now(), activeIds = [] 
     const protectedReasons = [];
     if (entry.pinned === true) protectedReasons.push('pinned');
     if (active.has(entry.id)) protectedReasons.push('active');
+    if (differentScope.has(entry.id)) protectedReasons.push('different-scope');
     if (entry.annotationError || entry.manifestError) protectedReasons.push('metadata-error');
     if (!Number.isFinite(time) || time > now) protectedReasons.push('invalid-date');
     if (!validBytes) protectedReasons.push('invalid-size');

@@ -420,7 +420,7 @@ function updateTransferProgress(progress) {
       const name = typeof progress.objectName === 'string' ? progress.objectName : '';
       const index = Number(progress.objectIndex) || 0;
       const total = Number(progress.objectTotal) || 0;
-      currentObject.textContent = progress.stage === 'finishing' ? 'Đang hoàn tất tệp backup…'
+      currentObject.textContent = progress.stage === 'retention' ? String(progress.message || 'Đang tự dọn backup cũ…') : progress.stage === 'finishing' ? 'Đang hoàn tất tệp backup…'
         : stage && name ? `${stage}: ${name}${index && total ? ` (${index}/${total})` : ''}`
           : 'Đang chuẩn bị danh sách bảng…';
       currentObject.title = currentObject.textContent;
@@ -435,7 +435,8 @@ function updateTransferProgress(progress) {
       setProgressValue(bar, null);
       if (percentLabel) percentLabel.textContent = 'Tiến độ ước tính: chưa đủ dữ liệu';
     }
-    if (step) step.textContent = progress.stage === 'finishing' ? '● Đang hoàn tất'
+    if (step) step.textContent = progress.stage === 'retention' ? '● Backup đã ghi xong · Đang tự dọn'
+      : progress.stage === 'finishing' ? '● Đang hoàn tất'
       : progress.stage === 'table-data' ? '● Đang xuất dữ liệu' : '● Đang xuất cấu trúc';
   } else if (progress.operation === 'export') {
     detail.textContent = `${Number(progress.rows || 0).toLocaleString()} dòng đã xuất`;
@@ -1303,6 +1304,11 @@ async function init() {
 
   desktop.onDbProgress?.((progress) => {
     if (!progress || typeof progress !== 'object') return;
+    if (progress.scheduled && progress.stage === 'scheduled-finish') {
+      const labels = { completed: 'Đã lưu backup theo lịch', canceled: 'Đã hủy backup theo lịch', failed: 'Backup theo lịch có lỗi' };
+      setStatus(`${labels[progress.status] || 'Backup theo lịch đã kết thúc'} · ${progress.database || ''}${progress.needsReview ? ' · Cần xem lại kết quả' : ''}`);
+      return;
+    }
     updateTransferProgress(progress);
     if (progress.operation === 'backup') {
       setStatus(`Đang sao lưu… ${progress.rows || 0} dòng · ${formatBytes(progress.bytes)}`);
@@ -3839,6 +3845,7 @@ function renderBackupsView() {
         <button data-backup-action="delete" class="danger" ${selected && !selected.pinned && !selected.annotationError ? '' : 'disabled'}>⌫ Xóa bản sao lưu</button>
         <button data-backup-action="export" ${selected ? '' : 'disabled'}>⇩ Xuất tệp SQL</button>
         <button data-backup-action="refresh">↻ Làm mới</button>
+        <button data-backup-action="schedule">◷ Lịch backup…</button>
         <button data-backup-action="trial-recovery">Database thử còn sót…</button>
         <button data-backup-action="retention-preview">Xem trước dọn backup…</button>
         <button data-backup-action="retention-history">Lịch sử dọn backup…</button>
@@ -3873,14 +3880,133 @@ function backupContextMenuHtml(hasSelection) {
     ${item('refresh', '↻', 'Làm mới')}`;
 }
 
+async function showBackupSchedule() {
+  const profileId = app.connection?.id;
+  const database = app.database;
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const localInput = date => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  modal(`<section id="backupScheduleEditor"><h2>Lịch backup</h2><p>${esc(app.connection?.name || profileId || '')} · ${esc(database || '')}</p>
+    <p>Sao lưu cấu trúc và dữ liệu của toàn bộ bảng, view, routine và event mà tài khoản nhìn thấy bằng phiên riêng, vào catalog trên máy này. Chính sách tự dọn đã bật sẽ áp dụng sau khi backup thành công.</p>
+    <label for="backupScheduleHours">Chu kỳ (giờ trôi qua, 1–168)</label><input id="backupScheduleHours" type="number" min="1" max="168" step="1" value="24">
+    <label for="backupScheduleStart">Lần chạy đầu (${esc(timeZone)})</label><input id="backupScheduleStart" type="datetime-local" value="${localInput(new Date(Date.now() + 3600000))}">
+    <p class="hint">Chỉ chạy khi ứng dụng đang mở. Lịch tính theo số giờ trôi qua, không cố định giờ địa phương khi đổi DST. Quá hạn 60 giây do đóng app, sleep hoặc tác vụ khác sẽ được ghi nhận bỏ lỡ; không chạy bù và không tự retry. Tối đa một tác vụ database cùng lúc.</p>
+    <div id="backupScheduleState" role="status" aria-live="polite">Đang đọc lịch…</div>
+    <p id="backupScheduleMessage" role="status" aria-live="polite"></p>
+    <div class="actions"><button data-click="close-modal">Đóng</button><button id="refreshBackupSchedule" disabled>Cập nhật trạng thái</button><button id="pauseBackupSchedule" disabled>Tạm dừng lịch</button><button id="deleteBackupSchedule" disabled>Xóa lịch</button><button id="saveBackupSchedule" class="primary" disabled>Lưu và bật lịch (Ctrl+Enter)</button></div></section>`, true);
+  const editor = $('#backupScheduleEditor');
+  const state = $('#backupScheduleState');
+  const message = $('#backupScheduleMessage');
+  const hours = $('#backupScheduleHours');
+  const start = $('#backupScheduleStart');
+  const save = $('#saveBackupSchedule');
+  const pause = $('#pauseBackupSchedule');
+  const remove = $('#deleteBackupSchedule');
+  const refresh = $('#refreshBackupSchedule');
+  let busy = false, loaded = false, schedule = null, edited = false;
+  const matches = () => $('#backupScheduleEditor') === editor && app.connection?.id === profileId && app.database === database;
+  const controls = () => {
+    save.disabled = busy || !loaded;
+    pause.disabled = busy || !loaded || !schedule?.enabled;
+    remove.disabled = busy || !loaded || !schedule;
+    refresh.disabled = busy;
+    hours.disabled = start.disabled = busy;
+  };
+  const renderState = result => {
+    schedule = result.schedule;
+    if (!schedule) { state.textContent = 'Chưa có lịch cho database này.'; return; }
+    const labels = { running: 'Đang chạy', completed: 'Đã lưu backup', failed: 'Có lỗi', canceled: 'Đã hủy',
+      missed: 'Bỏ lỡ do quá hạn', busy: 'Bỏ lỡ do có tác vụ khác', incomplete: 'Lần chạy trước bị gián đoạn' };
+    const warnings = { MANIFEST_WRITE_FAILED: 'Manifest chưa ghi thành công; cần xác minh backup', RETENTION_FAILED: 'Tự dọn có lỗi',
+      RETENTION_STOPPED: 'Tự dọn đã dừng', RETENTION_SKIPPED: 'Đã bỏ qua tự dọn', RETENTION_HISTORY_FAILED: 'Lịch sử dọn chưa lưu đầy đủ' };
+    const format = value => new Intl.DateTimeFormat('vi-VN', { timeZone: schedule.timeZone, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
+    const run = schedule.lastRun;
+    state.innerHTML = `<p>${schedule.enabled ? 'Lịch đã bật' : 'Lịch đã tạm dừng'} · Mỗi ${esc(schedule.intervalHours)} giờ · Lần kế tiếp: ${esc(format(schedule.nextRunAt))} (${esc(schedule.timeZone)})</p>
+      ${result.paused ? '<p class="errorbox">Bộ chạy lịch đang dừng trên phiên ứng dụng này. Lưu và bật lại để tiếp tục.</p>' : ''}
+      ${schedule.targetMatches === false ? '<p class="errorbox">Đích kết nối đã thay đổi. Hãy kiểm tra kết nối và lưu lại lịch trước khi chạy tiếp.</p>' : ''}
+      ${run ? `<p>Lần gần nhất: ${esc(labels[run.status] || run.status)} · Theo lịch ${esc(format(run.scheduledFor))}${run.backupId ? ` · ${esc(run.backupId)}` : ''}${run.errorCode ? ` · ${esc(run.errorCode)}` : ''}</p>` : '<p>Chưa có lần chạy được ghi nhận.</p>'}
+      ${run?.warnings?.length ? `<p class="errorbox">${run.warnings.map(code => esc(warnings[code] || code)).join(' · ')}. Xem chi tiết trong catalog và lịch sử dọn.</p>` : ''}
+      ${result.schedulerError ? `<p class="errorbox">Lỗi bộ chạy lịch: ${esc(result.schedulerError)}</p>` : ''}`;
+  };
+  const load = async (initial = false) => {
+    if (busy || !matches()) return;
+    busy = true; controls();
+    try {
+      const result = await call(desktop.db.getBackupSchedule({ profileId, database }));
+      if (!matches()) return;
+      renderState(result); loaded = true;
+      if (initial && schedule && !edited) {
+        hours.value = String(schedule.intervalHours);
+        start.value = localInput(new Date(schedule.nextRunAt));
+      }
+    } catch (error) { if (matches()) message.textContent = error.message; }
+    finally { busy = false; if (matches()) controls(); }
+  };
+  const mutate = async action => {
+    if (busy || !loaded || !matches()) return;
+    if (action === 'pause' && !schedule?.enabled || action === 'delete' && !schedule) return;
+    let payload = { profileId, database };
+    if (action === 'save') {
+      const intervalHours = Number(hours.value);
+      const next = new Date(start.value);
+      if (!Number.isInteger(intervalHours) || intervalHours < 1 || intervalHours > 168 || !hours.validity.valid) {
+        message.textContent = 'Chu kỳ phải là số nguyên từ 1 đến 168 giờ.'; hours.focus(); return;
+      }
+      if (!start.value || !start.validity.valid || !Number.isFinite(next.getTime()) || next.getTime() <= Date.now()) {
+        message.textContent = 'Hãy chọn lần chạy đầu trong tương lai.'; start.focus(); return;
+      }
+      payload = { ...payload, intervalHours, nextRunAt: next.toISOString(), timeZone };
+    }
+    busy = true; controls(); message.textContent = 'Đang xử lý…';
+    try {
+      const api = { save: 'saveBackupSchedule', pause: 'pauseBackupSchedule', delete: 'deleteBackupSchedule' }[action];
+      const result = await call(desktop.db[api](payload));
+      if (!matches()) return;
+      if (result.canceled) { message.textContent = 'Đã hủy lưu lịch; nội dung nhập được giữ lại.'; return; }
+      if (action === 'save') renderState({ schedule: result.schedule, paused: false });
+      else if (action === 'delete') renderState({ schedule: null });
+      else renderState({ schedule: { ...schedule, enabled: false } });
+      message.textContent = { save: 'Đã lưu và bật lịch backup.', pause: 'Đã tạm dừng lịch. Nếu đang backup, yêu cầu hủy đã được gửi; cập nhật trạng thái để xem kết quả.', delete: 'Đã xóa lịch. Các tệp backup vẫn được giữ.' }[action];
+    } catch (error) { if (matches()) message.textContent = error.message; }
+    finally { busy = false; if (matches()) controls(); }
+  };
+  hours.addEventListener('input', () => { edited = true; });
+  start.addEventListener('input', () => { edited = true; });
+  save.addEventListener('click', () => mutate('save'));
+  pause.addEventListener('click', () => mutate('pause'));
+  remove.addEventListener('click', () => mutate('delete'));
+  refresh.addEventListener('click', () => load());
+  editor.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void mutate('save'); }
+  });
+  await load(true);
+  if (matches()) hours.focus();
+}
+
 async function showBackupRetentionHistory() {
   const profileId = app.connection?.id;
   const database = app.database;
   modal(`<section id="retentionHistoryView"><h2>Lịch sử dọn backup</h2><p>${esc(app.connection?.name || profileId || '')} · ${esc(database || '')}</p>
     <p class="hint">Lưu tối đa 50 lượt trên máy này để đối chiếu. Lịch sử không khôi phục được các bản đã xóa và không phải log chống sửa đổi.</p>
-    <div id="retentionHistoryResult" role="status" aria-live="polite">Đang đọc lịch sử…</div><div class="actions"><button data-click="close-modal">Đóng</button></div></section>`, true);
+    <div id="retentionHistoryResult" role="status" aria-live="polite">Đang đọc lịch sử…</div>
+    <p id="retentionHistoryExportStatus" role="status" aria-live="polite"></p>
+    <div class="actions"><button data-click="close-modal">Đóng</button><button id="exportRetentionHistoryBtn" disabled>Xuất báo cáo JSON…</button></div></section>`, true);
   const output = $('#retentionHistoryResult');
+  const exportButton = $('#exportRetentionHistoryBtn');
+  const exportStatus = $('#retentionHistoryExportStatus');
   const matches = () => $('#retentionHistoryResult') === output && app.connection?.id === profileId && app.database === database;
+  let exporting = false;
+  exportButton.addEventListener('click', async () => {
+    if (exporting || exportButton.disabled) return;
+    if (!matches()) { exportStatus.textContent = 'Kết nối hoặc database đã thay đổi. Hãy mở lại lịch sử.'; return; }
+    exporting = true; exportButton.disabled = true;
+    exportStatus.textContent = 'Đang chọn nơi lưu báo cáo…';
+    try {
+      const result = await call(desktop.db.exportBackupRetentionHistory({ profileId, database }));
+      if (!matches()) return;
+      exportStatus.textContent = result.canceled ? 'Đã hủy xuất báo cáo.' : `Đã xuất ${result.records} lượt lịch sử. Báo cáo lấy trạng thái tại thời điểm lưu; tác vụ đang chạy có thể chưa có đủ kết quả.`;
+    } catch (error) { if (matches()) exportStatus.textContent = error.message; }
+    finally { exporting = false; exportButton.disabled = false; }
+  });
   try {
     const records = await call(desktop.db.backupRetentionHistory({ profileId, database }));
     if (!matches()) return;
@@ -3888,12 +4014,14 @@ async function showBackupRetentionHistory() {
     output.innerHTML = records.map(record => `<details class="backup-retention-history"><summary>${esc(new Date(record.startedAt).toLocaleString('vi-VN'))} · ${esc(labels[record.state] || record.state)} · Đã ghi nhận xóa ${record.deleted.length}/${record.planned.length} bản</summary>
       ${record.state === 'incomplete' ? '<p class="errorbox">Báo cáo chưa hoàn tất hoặc ứng dụng đã bị gián đoạn. Số bản hiển thị có thể chưa phản ánh các lần xóa đã thực hiện; hãy đối chiếu catalog. Không tự tiếp tục xóa.</p>' : ''}
       ${record.state === 'running' ? '<p class="hint">Tác vụ vẫn đang chạy. Kết quả chi tiết sẽ có sau khi kết thúc; mở lại lịch sử để cập nhật.</p>' : ''}
+      <p>${record.mode === 'automatic' ? `Tự dọn sau backup ${esc(record.triggerBackupId || '')}` : 'Dọn thủ công'}</p>
       ${['running', 'incomplete'].includes(record.state) ? `<h4>Danh sách dự kiến (${record.planned.length})</h4><ul>${record.planned.map(id => `<li>${esc(id)}</li>`).join('')}</ul>` : ''}
       <p>Dung lượng SQL đã ghi nhận: ${formatBytes(record.reclaimedBytes)}${record.finishedAt ? ` · Kết thúc: ${esc(new Date(record.finishedAt).toLocaleString('vi-VN'))}` : ''}</p>
       <p>Giới hạn: ${record.policy.maxCount === null ? 'Không giới hạn số bản' : `${esc(record.policy.maxCount)} bản`} · ${record.policy.maxAgeDays === null ? 'Không giới hạn tuổi' : `${esc(record.policy.maxAgeDays)} ngày`} · ${record.policy.maxBytes === null ? 'Không giới hạn dung lượng' : formatBytes(record.policy.maxBytes)}</p>
       <h4>Đã xóa (${record.deleted.length})</h4><ul>${record.deleted.map(id => `<li>${esc(id)}</li>`).join('') || '<li>Chưa ghi nhận</li>'}</ul>
       <h4>Chưa xóa (${record.remaining.length})</h4><ul>${record.remaining.map(id => `<li>${esc(id)}</li>`).join('') || '<li>Không có bản được ghi nhận trong danh sách này</li>'}</ul>
       ${record.failed.length ? `<h4>Lỗi</h4><ul>${record.failed.map(error => `<li>${esc(error.id)} · ${esc(error.code)}${error.sqlDeleted ? ' · SQL đã xóa, cần kiểm tra metadata còn sót' : ''}</li>`).join('')}</ul>` : ''}</details>`).join('') || '<p>Chưa có lịch sử dọn backup cho database này.</p>';
+    exportButton.disabled = false;
   } catch (error) { if (matches()) output.textContent = error.message; }
 }
 
@@ -3906,7 +4034,9 @@ function previewBackupRetention() {
     <label for="retentionCount">Số bản tối đa</label><input id="retentionCount" type="number" min="1" max="100000" step="1" value="10">
     <label for="retentionAge">Tuổi tối đa (ngày)</label><input id="retentionAge" type="number" min="1" max="36500" step="1" placeholder="Không giới hạn">
     <label for="retentionMiB">Tổng dung lượng tối đa (MiB)</label><input id="retentionMiB" type="number" min="0.00000095367431640625" max="8589934591" step="any" placeholder="Không giới hạn">
-    <p class="hint">Xem trước không xóa tệp. Nút Dọn yêu cầu xác nhận riêng và kiểm tra lại backup. Chưa tự chạy theo lịch. Dung lượng chỉ tính SQL; checksum không thay thế phục hồi thử.</p>
+    <label class="checkline"><input id="retentionAutomatic" type="checkbox"> Tự dọn sau khi backup mới thành công</label>
+    <p class="hint">Chỉ dọn bản cùng nguồn và cùng phạm vi lựa chọn với backup mới, giữ bản ghim. Bật tính năng cần xác nhận riêng; các lần backup sau sẽ tự áp dụng trên máy này. Xóa không thể hoàn tác.</p>
+    <p class="hint">Xem trước không xóa tệp. Nút Dọn yêu cầu xác nhận riêng và kiểm tra lại backup. Dung lượng chỉ tính SQL; checksum không thay thế phục hồi thử.</p>
     <p id="backupRetentionPolicyStatus" role="status" aria-live="polite">Đang đọc chính sách đã lưu…</p>
     <div class="actions"><button data-click="close-modal">Đóng</button><button id="saveRetentionPolicyBtn" disabled>Lưu chính sách</button><button id="clearRetentionPolicyBtn" disabled>Xóa chính sách đã lưu</button><button id="previewRetentionBtn" class="primary">Xem trước (Ctrl+Enter)</button></div>
     <button id="applyRetentionBtn" class="danger" disabled>Dọn các bản đã xem trước…</button>
@@ -3917,6 +4047,8 @@ function previewBackupRetention() {
   const output = $('#backupRetentionResult');
   const button = $('#previewRetentionBtn');
   const inputs = [$('#retentionCount'), $('#retentionAge'), $('#retentionMiB')];
+  const automatic = $('#retentionAutomatic');
+  const controls = [...inputs, automatic];
   const policyStatus = $('#backupRetentionPolicyStatus');
   const saveButton = $('#saveRetentionPolicyBtn');
   const clearButton = $('#clearRetentionPolicyBtn');
@@ -3941,7 +4073,7 @@ function previewBackupRetention() {
     'bytes-unmet': 'Chưa đạt giới hạn dung lượng vì có bản được bảo vệ.',
     'age-unmet': 'Còn bản quá tuổi được giữ lại.' };
   const contextMatches = () => $('#backupRetentionResult') === output && app.connection?.id === profileId && app.database === database;
-  inputs.forEach(input => input.addEventListener('input', () => {
+  controls.forEach(input => input.addEventListener('input', () => {
     currentPlan = null; applyButton.disabled = true;
     generation++; output.textContent = 'Giới hạn đã thay đổi. Hãy xem trước lại.';
   }));
@@ -3967,8 +4099,8 @@ function previewBackupRetention() {
       if (!contextMatches()) return;
       policyLoaded = true;
       hasSavedPolicy = Boolean(saved.policy);
-      if (generation === loadGeneration) setInputPolicy(saved.policy);
-      policyStatus.textContent = saved.policy ? `Có chính sách lưu cục bộ${generation !== loadGeneration ? '; giữ nguyên nội dung bạn đang nhập' : ''}. Lưu chính sách không tự xóa backup.` : 'Chưa lưu chính sách cho database này.';
+      if (generation === loadGeneration) { setInputPolicy(saved.policy); automatic.checked = saved.automaticAfterBackup === true; }
+      policyStatus.textContent = saved.policy ? `Có chính sách lưu cục bộ${generation !== loadGeneration ? '; giữ nguyên nội dung bạn đang nhập' : ''}. Tự dọn đã lưu: ${saved.automaticAfterBackup ? 'Bật' : 'Tắt'}.` : 'Chưa lưu chính sách cho database này.';
       saveButton.disabled = busy || policyBusy;
       clearButton.disabled = busy || policyBusy || !saved.policy;
     } catch (error) {
@@ -3986,16 +4118,18 @@ function previewBackupRetention() {
     const clearWasDisabled = clearButton.disabled;
     policyBusy = true;
     saveButton.disabled = clearButton.disabled = true;
-    inputs.forEach(input => { input.disabled = true; });
+    controls.forEach(input => { input.disabled = true; });
     try {
       const result = await call(clear
         ? desktop.db.clearBackupRetentionPolicy({ profileId, database })
-        : desktop.db.saveBackupRetentionPolicy({ profileId, database, policy }));
+        : desktop.db.saveBackupRetentionPolicy({ profileId, database, policy, automaticAfterBackup: automatic.checked }));
       if (!contextMatches() || request !== generation) return;
+      if (result.canceled) { policyStatus.textContent = 'Đã hủy bật tự dọn. Chính sách cũ được giữ nguyên.'; clearButton.disabled = clearWasDisabled; return; }
       if (clear) setInputPolicy(null);
+      automatic.checked = result.automaticAfterBackup === true;
       clearButton.disabled = !result.policy;
       hasSavedPolicy = Boolean(result.policy);
-      policyStatus.textContent = clear ? 'Đã xóa chính sách lưu cục bộ. Backup được giữ nguyên.' : 'Đã lưu chính sách cho database này. Chưa bật tự động dọn backup.';
+      policyStatus.textContent = clear ? 'Đã xóa chính sách lưu cục bộ. Backup được giữ nguyên.' : `Đã lưu chính sách cho database này. Tự dọn: ${result.automaticAfterBackup ? 'Bật' : 'Tắt'}.`;
       output.textContent = 'Hãy xem trước với giới hạn hiện tại.';
     } catch (error) {
       if (contextMatches() && request === generation) policyStatus.textContent = error.message;
@@ -4003,7 +4137,7 @@ function previewBackupRetention() {
     } finally {
       policyBusy = false;
       saveButton.disabled = false;
-      inputs.forEach(input => { input.disabled = false; });
+      controls.forEach(input => { input.disabled = false; });
     }
   };
   saveButton.addEventListener('click', () => changePolicy(false));
@@ -4075,7 +4209,7 @@ function previewBackupRetention() {
       if (!finished && contextMatches() && retentionTaskId === taskId) timer = setTimeout(poll, 500);
     };
     busy = true; button.disabled = saveButton.disabled = clearButton.disabled = true;
-    inputs.forEach(input => { input.disabled = true; });
+    controls.forEach(input => { input.disabled = true; });
     output.textContent = 'Đang chờ xác nhận danh sách và kiểm tra lại backup…';
     try {
       const pending = call(desktop.db.applyBackupRetention({ profileId, database, token, taskId }));
@@ -4095,7 +4229,7 @@ function previewBackupRetention() {
       busy = false; button.disabled = false;
       saveButton.disabled = !policyLoaded;
       clearButton.disabled = !policyLoaded || !hasSavedPolicy;
-      inputs.forEach(input => { input.disabled = false; });
+      controls.forEach(input => { input.disabled = false; });
     }
   });
   editor.addEventListener('keydown', event => {
@@ -4159,6 +4293,7 @@ function editBackupAnnotations() {
 }
 
 async function runBackupManagerAction(action) {
+  if (action === 'schedule') return showBackupSchedule();
   if (action === 'retention-history') return showBackupRetentionHistory();
   if (action === 'retention-preview') return previewBackupRetention();
   if (action === 'annotations') return editBackupAnnotations();
@@ -8453,6 +8588,18 @@ async function disconnect() {
   persistState();
 }
 
+function automaticRetentionResultHtml(result) {
+  const retention = result?.retention;
+  if (!retention || retention.status === 'disabled') return '';
+  const status = { completed: 'Tự dọn hoàn tất', stopped: 'Đã dừng tự dọn', failed: 'Tự dọn có lỗi', skipped: 'Chưa tự dọn' }[retention.status] || 'Kết quả tự dọn';
+  return `<section class="hint"><strong>${esc(status)}</strong><p>Bản backup mới đã được ghi thành công.${retention.reason ? ` ${esc(retention.reason)}` : ''}</p>
+    ${Array.isArray(retention.deleted) ? `<p>Đã xóa ${retention.deleted.length} bản cũ · ${formatBytes(retention.reclaimedBytes || 0)} SQL; còn ${retention.remaining?.length || 0} bản trong kế hoạch chưa xóa.</p>` : ''}
+    ${(retention.failed || []).map(error => `<p>${esc(error.id)}: ${esc(error.message || error.code)}${error.sqlDeleted ? ' · SQL đã xóa, cần kiểm tra metadata' : ''}</p>`).join('')}
+    ${retention.historySaveError ? `<p>Không lưu được báo cáo cuối: ${esc(retention.historySaveError)}</p>` : ''}
+    ${retention.warnings?.length ? '<p>Có giới hạn chưa đạt hoặc bản cần được giữ lại; xem trước retention để kiểm tra chi tiết.</p>' : ''}
+    <p>Xem chi tiết trong Lịch sử dọn backup.</p></section>`;
+}
+
 function backupDatabase() {
   if (!desktop) return;
   if (!app.connection || !app.database) {
@@ -8649,6 +8796,7 @@ function backupDatabase() {
         <p>Đã sao lưu ${parts.join(', ')} (${Number(result.rows || 0).toLocaleString()} dòng) · ${formatBytes(result.bytes)}.</p>
         ${(result.warnings || []).map((message) => `<div class="hint" role="status">${esc(message)}</div>`).join('')}
         ${backupIntegrityHtml(result)}
+        ${automaticRetentionResultHtml(result)}
         <label>Đường dẫn tệp đã lưu</label>
         <input value="${esc(result.filePath)}" readonly aria-label="Đường dẫn tệp sao lưu">
       `, taskId);

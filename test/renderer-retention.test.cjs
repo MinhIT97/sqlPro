@@ -6,8 +6,8 @@ const { loadRenderer } = require('./helpers/renderer.cjs');
 
 function setup(preview, overrides = {}) {
   const elements = new Map();
-  for (const selector of ['#backupRetentionEditor', '#backupRetentionResult', '#previewRetentionBtn', '#retentionCount', '#retentionAge', '#retentionMiB', '#backupRetentionPolicyStatus', '#saveRetentionPolicyBtn', '#clearRetentionPolicyBtn', '#applyRetentionBtn', '#stopRetentionBtn', '#retentionTaskStatus']) {
-    elements.set(selector, { value: '', validity: { valid: true }, innerHTML: '', textContent: '', disabled: false,
+  for (const selector of ['#backupRetentionEditor', '#backupRetentionResult', '#previewRetentionBtn', '#retentionCount', '#retentionAge', '#retentionMiB', '#backupRetentionPolicyStatus', '#saveRetentionPolicyBtn', '#clearRetentionPolicyBtn', '#applyRetentionBtn', '#stopRetentionBtn', '#retentionTaskStatus', '#retentionAutomatic']) {
+    elements.set(selector, { value: '', checked: false, validity: { valid: true }, innerHTML: '', textContent: '', disabled: false,
       listeners: {}, addEventListener(name, fn) { this.listeners[name] = fn; }, focus() { this.focused = true; } });
   }
   const r = loadRenderer({ desktop: { db: { previewBackupRetention: preview,
@@ -112,11 +112,29 @@ test('saved policy loads exact byte limits, saves captured target and clears wit
   assert.equal(Number(r.get('#retentionCount').value), 7);
   assert.equal(Number(r.get('#retentionMiB').value) * 1048576, 1048577);
   await r.get('#saveRetentionPolicyBtn').listeners.click();
-  assert.equal(JSON.stringify(calls[0]), JSON.stringify({ profileId: 'p1', database: 'demo', policy }));
+  assert.equal(JSON.stringify(calls[0]), JSON.stringify({ profileId: 'p1', database: 'demo', policy, automaticAfterBackup: false }));
   await r.get('#clearRetentionPolicyBtn').listeners.click();
   assert.equal(calls[1].database, 'demo');
   assert.equal(r.get('#retentionCount').value, '10');
   assert.match(r.get('#backupRetentionPolicyStatus').textContent, /Backup được giữ nguyên/);
+});
+
+test('automatic opt-in loads and cancel preserves the prior settings; summaries separate backup from cleanup failure', async () => {
+  const calls = [];
+  const r = setup(async () => response, {
+    getBackupRetentionPolicy: async () => ({ ok: true, data: { policy: { maxCount: 2, maxAgeDays: null, maxBytes: null }, automaticAfterBackup: false } }),
+    saveBackupRetentionPolicy: async payload => { calls.push(payload); return { ok: true, data: { canceled: true } }; }
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(r.get('#retentionAutomatic').checked, false);
+  r.get('#retentionAutomatic').checked = true;
+  await r.get('#saveRetentionPolicyBtn').listeners.click();
+  assert.equal(calls[0].automaticAfterBackup, true);
+  assert.match(r.get('#backupRetentionPolicyStatus').textContent, /Đã hủy bật tự dọn/);
+  assert.equal(r.get('#retentionAutomatic').disabled, false);
+  const html = r.evaluate(`automaticRetentionResultHtml({retention:{status:'failed',reason:'<img>',deleted:['a'],remaining:['b'],reclaimedBytes:9,failed:[]}})`);
+  assert.match(html, /Bản backup mới đã được ghi thành công/);
+  assert.match(html, /&lt;img&gt;/); assert.doesNotMatch(html, /<img>/);
 });
 
 test('late policy load preserves edited draft, and save failure preserves fields', async () => {
@@ -170,7 +188,8 @@ test('retention history escapes records and rejects late results after switching
   for (const stale of [false, true]) {
     let finish;
     const output = { innerHTML: '', textContent: '' };
-    const elements = new Map([['#retentionHistoryResult', output]]);
+    const elements = new Map([['#retentionHistoryResult', output], ['#retentionHistoryExportStatus', { textContent: '' }],
+      ['#exportRetentionHistoryBtn', { disabled: true, addEventListener() {} }]]);
     const r = loadRenderer({ desktop: { db: { backupRetentionHistory: () => new Promise(resolve => { finish = resolve; }) } }, elements });
     r.evaluate("modal=()=>{};app.connection={id:'p1'};app.database='demo'");
     const pending = r.evaluate('showBackupRetentionHistory()');
@@ -185,4 +204,33 @@ test('retention history escapes records and rejects late results after switching
       assert.doesNotMatch(output.innerHTML, /<img>/);
     }
   }
+});
+
+test('history export uses captured scope, prevents duplicate submits and keeps replacement dialog untouched', async () => {
+  const calls = [];
+  let finish;
+  const button = { disabled: true, addEventListener(_name, callback) { this.click = callback; } };
+  const status = { textContent: '' };
+  const output = { innerHTML: '' };
+  const r = loadRenderer({ desktop: { db: {
+    backupRetentionHistory: async () => ({ ok: true, data: [] }),
+    exportBackupRetentionHistory: payload => { calls.push(payload); return new Promise(resolve => { finish = resolve; }); }
+  } }, elements: new Map([['#retentionHistoryResult', output], ['#retentionHistoryExportStatus', status], ['#exportRetentionHistoryBtn', button]]) });
+  r.evaluate("modal=()=>{};app.connection={id:'p1'};app.database='demo'");
+  await r.evaluate('showBackupRetentionHistory()');
+  assert.equal(button.disabled, false);
+  const pending = button.click();
+  await button.click();
+  assert.equal(calls.length, 1);
+  assert.equal(JSON.stringify(calls[0]), JSON.stringify({ profileId: 'p1', database: 'demo' }));
+  finish({ ok: true, data: { canceled: true } }); await pending;
+  assert.match(status.textContent, /Đã hủy/);
+  const late = button.click();
+  r.elements.set('#retentionHistoryResult', { innerHTML: 'new dialog' });
+  status.textContent = 'keep';
+  finish({ ok: true, data: { records: 2 } }); await late;
+  assert.equal(status.textContent, 'keep');
+  r.evaluate("app.database='other'");
+  await button.click();
+  assert.equal(calls.length, 2);
 });

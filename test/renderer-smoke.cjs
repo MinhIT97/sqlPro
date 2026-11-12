@@ -132,11 +132,22 @@ handle('db:backup', (payload) => {
   return result;
 });
 handle('db:list-backups', () => ok([]));
+let savedSchedule = null;
+let cancelScheduleSave = true;
+handle('db:get-backup-schedule', () => ok({ schedule: savedSchedule, paused: false }));
+handle('db:save-backup-schedule', payload => {
+  if (cancelScheduleSave) return ok({ canceled: true });
+  savedSchedule = { ...payload, enabled: true, targetMatches: true, lastRun: null };
+  return ok({ schedule: savedSchedule });
+});
+handle('db:pause-backup-schedule', () => { savedSchedule.enabled = false; return ok({ paused: true }); });
+handle('db:delete-backup-schedule', () => { savedSchedule = null; return ok({ deleted: true }); });
 const retentionCalls = [];
 let savedRetentionPolicy = null;
-handle('db:get-backup-retention-policy', () => ok({ policy: savedRetentionPolicy }));
-handle('db:save-backup-retention-policy', payload => { savedRetentionPolicy = payload.policy; return ok({ policy: savedRetentionPolicy }); });
-handle('db:clear-backup-retention-policy', () => { savedRetentionPolicy = null; return ok({ policy: null }); });
+let savedRetentionAutomatic = false;
+handle('db:get-backup-retention-policy', () => ok({ policy: savedRetentionPolicy, automaticAfterBackup: savedRetentionAutomatic }));
+handle('db:save-backup-retention-policy', payload => { savedRetentionPolicy = payload.policy; savedRetentionAutomatic = payload.automaticAfterBackup; return ok({ policy: savedRetentionPolicy, automaticAfterBackup: savedRetentionAutomatic }); });
+handle('db:clear-backup-retention-policy', () => { savedRetentionPolicy = null; savedRetentionAutomatic = false; return ok({ policy: null, automaticAfterBackup: false }); });
 let holdRetention = false;
 let pendingRetention;
 const retentionFixture = {
@@ -162,6 +173,8 @@ handle('db:backup-retention-status', payload => ok({ running: Boolean(pendingRet
 handle('db:backup-retention-history', () => ok([{ id: 'history-fixture', state: 'incomplete', startedAt: '2026-11-12T12:00:00Z', finishedAt: null,
   planned: ['20260101000000-aaaaaaaa.sql'], deleted: [], remaining: ['20260101000000-aaaaaaaa.sql'], failed: [], reclaimedBytes: 0,
   policy: { maxCount: 1, maxAgeDays: null, maxBytes: null } }]));
+const historyExportCalls = [];
+handle('db:export-backup-retention-history', payload => { historyExportCalls.push(payload); return ok({ canceled: false, records: 1 }); });
 const annotationCalls = [];
 let annotationFailure = false;
 let holdAnnotations = false;
@@ -854,6 +867,8 @@ app.whenReady().then(async () => {
     await until("$('#stopRetentionBtn').hidden");
     holdRetentionApply = false;
     await until("!$('#saveRetentionPolicyBtn').disabled");
+    assert.equal(await evaluate("$('#retentionAutomatic').checked"), false);
+    await evaluate("$('#retentionAutomatic').checked=true;$('#retentionAutomatic').dispatchEvent(new Event('input',{bubbles:true}))");
     await evaluate("$('#saveRetentionPolicyBtn').click()");
     await until("$('#backupRetentionPolicyStatus').textContent.includes('Đã lưu chính sách')");
     assert.deepEqual(savedRetentionPolicy, { maxCount: 1, maxAgeDays: 30, maxBytes: 2097152 });
@@ -862,9 +877,11 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate("$('#retentionCount').value"), '1');
     assert.equal(await evaluate("$('#retentionAge').value"), '30');
     assert.equal(await evaluate("$('#retentionMiB').value"), '2');
+    assert.equal(await evaluate("$('#retentionAutomatic').checked"), true);
     await evaluate("$('#clearRetentionPolicyBtn').click()");
     await until("$('#backupRetentionPolicyStatus').textContent.includes('Đã xóa chính sách')");
     assert.equal(savedRetentionPolicy, null);
+    assert.equal(savedRetentionAutomatic, false);
     const before = retentionCalls.length;
     await evaluate("$('#retentionCount').value='0';$('#previewRetentionBtn').click()");
     await until("$('#backupRetentionResult').textContent.includes('số nguyên dương')");
@@ -898,6 +915,49 @@ app.whenReady().then(async () => {
     win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
     await until("$('#retentionHistoryResult details').open");
     assert.match(await evaluate("$('#retentionHistoryResult details').textContent"), /20260101000000-aaaaaaaa.sql/);
+    await evaluate("$('#exportRetentionHistoryBtn').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#retentionHistoryExportStatus').textContent.includes('Đã xuất 1')");
+    assert.equal(historyExportCalls.length, 1);
+    assert.equal(historyExportCalls[0].database, await evaluate('app.database'));
+    await evaluate("closeModal();mode='query';renderQueryView()");
+  });
+
+  await check('backup schedule supports keyboard save, native Cancel, pause, reload and deleting only the schedule', async () => {
+    const deletesBefore = calls.filter(call => call.name === 'db:delete-backup').length;
+    await evaluate("mode='backups';renderBackupsView();runBackupManagerAction('schedule')");
+    await until("!$('#saveBackupSchedule').disabled");
+    assert.equal(await evaluate('document.activeElement.id'), 'backupScheduleHours');
+    assert.equal(await evaluate("$('#backupScheduleEditor').scrollWidth <= $('#backupScheduleEditor').clientWidth"), true);
+    await captureReview('backup-schedule');
+    await evaluate("$('#backupScheduleHours').value='8';$('#backupScheduleHours').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return', modifiers: ['control'] });
+    await until("$('#backupScheduleMessage').textContent.includes('Đã hủy lưu')");
+    assert.equal(await evaluate("$('#backupScheduleHours').value"), '8');
+    cancelScheduleSave = false;
+    await evaluate("$('#saveBackupSchedule').click()");
+    await until("$('#backupScheduleMessage').textContent.includes('Đã lưu và bật')");
+    assert.equal(savedSchedule.intervalHours, 8);
+    assert.equal(savedSchedule.profileId, await evaluate('app.connection.id'));
+    assert.equal(savedSchedule.database, await evaluate('app.database'));
+    await evaluate("closeModal();runBackupManagerAction('schedule')");
+    await until("!$('#saveBackupSchedule').disabled");
+    assert.equal(await evaluate("$('#backupScheduleHours').value"), '8');
+    await evaluate("$('#pauseBackupSchedule').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupScheduleMessage').textContent.includes('Đã tạm dừng lịch')");
+    assert.equal(savedSchedule.enabled, false);
+    await evaluate("$('#deleteBackupSchedule').click()");
+    await until("$('#backupScheduleMessage').textContent.includes('Đã xóa lịch')");
+    assert.equal(savedSchedule, null);
+    assert.equal(calls.filter(call => call.name === 'db:delete-backup').length, deletesBefore);
+    win.webContents.send('db:progress', { scheduled: true, operation: 'backup', stage: 'scheduled-finish', status: 'completed', database: 'scheduled-db' });
+    await until("$('#status').textContent.includes('Đã lưu backup theo lịch · scheduled-db')");
     await evaluate("closeModal();mode='query';renderQueryView()");
   });
 

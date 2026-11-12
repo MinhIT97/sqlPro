@@ -22,6 +22,10 @@ function normalizeRecord(value) {
       || !Number.isSafeInteger(value.reclaimedBytes) || value.reclaimedBytes < 0
       || !Array.isArray(value.failed) || value.failed.length > 100) throw new Error('Bản ghi lịch sử retention không hợp lệ.');
   const planned = ids(value.planned), deleted = ids(value.deleted), remaining = ids(value.remaining);
+  const mode = value.mode === undefined ? 'manual' : value.mode;
+  const triggerBackupId = value.triggerBackupId === undefined ? null : value.triggerBackupId;
+  if (!['manual', 'automatic'].includes(mode) || mode === 'automatic' && (typeof triggerBackupId !== 'string' || !BACKUP_ID.test(triggerBackupId))
+      || mode === 'manual' && triggerBackupId !== null || triggerBackupId !== null && planned.includes(triggerBackupId)) throw new Error('Nguồn tác vụ retention không hợp lệ.');
   if (deleted.some(id => !planned.includes(id)) || remaining.some(id => !planned.includes(id) || deleted.includes(id))
       || value.failed.some(error => !error || !planned.includes(error.id))) throw new Error('Kết quả lịch sử không khớp danh sách đã lên kế hoạch.');
   if (value.state === 'running' && (deleted.length || remaining.length || value.failed.length || value.reclaimedBytes)
@@ -30,7 +34,7 @@ function normalizeRecord(value) {
       || value.state === 'failed' && !value.failed.length
       || value.failed.some(error => error.sqlDeleted !== deleted.includes(error.id))) throw new Error('Trạng thái lịch sử retention không khớp kết quả.');
   return { id: value.id, state: value.state, startedAt: value.startedAt, finishedAt: value.finishedAt,
-    policy: normalizeRetentionPolicy(value.policy), planned, deleted, remaining,
+    policy: normalizeRetentionPolicy(value.policy), mode, triggerBackupId, planned, deleted, remaining,
     reclaimedBytes: value.reclaimedBytes, failed: value.failed.map(error => {
       if (!error || typeof error.id !== 'string' || !BACKUP_ID.test(error.id)
           || typeof error.code !== 'string' || !/^[A-Z0-9_]{1,80}$/.test(error.code) || typeof error.sqlDeleted !== 'boolean') throw new Error('Mã lỗi lịch sử retention không hợp lệ.');
@@ -65,11 +69,11 @@ function createRetentionHistory(root) {
       fs.renameSync(temporary, file);
     } finally { fs.rmSync(temporary, { force: true }); }
   }
-  function begin(profileId, database, plan) {
+  function begin(profileId, database, plan, { mode = 'manual', triggerBackupId = null } = {}) {
     const records = read(profileId, database);
     if (records.filter(record => record.state === 'running').length >= 50) throw new Error('Lịch sử có quá nhiều lượt chưa xác nhận kết thúc. Cần kiểm tra tệp lịch sử trước khi tiếp tục.');
     const record = normalizeRecord({ id: crypto.randomBytes(16).toString('hex'), state: 'running', startedAt: new Date().toISOString(), finishedAt: null,
-      policy: plan.policy, planned: plan.rows.filter(row => row.action === 'remove').map(row => row.id),
+      policy: plan.policy, mode, triggerBackupId, planned: plan.rows.filter(row => row.action === 'remove').map(row => row.id),
       deleted: [], remaining: [], failed: [], reclaimedBytes: 0 });
     records.unshift(record);
     while (records.length > 50) {
@@ -92,4 +96,15 @@ function createRetentionHistory(root) {
   return { read, begin, finish };
 }
 
-module.exports = { createRetentionHistory };
+function buildRetentionHistoryReport(records, { appVersion, activeHistoryId = null } = {}) {
+  if (!Array.isArray(records) || records.length > 50) throw new Error('Lịch sử retention vượt phạm vi hỗ trợ.');
+  return { kind: 'sqlpro-backup-retention-history', version: 1, exportedAt: new Date().toISOString(),
+    appVersion: typeof appVersion === 'string' ? appVersion.slice(0, 40) : null,
+    note: 'Local history for reference. Incomplete or running records may omit deletions already performed. No automatic resume or recovery of deleted backups.',
+    records: records.map(record => {
+      const normalized = normalizeRecord(record);
+      return { ...normalized, state: normalized.state === 'running' && normalized.id !== activeHistoryId ? 'incomplete' : normalized.state };
+    }) };
+}
+
+module.exports = { createRetentionHistory, buildRetentionHistoryReport };

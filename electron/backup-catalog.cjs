@@ -33,6 +33,23 @@ async function listBackups(root, profileId, database) {
       const filePath = path.join(directory, file.name);
       const stats = await fs.stat(filePath);
       const { manifest, error } = await readManifest(filePath);
+      let trial=null;
+      try {
+        const reportStats=await fs.stat(`${filePath}.trial.json`);
+        if(reportStats.size<=256*1024){
+          const report=JSON.parse(await fs.readFile(`${filePath}.trial.json`,'utf8'));
+          trial={status:report.status,cleanup:report.cleanup,finishedAt:report.finishedAt,checksum:report.checksum,database:report.database};
+        }
+      }catch { /* A report is optional and never changes checksum verification. */ }
+      let displayName;
+      try {
+        const nameStats = await fs.lstat(`${filePath}.name.json`);
+        if (!nameStats.isFile() || nameStats.size > 4096) throw Object.assign(new Error('Tên backup không hợp lệ.'), { code: 'INVALID_BACKUP_NAME' });
+        const metadata = JSON.parse(await fs.readFile(`${filePath}.name.json`, 'utf8'));
+        displayName = normalizeBackupDisplayName(metadata.name);
+      } catch (error) {
+        if (error.code !== 'ENOENT' && !(error instanceof SyntaxError) && error.code !== 'INVALID_BACKUP_NAME') throw error;
+      }
       const legacy = !manifest;
       const verification = manifest
         ? { ...manifest.verification, checksum: sameFileIdentity(manifest.verification?.file, fileIdentity(stats))
@@ -40,7 +57,7 @@ async function listBackups(root, profileId, database) {
         : { fileWritten: true, checksum: 'missing', restore: 'not-tested' };
       return {
         id: file.name,
-        name: file.name.slice(0, 14),
+        name: displayName || file.name.slice(0, 14),
         bytes: stats.size,
         createdAt: manifest?.createdAt || stats.mtime.toISOString(),
         checksum: manifest?.checksum?.value || null,
@@ -49,6 +66,7 @@ async function listBackups(root, profileId, database) {
         selection: manifest?.selection || null,
         result: manifest?.result || null,
         legacy,
+        trial,
         ...(error ? { manifestError: error } : {})
       };
     }));
@@ -61,6 +79,27 @@ async function resolveBackup(root, profileId, database, id) {
   const stats = await fs.lstat(filePath);
   if (!stats.isFile()) throw new Error('Không tìm thấy tệp sao lưu.');
   return filePath;
+}
+
+function normalizeBackupDisplayName(value) {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > 120 || /[\x00-\x1f\x7f]/.test(value)) {
+    throw Object.assign(new Error('Tên bản sao lưu phải có từ 1 đến 120 ký tự và không chứa ký tự điều khiển.'), { code: 'INVALID_BACKUP_NAME' });
+  }
+  return value.trim();
+}
+
+async function renameBackup(root, profileId, database, id, value) {
+  const name = normalizeBackupDisplayName(value);
+  const filePath = await resolveBackup(root, profileId, database, id);
+  const target = `${filePath}.name.json`;
+  const temporary = `${target}.${crypto.randomBytes(8).toString('hex')}.part`;
+  try {
+    await fs.writeFile(temporary, JSON.stringify({ name }), { flag: 'wx', mode: 0o600 });
+    await fs.rename(temporary, target);
+  } finally {
+    await fs.rm(temporary, { force: true });
+  }
+  return { id, name };
 }
 
 async function verifyBackup(root, profileId, database, id) {
@@ -203,4 +242,4 @@ async function copyBackup(root, sourceProfileId, targetProfileId, sourceDatabase
   };
 }
 
-module.exports = { backupDirectory, backupName, listBackups, resolveBackup, copyBackup, verifyBackup };
+module.exports = { backupDirectory, backupName, listBackups, resolveBackup, copyBackup, verifyBackup, renameBackup };

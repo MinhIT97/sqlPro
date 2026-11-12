@@ -8,6 +8,35 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { backupDirectory, backupName, listBackups, resolveBackup, copyBackup, verifyBackup } = require('../electron/backup-catalog.cjs');
 const { saveBackupFile, readManifest } = require('../electron/backup-file.cjs');
+const { renameBackup } = require('../electron/backup-catalog.cjs');
+
+test('đổi tên backup lưu bền tên tiếng Việt và giữ nội dung, checksum, ID', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-rename-'));
+  try {
+    const directory = backupDirectory(root, 'conn', 'db');
+    await fs.mkdir(directory, { recursive: true });
+    for (const legacy of [false, true]) {
+      const id = backupName();
+      const file = path.join(directory, id);
+      if (legacy) await fs.writeFile(file, 'SELECT 1;');
+      else await saveBackupFile(file, async (write) => { await write('SELECT 1;'); return { bytes: 9 }; });
+      const originalManifest = await readManifest(file);
+      await renameBackup(root, 'conn', 'db', id, '  Trước cập nhật tháng 11  ');
+      const entry = (await listBackups(root, 'conn', 'db')).find((entry) => entry.id === id);
+      assert.equal(entry.name, 'Trước cập nhật tháng 11');
+      assert.equal(entry.legacy, legacy);
+      assert.equal(await fs.readFile(file, 'utf8'), 'SELECT 1;');
+      assert.deepEqual(await readManifest(file), originalManifest);
+      for (const name of ['', '   ', 'x'.repeat(121), 'a\nb', null]) {
+        await assert.rejects(renameBackup(root, 'conn', 'db', id, name), { code: 'INVALID_BACKUP_NAME' });
+      }
+      await assert.rejects(renameBackup(root, 'conn', 'db', '../outside.sql', 'test'), /không hợp lệ/);
+      await assert.rejects(renameBackup(root, 'other', 'db', id, 'test'), { code: 'ENOENT' });
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
 
 test('backup được liệt kê riêng theo kết nối và database', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-catalog-'));

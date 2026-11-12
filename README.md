@@ -6,6 +6,9 @@ SqlPro là ứng dụng desktop Electron quản trị MySQL/MariaDB trên Window
 
 - Kết nối MySQL/MariaDB qua TCP, SSL/TLS và SSH tunnel.
 - Workspace cá nhân để nhóm kết nối theo dự án hoặc môi trường.
+- Nhãn môi trường Local/Staging/Production trên kết nối và tab SQL; kết nối cũ mặc định “Chưa phân loại”. Nhãn không thay đổi quyền database.
+- Chế độ **Chỉ đọc** trong cấu hình kết nối: main chặn ghi dòng, import, restore, commit và SQL thay đổi dữ liệu/máy chủ; kiểm tra toàn bộ batch trước khi chạy. Vẫn xem/lọc/xuất dữ liệu và tạo backup được. Profile cũ giữ quyền thao tác hiện tại; bật/tắt chỉ đọc không thay quyền của tài khoản MySQL/MariaDB.
+- Thanh trạng thái transaction theo phiên, Commit/Rollback có xác nhận và kiểm tra phiên/transaction chưa thay đổi. Các tab cùng kết nối dùng chung phiên; DDL có thể tự commit. Thời gian hiển thị là lúc ứng dụng quan sát transaction, không phải thời điểm bắt đầu chính xác phía server.
 - Tài khoản đồng bộ tùy chọn: đẩy connection/workspace lên server và kéo về máy khác, có mã hóa đầu cuối.
 - Duyệt database, bảng, view; xem dữ liệu, cấu trúc, index và khóa ngoại.
 - Chạy nhiều câu SQL phân cách bằng `;` theo thứ tự; vùng kết quả có tab **Message**, **Summary**, **Result 1**, **Result 2**… để xem từng lưới dữ liệu; hủy truy vấn, timeout, lịch sử truy vấn.
@@ -25,6 +28,38 @@ Registry giữ tối đa 8 phiên, gộp các yêu cầu mở cùng profile và 
 
 Sửa/xóa dòng từ lưới đối chiếu giá trị gốc để phát hiện xung đột; text phân biệt hoa/thường/dấu/khoảng trắng, JSON được so sánh như document và BLOB preview dùng hash của toàn bộ byte. Khi thiếu dữ liệu gốc đầy đủ, thao tác báo lỗi và giữ nội dung nhập. Xóa trong phiên có transaction hoặc autocommit tắt dùng savepoint, không tự commit thay người dùng; cần Commit/Rollback theo luồng SQL của phiên.
 
+### Giới hạn của chế độ chỉ đọc
+
+Đây là lớp bảo vệ thao tác trong SqlPro, không phải sandbox SQL hay thay thế phân quyền phía server. Nên dùng tài khoản database có quyền tối thiểu và kiểm tra quyền/DEFINER của view, routine và UDF, vì câu SELECT có thể gọi mã phía server một cách gián tiếp.
+
+Chế độ này cho phép SELECT thông thường, CTE SELECT cơ bản, một số hàm dựng sẵn, SHOW/DESCRIBE, EXPLAIN SELECT, USE và ROLLBACK. Câu ghi, locking read, INTO OUTFILE/DUMPFILE, executable comment, EXPLAIN ANALYZE, hàm tùy biến hoặc cú pháp chưa nhận diện sẽ bị từ chối trước khi chạy batch. Chuỗi có backslash bị từ chối để tránh đoán sai SQL mode; có thể dùng dấu nháy đơn lặp đôi khi phù hợp. Kết nối không bật chỉ đọc giữ hành vi SQL hiện có.
+
+Không thể sửa cấu hình kết nối khi có transaction, autocommit OFF hoặc tác vụ đang chạy. Kết thúc transaction và bật lại autocommit trước khi lưu; ứng dụng không tự rollback để đổi cấu hình.
+
+### Xác nhận thao tác trên Production
+
+Trong chi tiết backup có **Phục hồi thử vào database tạm**. Bản đầu hỗ trợ bảng InnoDB thông thường và INSERT literal trong tệp tối đa 512 MiB; cần quyền tạo/xóa database trên kết nối được chọn và dung lượng trống. Ứng dụng tạo schema `sqlpro_trial_*`, kiểm tra số dòng/khóa ngoại rồi đối chiếu marker trước khi xóa. Nếu dọn thất bại, báo cáo ghi tên schema cần kiểm tra thủ công. Báo cáo gắn checksum tệp và lưu cạnh backup ở `.trial.json`; kết quả không xác nhận hash toàn bộ dữ liệu. View/trigger/routine/event, schema ghi rõ không khớp và một số biểu thức SQL chưa được hỗ trợ. Chưa có quota dung lượng hoặc timeout tổng; nên thử trên máy chủ kiểm thử riêng trước.
+
+Nút **Hủy phục hồi thử** dừng sao chép/đọc tệp hoặc gửi yêu cầu hủy tới scanner/restore, sau đó kiểm tra cleanup. Sau 10 phút phần xử lý chính tự yêu cầu hủy; việc dừng phụ thuộc ranh giới tác vụ/server, và cleanup chưa có deadline riêng. Nếu kết nối bị đóng do hủy restore, có thể cần dọn schema tạm thủ công theo báo cáo.
+
+Các lệnh kiểm tra marker và xóa schema tạm có timeout driver 15 giây mỗi lệnh. Khi hết thời gian, báo cáo ghi trạng thái cần dọn thủ công; ứng dụng không tự xóa schema nếu không xác nhận được ownership.
+
+Đọc nội dung backup hỗ trợ nút Hủy quét, chỉ một lượt quét cùng lúc và cache hiển thị 5 phút (tối đa 4 bản). Tệp thay đổi sẽ phải quét lại; cache không được dùng để bỏ qua preflight/checksum khi restore. Quét quá 5 phút được yêu cầu hủy; dữ liệu hiển thị có giới hạn và báo khi danh sách bị cắt.
+
+Tiến độ quét hiển thị byte đã đọc và số câu SQL; đọc 100% vẫn có thể đang phân tích/kiểm tra tệp. Các lượt xem cùng backup dùng chung một lần quét; hủy từ một lượt xem sẽ dừng tác vụ chung. Tiến độ chỉ được hỏi khi vùng chi tiết đang hiển thị.
+
+Kết nối được gắn nhãn Production yêu cầu xem trước và xác nhận khi thêm/sửa/xóa bản ghi hoặc chạy SQL mà ứng dụng không phân loại chắc chắn là đọc. Hộp thoại hiển thị kết nối, host, database ban đầu, bảng/cột khi xác định được, SQL với giá trị đã che và thông tin kiểu tham số. Không chạy COUNT hoặc EXPLAIN ANALYZE để dự đoán số dòng trước khi ghi; số dòng được chọn không bao gồm trigger/cascade.
+
+Xác nhận do main cấp, hết hạn sau 2 phút, dùng một lần và gắn với bản chụp yêu cầu/phiên/transaction/cấu hình. Thao tác trên dòng kiểm tra lại metadata và plan trước khi ghi; dữ liệu bị thay đổi vẫn chịu kiểm tra xung đột hiện có. Nếu phiên kết nối lại, transaction thay đổi hoặc schema khác bản xem trước, cần xem trước lại. Hủy hộp thoại giữ nội dung đang sửa. Không tự retry một thao tác ghi đã được xác nhận.
+
+SQL cần xác nhận nhưng có executable comment, optimizer hint, nháy kép hoặc chuỗi backslash sẽ bị từ chối xem trước để tránh đoán sai SQL mode/che mất câu lệnh thực thi; dùng backtick cho identifier và nháy đơn lặp đôi cho chuỗi, hoặc nhập giá trị bằng form bản ghi có tham số. SQL preview giới hạn 12.000 ký tự, danh sách tham số giới hạn 100 mục; phải kiểm tra toàn bộ SQL trong editor nếu bị cắt. Export SQL trên Production chỉ nhận câu được phân loại đọc, tránh lách xác nhận qua hàm tùy biến.
+
+Commit trên Production cũng yêu cầu token một lần, gắn đúng session/revision và thông báo áp dụng cho mọi tab dùng chung phiên. Rollback giữ xác nhận riêng và vẫn dùng được trong chế độ chỉ đọc.
+
+Import/restore trên Production có xác nhận native do main mở sau khi xác định tệp nguồn và đích, trước khi tạo worker. Hộp thoại hiển thị tệp/dung lượng, database/bảng đích và lựa chọn ảnh hưởng dữ liệu; mặc định là Hủy. Sau xác nhận, main kiểm tra lại cấu hình, nhận diện tệp và thời hạn 2 phút. Đây là kiểm tra danh tính tệp theo metadata, không thay thế checksum hoặc preflight; không giữ kết nối/stream trong lúc chờ người dùng. Tác vụ dùng phiên riêng và khi lỗi/hủy có thể để lại dữ liệu đã ghi.
+
+Không bảo đảm schema hoặc tệp không bị thay đổi bởi tiến trình ngoài sau lần kiểm tra cuối, hay mọi DDL có thể rollback.
+
 ## Tương thích Navicat
 
 Nhập được danh sách kết nối từ:
@@ -43,7 +78,7 @@ Hai script cũ không còn là luồng nhập mật khẩu: `import-navicat-pass
 - Chỉ MySQL và MariaDB; PostgreSQL/SQL Server trong Navicat sẽ bị bỏ qua.
 - Không hỗ trợ mật khẩu Navicat v11 (Blowfish) và Navicat Cloud/HTTP tunnel.
 - Đường dẫn SSH private key, CA cert và client cert phải tồn tại trên máy đang chạy SqlPro.
-- Mặc định không xác thực chứng chỉ SSL (giống thiết lập "weak certificate validation" của Navicat); có thể bật xác thực trong biểu mẫu kết nối.
+- Kết nối mới mặc định chọn xác thực chứng chỉ khi bật TLS. Profile cũ/nhập từ Navicat giữ cấu hình đã có; kết nối TLS không xác thực được hiển thị cảnh báo và có thể nâng cấp trong biểu mẫu kết nối.
 
 ## Tài khoản, workspace và đồng bộ
 

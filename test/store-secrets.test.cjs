@@ -36,6 +36,39 @@ function setup() {
   return { store: context.module.exports, files, key, safeStorage, failRead: (code) => { readError = Object.assign(new Error('fixture I/O'), { code }); } };
 }
 
+test('environment is preserved through save, legacy normalization and encrypted vault round trip', () => {
+  const r = setup();
+  const legacy = r.store.save({ host: 'fixture.example', password: 'synthetic' });
+  assert.equal(legacy.environment, 'unclassified');
+  for (const environment of ['local', 'staging', 'production', 'unclassified']) {
+    const profile = r.store.save({ id: legacy.id, host: 'fixture.example', environment });
+    assert.equal(profile.environment, environment);
+    const updated = r.store.save({ id: legacy.id, host: 'fixture.example', name: 'renamed' });
+    assert.equal(updated.environment, environment);
+    const snapshot = r.store.snapshotForSync();
+    assert.equal(snapshot.connections[0].environment, environment);
+    r.store.replaceFromSync(snapshot);
+    assert.equal(r.store.list()[0].environment, environment);
+  }
+  assert.equal(normalizeVault({ connections: [{ id: 'old', host: 'production.example' }] }).connections[0].environment, 'unclassified');
+  assert.equal(normalizeVault({ connections: [{ id: 'bad', environment: '<script>' }] }).connections[0].environment, 'unclassified');
+});
+
+test('read-only policy survives editing and sync; old profiles remain writable', () => {
+  const r = setup();
+  const profile = r.store.save({host:'fixture.example',password:'fixture',readOnly:true});
+  assert.equal(profile.readOnly,true);
+  assert.equal(r.store.save({id:profile.id,host:'fixture.example',name:'renamed'}).readOnly,true);
+  const snapshot = r.store.snapshotForSync();
+  assert.equal(snapshot.connections[0].readOnly,true);
+  r.store.replaceFromSync(snapshot);
+  assert.equal(r.store.list()[0].readOnly,true);
+  assert.throws(() => r.store.save({id:profile.id,host:'fixture.example',readOnly:'false'}),/chỉ đọc/);
+  assert.equal(r.store.save({id:profile.id,host:'fixture.example',readOnly:false}).readOnly,false);
+  assert.equal(normalizeVault({connections:[{id:'legacy',host:'fixture'}]}).connections[0].readOnly,false);
+  assert.equal(normalizeVault({connections:[{id:'bad',readOnly:'false'}]}).connections[0].readOnly,true);
+});
+
 test('local secrets round-trip and transient key read failures never replace a valid key', () => {
   const r = setup();
   const sealed = r.store.seal('synthetic fixture');

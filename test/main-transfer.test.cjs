@@ -7,10 +7,11 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }) } = {}) {
+function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }), readOnlyProfiles = [], productionProfiles = [] } = {}) {
   const handlers = new Map(), sessions = [];
   let chooseFile = async () => ({ filePath: '/review/export.json' });
   let chooseOpen = async () => ({ canceled: true, filePaths: [] });
+  let reviewProduction = async () => ({response:0});
   let finish;
   class Session {
     constructor(profile) { this.profile = profile; this.canceled = []; sessions.push(this); }
@@ -18,6 +19,7 @@ function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }
     async close() { this.dead = true; }
     async listDatabases() { return ['demo']; }
     async useDatabase() {}
+    async previewRowWrite(operation,payload) {return {sql:`UPDATE \`items\` SET \`name\`=? WHERE \`id\`=?`,params:[payload.values?.name,payload.keys?.id],columns:this.columns || [{name:'id',type:'int'}]};}
     backupDatabase(options) { return this.run(options.taskId, 'BACKUP_CANCELED'); }
     exportQueryFile(options) { return this.run(options.taskId, 'EXPORT_CANCELED'); }
     prepareWorkerForImport() { this.prepared = 'import'; }
@@ -37,7 +39,7 @@ function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }
   const electron = {
     app,
     ipcMain: { handle: (name, fn) => handlers.set(name, fn) },
-    dialog: { showSaveDialog: (...args) => chooseFile(...args), showOpenDialog: (...args) => chooseOpen(...args) }
+    dialog: { showSaveDialog: (...args) => chooseFile(...args), showOpenDialog: (...args) => chooseOpen(...args),showMessageBox:(...args)=>reviewProduction(...args) }
   };
   const root = path.join(__dirname, '../electron');
   vm.runInNewContext(fs.readFileSync(path.join(root, 'main.cjs'), 'utf8'), {
@@ -47,7 +49,7 @@ function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }
         DatabaseSession: Session,
         normalizeFileFormat: (format) => (['csv', 'tsv', 'json'].includes(format) ? format : 'csv')
       };
-      if (id === './store.cjs') return { getWithSecrets: (id) => ({ id, ssh: {} }), resetLocalData: reset };
+      if (id === './store.cjs') return { getWithSecrets: (id) => ({ id, ssh: {}, readOnly: readOnlyProfiles.includes(id), environment:productionProfiles.includes(id)?'production':'local' }), resetLocalData: reset };
       if (id === './sync.cjs') return sync;
       if (id === './navicat.cjs') return {};
       if (id === './backup-file.cjs') return { saveBackupFile: (_file, run) => run(async () => {}) };
@@ -61,6 +63,7 @@ function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }
     sessions,
     dialog: (callback) => { chooseFile = callback; },
     openDialog: (callback) => { chooseOpen = callback; },
+    productionDialog:(callback)=>{reviewProduction=callback;},
     finish: (value) => finish(value)
   };
 }
@@ -72,6 +75,289 @@ const waitFor = async (predicate) => {
   }
   throw new Error('Timed out waiting for fixture state.');
 };
+
+test('transaction controls pin the observed session, reject busy/stale state and do not reconnect', async () => {
+  const r = setup();
+  await r.call('db:connect', 'p1');
+  const session = r.sessions[0];
+  session.inTransaction = true;
+  session.autocommit = false;
+  session.transactionRevision = 3;
+  const state = (await r.call('db:session-state', 'p1')).data;
+  assert.ok(state.sessionId);
+  const payload = { profileId: 'p1', sessionId: state.sessionId, transactionRevision: 3, action: 'commit' };
+  const commands = [];
+  session.runQueryScript = async (sql) => { commands.push(sql); session.inTransaction = false; };
+  session.activeTask = { id: 'busy' };
+  assert.equal((await r.call('db:transaction', payload)).error.code, 'SESSION_BUSY');
+  session.activeTask = null;
+  assert.equal((await r.call('db:transaction', { ...payload, transactionRevision: 2 })).error.code, 'TRANSACTION_CONTEXT_CHANGED');
+  assert.equal((await r.call('db:transaction', { ...payload, action: 'DROP' })).error.code, 'INVALID_TRANSACTION_ACTION');
+  await r.call('db:connect', 'p2');
+  assert.equal((await r.call('db:transaction', payload)).ok, true);
+  assert.deepEqual(commands, ['COMMIT']);
+  assert.equal(session.autocommit, false);
+  session.inTransaction = true;
+  assert.equal((await r.call('db:transaction', { ...payload, action: 'rollback' })).ok, true);
+  assert.deepEqual(commands, ['COMMIT', 'ROLLBACK']);
+  await r.call('db:disconnect', 'p1', { force: true });
+  await r.call('db:connect', 'p1');
+  assert.equal((await r.call('db:transaction', payload)).error.code, 'TRANSACTION_CONTEXT_CHANGED');
+  const count = r.sessions.length;
+  await r.call('db:disconnect', 'p1', { force: true });
+  assert.equal((await r.call('db:transaction', payload)).error.code, 'TRANSACTION_CONTEXT_CHANGED');
+  assert.equal(r.sessions.length, count);
+});
+
+test('main blocks every DB write on read-only profiles before opening sessions or file dialogs', async () => {
+  const r = setup({readOnlyProfiles:['read']});
+  let dialogs = 0;
+  r.dialog(async () => { dialogs += 1; return {canceled:true}; });
+  r.openDialog(async () => { dialogs += 1; return {canceled:true}; });
+  const base = {profileId:'read',database:'demo',table:'items',filePath:'/test.csv'};
+  for (const [channel, payload] of [
+    ['db:insert-row',base], ['db:update-row',base], ['db:delete-rows',base], ['db:import-file',base],
+    ['db:restore',{...base,profileId:'write',targetProfileId:'read'}],
+    ['db:query',{...base,sql:'SELECT 1; DROP TABLE items',confirmed:true}],
+    ['db:export-query',{...base,sql:'SELECT custom_write()',taskId:'export'}]
+  ]) {
+    const result = await r.call(channel,payload);
+    assert.equal(result.ok,false,channel);
+    assert.ok(['CONNECTION_READ_ONLY','READ_ONLY_SQL_UNSUPPORTED'].includes(result.error.code),channel);
+  }
+  assert.equal(r.sessions.length,0);
+  assert.equal(dialogs,0);
+});
+
+test('main checks trusted profile, supports active-session fallback and keeps writable targets usable', async () => {
+  const r = setup({readOnlyProfiles:['read']});
+  await r.call('db:connect','read');
+  const reader = r.sessions[0];
+  reader.runQueryScript = async (sql) => ({sql});
+  assert.equal((await r.call('db:query',{sql:'DELETE FROM items',readOnly:false,confirmed:true})).error.code,'CONNECTION_READ_ONLY');
+  assert.equal((await r.call('db:query',{sql:'SELECT 1'})).ok,true);
+  await r.call('db:connect','write');
+  r.sessions[1].runQueryScript = async (sql) => ({sql});
+  assert.equal((await r.call('db:query',{profileId:'write',sql:'UPDATE items SET id=1',confirmed:true})).ok,true);
+  assert.equal((await r.call('db:query',{profileId:'read',sql:'DELETE FROM items',confirmed:true})).error.code,'CONNECTION_READ_ONLY');
+});
+
+test('changing connection policy cannot silently roll back a transaction or interrupt a busy session', async () => {
+  const r = setup();
+  await r.call('db:connect','write');
+  const session = r.sessions[0];
+  session.inTransaction = true;
+  assert.equal((await r.call('connections:save',{id:'write',readOnly:true})).error.code,'PROFILE_TRANSACTION_OPEN');
+  assert.equal(session.dead,undefined);
+  session.inTransaction = false;
+  session.autocommit = false;
+  assert.equal((await r.call('connections:save',{id:'write',readOnly:true})).error.code,'PROFILE_TRANSACTION_OPEN');
+  session.autocommit = true;
+  session.activeTask = {id:'busy'};
+  assert.equal((await r.call('connections:save',{id:'write',readOnly:true})).error.code,'SESSION_BUSY');
+  assert.equal(session.dead,undefined);
+});
+
+test('export rechecks read-only policy after the save dialog and before executing SQL', async () => {
+  const readOnlyProfiles = [];
+  const r = setup({readOnlyProfiles});
+  r.dialog(async () => { readOnlyProfiles.push('write'); return {filePath:'/review/query.csv'}; });
+  const result = await r.call('db:export-query',{profileId:'write',database:'demo',sql:'SELECT custom_write()',taskId:'export-policy'});
+  assert.equal(result.ok,false);
+  assert.equal(result.error.code,'READ_ONLY_SQL_UNSUPPORTED');
+  assert.equal(r.sessions.length,1);
+  assert.equal(r.sessions[0].activeTask,undefined);
+});
+
+test('production write approval binds an immutable request, never trusts confirmed and is single use',async () => {
+  const r = setup({productionProfiles:['prod']});
+  await r.call('db:connect','prod');
+  const writes = [];
+  r.sessions[0].updateRow = async (payload) => {writes.push(payload);return {affectedRows:1};};
+  const payload = {profileId:'prod',database:'demo',table:'items',keys:{id:1},values:{name:'private-value'},confirmed:true};
+  const result = await r.call('db:update-row',payload);
+  assert.equal(result.error.code,'PRODUCTION_CONFIRM_REQUIRED');
+  assert.equal(writes.length,0);
+  assert.equal(JSON.stringify(result.error.preview).includes('private-value'),false);
+  payload.values.name = 'mutated';
+  const token = result.error.preview.token;
+  assert.equal((await r.call('db:confirm-production',token)).ok,true);
+  assert.equal(writes[0].values.name,'private-value');
+  assert.equal((await r.call('db:confirm-production',token)).error.code,'PRODUCTION_APPROVAL_EXPIRED');
+});
+
+test('production approvals reject changed session, transaction, schema or policy',async () => {
+  for (const change of ['session','transaction','schema','readonly']) {
+    const readonly = [];
+    const r = setup({productionProfiles:['prod'],readOnlyProfiles:readonly});
+    await r.call('db:connect','prod');
+    let writes = 0;
+    r.sessions[0].updateRow = async () => {writes += 1;};
+    const result = await r.call('db:update-row',{profileId:'prod',database:'demo',table:'items',keys:{id:1},values:{name:'new'}});
+    const token = result.error.preview.token;
+    if (change === 'session') {await r.call('db:disconnect','prod',{force:true});await r.call('db:connect','prod');}
+    if (change === 'transaction') r.sessions[0].transactionRevision = 1;
+    if (change === 'schema') r.sessions[0].columns = [{name:'id',type:'bigint'}];
+    if (change === 'readonly') readonly.push('prod');
+    assert.equal((await r.call('db:confirm-production',token)).ok,false,change);
+    assert.equal(writes,0,change);
+  }
+});
+
+test('production SQL reads remain usable while writes are reviewed before any statement runs',async () => {
+  const r = setup({productionProfiles:['prod']});
+  await r.call('db:connect','prod');
+  const queries = [];
+  r.sessions[0].runQueryScript = async (sql,_timeout,confirmed) => {queries.push({sql,confirmed});return {};};
+  assert.equal((await r.call('db:query',{profileId:'prod',sql:'SELECT 1'})).ok,true);
+  const result = await r.call('db:query',{profileId:'prod',sql:"SELECT 1; DELETE FROM users WHERE name='private'",confirmed:true});
+  assert.equal(result.error.code,'PRODUCTION_CONFIRM_REQUIRED');
+  assert.equal(queries.length,1);
+  assert.equal(result.error.preview.sql.includes('private'),false);
+  assert.equal((await r.call('db:confirm-production',result.error.preview.token)).ok,true);
+  assert.equal(queries[1].confirmed,true);
+});
+
+test('production export cannot bypass SQL review by executing an unclassified SELECT function',async () => {
+  const r = setup({productionProfiles:['prod']});
+  let dialogs = 0;
+  r.dialog(async () => {dialogs += 1;return {canceled:true};});
+  const result = await r.call('db:export-query',{profileId:'prod',sql:'SELECT custom_write()',taskId:'export'});
+  assert.equal(result.error.code,'READ_ONLY_SQL_UNSUPPORTED');
+  assert.equal(dialogs,0);
+  assert.equal(r.sessions.length,0);
+});
+
+test('confirmed production writes retain their session lease until execution settles',async () => {
+  const r = setup({productionProfiles:['prod']});
+  await r.call('db:connect','prod');
+  let finishWrite;
+  r.sessions[0].updateRow = () => new Promise(resolve => {finishWrite=resolve;});
+  const request = {profileId:'prod',database:'demo',table:'items',keys:{id:1},values:{name:'new'}};
+  const review = await r.call('db:update-row',request);
+  const pending = r.call('db:confirm-production',review.error.preview.token);
+  await waitFor(()=>Boolean(finishWrite));
+  assert.equal((await r.call('connections:save',{id:'prod'})).error.code,'SESSION_BUSY');
+  assert.equal((await r.call('db:query',{profileId:'prod',sql:'SELECT 1'})).error.code,'SESSION_BUSY');
+  assert.equal((await r.call('db:update-row',request)).error.code,'SESSION_BUSY');
+  finishWrite({affectedRows:1});
+  assert.equal((await pending).ok,true);
+  assert.equal((await r.call('db:session-state','prod')).data.busy,false);
+});
+
+test('production Commit requires a one-use approval pinned to the exact transaction',async () => {
+  const r = setup({productionProfiles:['prod']});
+  await r.call('db:connect','prod');
+  const session = r.sessions[0];
+  session.inTransaction = true;
+  session.transactionRevision = 4;
+  session.database = 'demo';
+  const commands = [];
+  session.runQueryScript = async (sql) => {commands.push(sql);session.inTransaction=false;};
+  const state = (await r.call('db:session-state','prod')).data;
+  const payload = {profileId:'prod',action:'commit',sessionId:state.sessionId,transactionRevision:4,confirmed:true};
+  const review = await r.call('db:transaction',payload);
+  assert.equal(review.error.code,'PRODUCTION_CONFIRM_REQUIRED');
+  assert.equal(review.error.preview.sql,'COMMIT');
+  assert.match(review.error.preview.note,/mọi tab/);
+  assert.equal(commands.length,0);
+  const token = review.error.preview.token;
+  assert.equal((await r.call('db:confirm-production',token)).ok,true);
+  assert.deepEqual(commands,['COMMIT']);
+  assert.equal((await r.call('db:confirm-production',token)).error.code,'PRODUCTION_APPROVAL_EXPIRED');
+});
+
+test('production Commit is cancelled by revision change, reconnect, busy state or read-only policy',async () => {
+  for (const change of ['revision','reconnect','busy','readonly','cancel']) {
+    const readonly = [];
+    const r = setup({productionProfiles:['prod'],readOnlyProfiles:readonly});
+    await r.call('db:connect','prod');
+    const session = r.sessions[0];
+    session.inTransaction=true;
+    let commands = 0;
+    session.runQueryScript=async ()=>{commands += 1;};
+    const state=(await r.call('db:session-state','prod')).data;
+    const review=await r.call('db:transaction',{profileId:'prod',action:'commit',sessionId:state.sessionId,transactionRevision:0});
+    const token=review.error.preview.token;
+    if (change==='revision') session.transactionRevision=1;
+    if (change==='reconnect') {await r.call('db:disconnect','prod',{force:true});await r.call('db:connect','prod');}
+    if (change==='busy') session.activeTask={id:'busy'};
+    if (change==='readonly') readonly.push('prod');
+    if (change==='cancel') await r.call('db:cancel-production',token);
+    assert.equal((await r.call('db:confirm-production',token)).ok,false,change);
+    assert.equal(commands,0,change);
+  }
+});
+
+test('production Rollback remains available without the production Commit challenge',async () => {
+  const r=setup({productionProfiles:['prod'],readOnlyProfiles:['prod']});
+  await r.call('db:connect','prod');
+  const session=r.sessions[0];session.inTransaction=true;
+  const commands=[];session.runQueryScript=async sql=>{commands.push(sql);};
+  const state=(await r.call('db:session-state','prod')).data;
+  assert.equal((await r.call('db:transaction',{profileId:'prod',action:'rollback',sessionId:state.sessionId,transactionRevision:0})).ok,true);
+  assert.deepEqual(commands,['ROLLBACK']);
+});
+
+test('production import requires native confirmation before creating a worker and detects changed files',async () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sqlpro-production-import-'));
+  const filePath=path.join(dir,'data.csv');
+  fs.writeFileSync(filePath,'id\n1\n');
+  try {
+    const r=setup({productionProfiles:['prod']});
+    const payload={profileId:'prod',database:'demo',table:'items',filePath,taskId:'production-import'};
+    let seen;
+    r.productionDialog(async (_win,options)=>{seen=options;return {response:0};});
+    assert.equal((await r.call('db:import-file',payload)).data.canceled,true);
+    assert.match(seen.detail,/Database đích: demo/);
+    assert.match(seen.detail,/Bảng đích: items/);
+    assert.equal(seen.defaultId,0);
+    assert.equal(r.sessions.length,0);
+    r.productionDialog(async ()=>{fs.appendFileSync(filePath,'2\n');return {response:1};});
+    assert.equal((await r.call('db:import-file',payload)).error.code,'PRODUCTION_CONTEXT_CHANGED');
+    assert.equal(r.sessions.length,0);
+    r.productionDialog(async ()=>({response:1}));
+    const pending=r.call('db:import-file',payload);
+    await waitFor(()=>r.sessions.length===1 && r.sessions[0].activeTask);
+    r.finish({written:2});
+    assert.equal((await pending).ok,true);
+  } finally {fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test('production restore confirms the resolved file and target before starting its worker',async () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sqlpro-production-restore-'));
+  const filePath=path.join(dir,'backup.sql');fs.writeFileSync(filePath,'SELECT 1;');
+  try {
+    const r=setup({productionProfiles:['target']});
+    r.openDialog(async ()=>({canceled:false,filePaths:[filePath]}));
+    let seen;
+    r.productionDialog(async (_win,options)=>{seen=options;return {response:0};});
+    const result=await r.call('db:restore',{profileId:'source',targetProfileId:'target',database:'target_db',dropExisting:true});
+    assert.equal(result.data.canceled,true);
+    assert.match(seen.detail,/Database đích: target_db/);
+    assert.match(seen.detail,/Xóa đối tượng hiện có: Có/);
+    assert.equal(r.sessions.length,0);
+  } finally {fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test('transaction controls reject overlapping actions and never replay a failed commit', async () => {
+  const r = setup();
+  await r.call('db:connect', 'p1');
+  const session = r.sessions[0];
+  session.inTransaction = true;
+  const state = (await r.call('db:session-state', 'p1')).data;
+  const payload = { profileId:'p1', sessionId:state.sessionId, transactionRevision:0, action:'commit' };
+  let rejectCommit;
+  let attempts = 0;
+  session.runQueryScript = () => { attempts += 1; return new Promise((_resolve, reject) => { rejectCommit = reject; }); };
+  const pending = r.call('db:transaction', payload);
+  assert.equal((await r.call('db:transaction', payload)).error.code, 'SESSION_BUSY');
+  rejectCommit(Object.assign(new Error('lost connection'), {code:'PROTOCOL_CONNECTION_LOST'}));
+  assert.equal((await pending).ok, false);
+  assert.equal(attempts, 1);
+  assert.equal(r.sessions.length, 1);
+  assert.equal((await r.call('db:session-state', 'p1')).data.busy, false);
+});
 
 test('reset invalidates sync before waiting for database shutdown or replacing local data', async () => {
   const events = [];

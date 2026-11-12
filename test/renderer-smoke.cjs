@@ -42,6 +42,8 @@ handle('connections:test', () => sshTestResponses.shift() || ok({ version: '8.4-
 handle('connections:save', (payload) => ok({ ...payload, id: payload.id || 'saved-test' }));
 handle('db:open-profiles', () => ok([]));
 handle('db:session-state', (profileId) => ok({ profileId, connected: true, inTransaction: false, autocommit: true }));
+handle('db:confirm-production', () => ok({affectedRows:1}));
+handle('db:cancel-production', () => ok({cancelled:true}));
 handle('db:disconnect', () => ok({ disconnected: true, openProfiles: [] }));
 handle('account:list-recovery', () => ok([]));
 handle('account:resolve-conflicts', () => ok({ state: 'synced', conflicts: [], conflictCount: 0 }));
@@ -130,9 +132,18 @@ handle('db:backup', (payload) => {
   return result;
 });
 handle('db:list-backups', () => ok([]));
+let pendingInspection;
+let pendingTrial;
+handle('db:trial-backup',payload=>new Promise(resolve=>{pendingTrial={payload,resolve};}));
+handle('db:inspect-backup',()=>new Promise(resolve=>{pendingInspection=resolve;}));
+handle('db:inspect-backup-status',()=>ok({running:true,cancelling:false,bytes:50,totalBytes:100,statements:3}));
+handle('db:cancel-inspect-backup',()=>{pendingInspection?.({ok:false,error:{code:'BACKUP_SCAN_CANCELLED',message:'Đã hủy quét backup.'}});return ok({canceled:true});});
 handle('file:save-text', () => ({ canceled: false }));
 handle('db:export-query', (payload) => new Promise((resolve) => { pendingQueryExport = { payload, resolve }; }));
 handle('db:cancel-task', (payload) => {
+  if(pendingTrial && payload.taskId===pendingTrial.payload.taskId && payload.profileId===pendingTrial.payload.profileId){
+    pendingTrial.resolve(ok({report:{status:'cancelled',cleanup:'removed',database:'sqlpro_trial_fixture',checksum:'abc'}}));pendingTrial=null;return ok({canceled:true});
+  }
   if (!pendingQueryExport || payload.taskId !== pendingQueryExport.payload.taskId || payload.profileId !== pendingQueryExport.payload.profileId) return ok({ canceled: false });
   pendingQueryExport.resolve(ok({ canceled: true }));
   pendingQueryExport = null;
@@ -313,7 +324,8 @@ app.whenReady().then(async () => {
     await evaluate("$('#sql').value='SELECT 1; SELECT * FROM users'; $('#sql').setSelectionRange(15,15); $('#explainQueryBtn').click()");
     await until('app.query.result?.isExplain && !app.query.running');
     assert.equal(calls.filter((call) => call.name === 'db:query').at(-1).args[0].sql, 'EXPLAIN SELECT * FROM users');
-    assert.equal(await evaluate("Boolean($('#queryResult .explain-badge.bad'))"), true);
+    assert.equal(await evaluate("Boolean($('#queryResult .explain-badge.warn'))"), true);
+    assert.equal(await evaluate("$('#queryResult').textContent.includes('Cần đánh thêm Index')"), false);
     const count = calls.filter((call) => call.name === 'db:query').length;
     await evaluate("$('#sql').select(); runExplainQuery()");
     assert.equal(calls.filter((call) => call.name === 'db:query').length, count);
@@ -326,7 +338,7 @@ app.whenReady().then(async () => {
     assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('#queryResult tbody tr'), row=>row.cells[1].textContent)"), ['3', '1', '2']);
   });
   await check('duplicate EXPLAIN values use their own column metadata', async () => {
-    assert.equal(await evaluate("(singleQueryResultHtml({kind:'rows',isExplain:true,columns:[{name:'table'},{name:'type'}],rows:[['ALL','ALL']],durationMs:1}).match(/explain-badge bad/g)||[]).length"), 1);
+    assert.equal(await evaluate("(singleQueryResultHtml({kind:'rows',isExplain:true,columns:[{name:'table'},{name:'type'}],rows:[['ALL','ALL']],durationMs:1}).match(/explain-badge warn/g)||[]).length"), 1);
   });
   await check('drop actions honor confirmation and use object query payloads', async () => {
     await confirmPending("dropColumnAction('users','name')");
@@ -592,6 +604,10 @@ app.whenReady().then(async () => {
   await check('new connections default to verified TLS and every unverified mode is visible', async () => {
     await evaluate("window.__securityState={connections:app.connections,connection:app.connection,serverType:app.serverType,server:app.server,database:app.database,sessionState:app.sessionState}; connection(); $('#connSsl').checked=true; $('#connSsl').dispatchEvent(new Event('change'))");
     assert.equal(await evaluate("$('#connSslVerify').checked"), true);
+    assert.equal(await evaluate("$('#connEnvironment').value"), 'unclassified');
+    assert.equal(await evaluate("$('#connReadOnly').checked"), false);
+    await evaluate("$('#connReadOnly').checked=true");
+    await evaluate("$('#connEnvironment').value='production'");
     assert.equal(await evaluate("$('#connTlsWarning').classList.contains('hidden')"), true);
     await evaluate("$('#connSslVerify').checked=false; $('#connSslVerify').dispatchEvent(new Event('change'))");
     assert.match(await evaluate("$('#connTlsWarning').textContent"), /tắt xác thực chứng chỉ/i);
@@ -619,6 +635,91 @@ app.whenReady().then(async () => {
     await until("!$('#modal').open");
     assert.equal(await evaluate('activeTransfer'), null);
     assert.equal(calls.filter((call) => call.name === 'db:cancel-task').at(-1).args[0].taskId, payload.taskId);
+  });
+
+  await check('production review preserves the underlying draft and supports cancel, keyboard and exact-token approval', async () => {
+    await evaluate(`modal('<h2>Draft</h2><input id="productionDraft" value="unsaved draft">');
+      window.__productionResponse={ok:false,error:{code:'PRODUCTION_CONFIRM_REQUIRED',preview:{token:'review-fixture',connectionName:'Production <db>',host:'db.example',database:'sample',table:'users',operation:'update-row',selectedRows:1,columns:['name'],sql:'UPDATE sample.users SET name=? WHERE id=?',parameters:[{position:1,type:'string',value:'Đã ẩn'}],parameterCount:2,note:'Kiểm tra dữ liệu gốc trước khi ghi.'}}};
+      window.__productionPending=call(Promise.resolve(window.__productionResponse)).catch(error=>({code:error.code}));void 0;`);
+    await until("Boolean(document.querySelector('.production-confirmation[open]'))");
+    assert.equal(await evaluate('document.activeElement.id'),'productionCancel');
+    assert.match(await evaluate("document.querySelector('.production-confirmation').textContent"),/Production <db>/);
+    assert.equal(await evaluate("document.querySelector('.production-confirmation').scrollWidth<=document.querySelector('.production-confirmation').clientWidth"),true);
+    await captureReview('production-review');
+    win.webContents.sendInputEvent({type:'keyDown',keyCode:'Escape'});
+    win.webContents.sendInputEvent({type:'keyUp',keyCode:'Escape'});
+    assert.equal((await evaluate('window.__productionPending')).code,'PRODUCTION_WRITE_CANCELLED');
+    assert.equal(await evaluate("$('#productionDraft').value"),'unsaved draft');
+    await evaluate('window.__productionPending=call(Promise.resolve(window.__productionResponse));void 0;');
+    await until("Boolean(document.querySelector('.production-confirmation[open]'))");
+    await evaluate("document.querySelector('#productionConfirm').click()");
+    assert.equal((await evaluate('window.__productionPending')).affectedRows,1);
+    assert.equal(calls.filter(call=>call.name==='db:confirm-production').at(-1).args[0],'review-fixture');
+    await evaluate('closeModal()');
+  });
+
+  await check('production Commit preview explains that it applies to all tabs and is cancellable', async () => {
+    await evaluate(`window.__commitPreviewPromise=confirmProductionWrite({token:'commit-fixture',connectionName:'Production',host:'root@db:3306',database:'sample',operation:'commit',selectedRows:null,sql:'COMMIT',parameters:[],parameterCount:0,inTransaction:true,autocommit:false,note:'Commit toàn bộ thay đổi của mọi tab dùng chung phiên.'});void 0;`);
+    await until("Boolean(document.querySelector('.production-confirmation[open]'))");
+    assert.match(await evaluate("document.querySelector('.production-confirmation').textContent"),/Commit toàn phiên/);
+    assert.match(await evaluate("document.querySelector('.production-confirmation').textContent"),/mọi tab/);
+    assert.equal(await evaluate('document.activeElement.id'),'productionCancel');
+    await evaluate("document.querySelector('#productionCancel').click()");
+    assert.equal(await evaluate('window.__commitPreviewPromise'),false);
+  });
+
+  await check('transaction toolbar identifies the session and protects busy actions', async () => {
+    await evaluate(`window.__transactionReviewState={connection:app.connection,connections:app.connections,queryProfile:app.query.profileId,transactionState:app.transactionState};
+      app.connection={id:'test',name:'Production',environment:'production'};app.connections=[app.connection];app.query.profileId='test';
+      app.transactionState={profileId:'test',sessionId:'fixture-session',connected:true,inTransaction:true,autocommit:false,transactionRevision:1};renderTransactionBar();`);
+    assert.match(await evaluate("$('#transactionBar').textContent"), /PRODUCTION/);
+    assert.equal(await evaluate("document.querySelector('[data-transaction-action=commit]').disabled"), false);
+    await evaluate("document.querySelector('[data-transaction-action=commit]').focus()");
+    assert.equal(await evaluate("document.activeElement.dataset.transactionAction"), 'commit');
+    await evaluate('app.transactionState.busy=true;renderTransactionBar()');
+    assert.equal(await evaluate("document.querySelector('[data-transaction-action=commit]').disabled"), true);
+    assert.equal(await evaluate("$('#transactionBar').scrollWidth <= $('#transactionBar').clientWidth"), true);
+    await captureReview('transaction-toolbar');
+    await evaluate('app.connection=window.__transactionReviewState.connection;app.connections=window.__transactionReviewState.connections;app.query.profileId=window.__transactionReviewState.queryProfile;app.transactionState=window.__transactionReviewState.transactionState;renderTransactionBar();');
+  });
+
+  await check('read-only connections display their policy and disable table writes', async () => {
+    await evaluate(`window.__readOnlyState={connection:app.connection,connections:app.connections,primaryKey:app.primaryKey,mode};
+      app.connection={id:'test',name:'Read only',environment:'production',readOnly:true};app.connections=[app.connection];
+      app.primaryKey=['id']; mode='data'; renderDataView();`);
+    for (const selector of ['#addRowBtn','#deleteRowsBtn','#importBtn']) assert.equal(await evaluate(`document.querySelector('${selector}').disabled`),true);
+    assert.equal(await evaluate("$('#exportBtn').disabled"),false);
+    assert.match(await evaluate("$('#workspace').textContent"),/Kết nối chỉ đọc/);
+    await evaluate('renderTransactionBar()');
+    await captureReview('read-only-table');
+    await evaluate('app.connection=window.__readOnlyState.connection;app.connections=window.__readOnlyState.connections;app.primaryKey=window.__readOnlyState.primaryKey;mode=window.__readOnlyState.mode;renderQueryView();');
+  });
+
+  await check('backup details open by keyboard and fit a smaller window', async () => {
+    await evaluate(`mode='backups'; app.selectedBackupId=null; app.backups=[{
+      id:'20261111000000-1234abcd.sql',name:'Trước cập nhật',bytes:2048,createdAt:'2026-11-11T00:00:00Z',
+      source:{database:'test'},selection:{includeStructure:true,includeData:true,tables:['users','items'],routines:['rebuild'],events:[]},
+      result:{tables:2,rows:100},verification:{checksum:'verified'}
+    }]; renderBackupsView(); document.querySelector('[data-backup-row]').focus();`);
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("Boolean(document.querySelector('.backup-details'))");
+    assert.match(await evaluate("document.querySelector('.backup-details').textContent"), /users/);
+    assert.equal(await evaluate("document.querySelector('.backup-details').scrollWidth <= document.querySelector('.backup-details').clientWidth"), true);
+    await captureReview('backup-details');
+    await evaluate("window.__trialPromise=runBackupManagerAction('trial');void 0;");
+    await until("Boolean($('#backupTrialReport [data-backup-action=cancel-trial]'))");
+    await evaluate("$('#backupTrialReport [data-backup-action=cancel-trial]').click()");
+    await evaluate('window.__trialPromise');
+    assert.match(await evaluate("$('#backupTrialReport').textContent"),/Đã hủy/);
+    assert.match(await evaluate("$('#backupTrialReport').textContent"),/Đã xóa/);
+    await evaluate("window.__inspectionPromise=runBackupManagerAction('inspect');void 0;");
+    await until("$('#backupInventory [data-inspection-progress]')?.textContent.includes('50%')");
+    assert.match(await evaluate("$('#backupInventory').textContent"),/3 câu lệnh/);
+    await evaluate("$('#backupInventory [data-backup-action=cancel-inspect]').click()");
+    await evaluate('window.__inspectionPromise');
+    assert.match(await evaluate("$('#backupInventory').textContent"),/Đã hủy quét/);
+    await evaluate("app.backups=[]; app.selectedBackupId=null; mode='query'; renderQueryView();");
   });
 
   await check('backup includes routines, events and the strip-DEFINER option', async () => {
@@ -987,6 +1088,8 @@ app.whenReady().then(async () => {
   });
 
   await check('drag selection highlights rows and bulk Delete confirms once with the selected primary keys', async () => {
+    await evaluate("$('#queryResult tr[data-query-row=\"2\"]').scrollIntoView({block:'center'}); $('#contextMenu').classList.add('hidden')");
+    await until(`(() => {const cell=$('#queryResult tr[data-query-row="2"] td[data-col-idx="1"]');const r=cell.getBoundingClientRect();return document.elementFromPoint(r.x+5,r.y+5)?.closest('tr')===cell.closest('tr');})()`);
     await evaluate(`gridMouse(0);
       const first=$('#queryResult tr[data-query-row="0"] td[data-col-idx="1"]');
       const last=$('#queryResult tr[data-query-row="2"] td[data-col-idx="1"]');

@@ -9,6 +9,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSession } = require('../electron/database.cjs');
 const { saveBackupFile, readManifest } = require('../electron/backup-file.cjs');
+const {runRestoreTrial}=require('../electron/restore-trial.cjs');
 
 test('MySQL integration: snapshots, precise import, typed keys, full export and cancellation', {
   skip: !process.env.SQLPRO_TEST_MYSQL_PORT,
@@ -26,6 +27,92 @@ test('MySQL integration: snapshots, precise import, typed keys, full export and 
     await admin.query('CREATE TABLE children (id INT PRIMARY KEY, value VARCHAR(50)) ENGINE=InnoDB');
     await admin.query("INSERT INTO parents VALUES (1,'before-parent')");
     await admin.query("INSERT INTO children VALUES (1,'before-child')");
+
+    await t.test('restore trial restores an unqualified InnoDB backup and removes its temporary database',async()=>{
+      const directory=await fs.mkdtemp(path.join(os.tmpdir(),'sqlpro-real-trial-'));
+      const filePath=path.join(directory,'backup.sql');
+      await fs.writeFile(filePath,"CREATE TABLE `trial_items` (`id` int PRIMARY KEY, `name` varchar(40)) ENGINE=InnoDB;\nINSERT INTO `trial_items` VALUES (1,'hello');");
+      try{
+        const worker=await session();
+        const report=await runRestoreTrial({session:worker,filePath});
+        assert.equal(report.status,'verified',report.error);
+        assert.equal(report.cleanup,'removed',report.cleanupError);
+        assert.equal(report.inventory.tables,1);
+        const [remaining]=await admin.query('SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=?',[report.database]);
+        assert.equal(remaining.length,0);
+        assert.equal((await admin.query('SELECT value FROM parents WHERE id=1'))[0][0].value,'before-parent');
+      }finally{await fs.rm(directory,{recursive:true,force:true});}
+    });
+
+    await t.test('row write preview reads metadata without changing data and matches the executed plans',async () => {
+      const writer = await session();
+      const update = {database,table:'parents',keys:{id:1},values:{value:'after-preview'},original:{id:1,value:'before-parent'}};
+      const plan = await writer.previewRowWrite('update-row',update);
+      assert.match(plan.sql,/UPDATE/);
+      assert.ok(plan.params.includes('after-preview'));
+      assert.equal((await admin.query('SELECT value FROM parents WHERE id=1'))[0][0].value,'before-parent');
+      await writer.updateRow(update);
+      assert.equal((await admin.query('SELECT value FROM parents WHERE id=1'))[0][0].value,'after-preview');
+      await admin.query("UPDATE parents SET value='before-parent' WHERE id=1");
+      const insertion = {database,table:'parents',values:{id:77,value:'preview-insert'}};
+      await writer.previewRowWrite('insert-row',insertion);
+      assert.equal((await admin.query('SELECT COUNT(*) AS n FROM parents WHERE id=77'))[0][0].n,0);
+      await writer.insertRow(insertion);
+      const removal = {database,table:'parents',keysList:[{id:77}],originalValues:[{id:77,value:'preview-insert'}]};
+      await writer.previewRowWrite('delete-rows',removal);
+      assert.equal((await admin.query('SELECT COUNT(*) AS n FROM parents WHERE id=77'))[0][0].n,1);
+      await writer.deleteRows(removal);
+      assert.equal((await admin.query('SELECT COUNT(*) AS n FROM parents WHERE id=77'))[0][0].n,0);
+    });
+
+    await t.test('read-only profile and least-privilege account allow reads but reject every write batch', async () => {
+      const user = `sqlpro_reader_${process.pid}`;
+      await admin.query('CREATE USER ?@\'%\' IDENTIFIED BY ?', [user,'test-only-fixture']);
+      const reader = new DatabaseSession({...profile,user,password:'test-only-fixture',readOnly:true});
+      sessions.push(reader);
+      try {
+        await admin.query(`GRANT SELECT, SHOW VIEW ON \`${database}\`.* TO ?@'%'`,[user]);
+        await reader.connect();
+        const result = await reader.runQueryScript('SELECT COUNT(*) AS total FROM parents');
+        assert.equal(result.rows[0][0],'1');
+        await reader.runQueryScript('WITH sample AS (SELECT id FROM parents) SELECT * FROM sample');
+        await reader.runQueryScript('SHOW CREATE TABLE parents');
+        for (const sql of ["SELECT 1; UPDATE parents SET value='changed'", 'DROP TABLE parents', 'SELECT custom_write()', 'COMMIT']) {
+          await assert.rejects(reader.runQueryScript(sql,30000,true), (error) => ['CONNECTION_READ_ONLY','READ_ONLY_SQL_UNSUPPORTED'].includes(error.code));
+        }
+        await assert.rejects(reader.insertRow({database,table:'parents',values:{id:8,value:'changed'}}),{code:'CONNECTION_READ_ONLY'});
+        await assert.rejects(reader.raw("UPDATE parents SET value='bypass' WHERE id=1"), (error) => error.code === 'ER_TABLEACCESS_DENIED_ERROR');
+        assert.equal((await admin.query('SELECT value FROM parents WHERE id=1'))[0][0].value,'before-parent');
+        await reader.runQueryScript('SELECT 1');
+        assert.equal(reader.dead,false);
+      } finally {
+        await reader.close();
+        await admin.query('DROP USER ?@\'%\'', [user]);
+      }
+    });
+
+    await t.test('transaction state follows real BEGIN, ROLLBACK, COMMIT and autocommit OFF', async () => {
+      const writer = await session();
+      await writer.useDatabase(database);
+      await writer.runQueryScript('BEGIN', 30000, true);
+      await writer.runQueryScript("UPDATE parents SET value='rollback-only' WHERE id=1", 30000, true);
+      assert.equal(writer.inTransaction, true);
+      assert.ok(writer.transactionObservedAt);
+      const revision = writer.transactionRevision;
+      await writer.runQueryScript('ROLLBACK', 30000, true);
+      assert.equal(writer.inTransaction, false);
+      assert.equal(writer.transactionObservedAt, null);
+      assert.ok(writer.transactionRevision > revision);
+      assert.equal((await admin.query('SELECT value FROM parents WHERE id=1'))[0][0].value, 'before-parent');
+      await writer.runQueryScript('SET autocommit=0', 30000, true);
+      assert.equal(writer.autocommit, false);
+      await writer.runQueryScript("UPDATE parents SET value='commit-only' WHERE id=1", 30000, true);
+      await writer.runQueryScript('COMMIT', 30000, true);
+      assert.equal(writer.autocommit, false);
+      assert.equal((await admin.query('SELECT value FROM parents WHERE id=1'))[0][0].value, 'commit-only');
+      await writer.runQueryScript('SET autocommit=1', 30000, true);
+      await admin.query("UPDATE parents SET value='before-parent' WHERE id=1");
+    });
 
     await t.test('backup sees one snapshot while another connection commits changes to both tables', async () => {
       const reader = await session();
@@ -224,7 +311,8 @@ test('MySQL integration: snapshots, precise import, typed keys, full export and 
         await admin.query("INSERT INTO rt_children VALUES (10,1,'one'),(11,1,'two'),(12,2,'three')");
         const saved = await saveBackupFile(backupPath, (write) =>
           reader.writeBackup({ database, tables: ['rt_parents', 'rt_children'] }, write), {
-          source: { database }
+          source: { database },
+          selection: { tables: ['rt_parents', 'rt_children'] }
         });
         assert.equal(saved.verification.checksum, 'verified');
         assert.equal(saved.verification.restore, 'not-tested');

@@ -221,7 +221,7 @@
     return references;
   }
 
-  function identifierContext(beforeCaret, absoluteCaret) {
+  function identifierContext(beforeCaret, absoluteCaret, caretState) {
     const qualified = beforeCaret.match(/(?:`((?:``|[^`])*)`|([A-Za-z_$][\w$]*))\s*\.\s*(?:`([^`]*)|([A-Za-z_$][\w$]*))?$/);
     if (qualified) {
       const qualifier = (qualified[1] || qualified[2] || "").replace(/``/g, "`");
@@ -235,7 +235,7 @@
       };
     }
 
-    const unclosedBacktick = beforeCaret.match(/`([^`]*)$/);
+    const unclosedBacktick = caretState === "backtick" ? beforeCaret.match(/`([^`]*)$/) : null;
     if (unclosedBacktick) {
       return {
         prefix: unclosedBacktick[1].replace(/``/g, "`"),
@@ -267,7 +267,7 @@
     const statementStart = previousDelimiter < 0 ? 0 : previousDelimiter + 1;
     const statementEnd = nextDelimiter < 0 ? sql.length : nextDelimiter;
     const statement = sql.slice(statementStart, statementEnd);
-    const token = identifierContext(sql.slice(statementStart, caret), caret);
+    const token = identifierContext(sql.slice(statementStart, caret), caret, caretState);
 
     return {
       disabled: blocked,
@@ -275,6 +275,9 @@
       end: token.end,
       prefix: token.prefix,
       qualifier: token.qualifier,
+      expectsColumn: /\b(?:WHERE|AND|OR|ON|HAVING|ORDER\s+BY|GROUP\s+BY)\s+$/i.test(
+        scanned.code.slice(statementStart, token.start)
+      ),
       statement,
       statementStart,
       statementEnd,

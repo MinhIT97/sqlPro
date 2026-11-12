@@ -572,6 +572,15 @@ async function call(promise) {
   const response = await promise;
   if (!response) throw new Error('Không có phản hồi từ ứng dụng.');
   if (!response.ok) {
+    if (response.error?.code === 'PRODUCTION_CONFIRM_REQUIRED' && desktop?.db?.confirmProduction) {
+      const preview = response.error.preview;
+      const accepted = await confirmProductionWrite(preview);
+      if (!accepted) {
+        if (desktop.db.cancelProduction) await desktop.db.cancelProduction(preview.token);
+        throw Object.assign(new Error('Đã hủy thao tác trên Production. Nội dung đang sửa được giữ lại.'), {code:'PRODUCTION_WRITE_CANCELLED'});
+      }
+      return call(desktop.db.confirmProduction(preview.token));
+    }
     const error = new Error(response.error?.message || 'Đã xảy ra lỗi.');
     error.code = response.error?.code || '';
     if (response.error?.fingerprint) error.fingerprint = response.error.fingerprint;
@@ -626,12 +635,28 @@ function queryTargetConnection(tab) {
   return app.connections.find((connection) => connection.id === tab.profileId) || null;
 }
 
-function queryTargetLabel(tab) {
+function connectionEnvironment(profile) {
+  const labels = { local: 'LOCAL', staging: 'STAGING', production: 'PRODUCTION' };
+  const value = profile?.environment;
+  return Object.hasOwn(labels, value) ? { value, label: labels[value] } : { value: 'unclassified', label: 'CHƯA PHÂN LOẠI' };
+}
+
+function connectionEnvironmentBadge(profile) {
+  const environment = connectionEnvironment(profile);
+  return `<span class="connection-environment environment-${environment.value}">${environment.label}</span>${profile?.readOnly === true ? ' <span class="connection-environment connection-readonly">CHỈ ĐỌC</span>' : ''}`;
+}
+
+function connectionIsReadOnly(profileId = app.connection?.id) {
+  const profile = app.connections.find((entry) => entry.id === profileId) || (app.connection?.id === profileId ? app.connection : null);
+  return profile?.readOnly === true;
+}
+
+function queryTargetLabel(tab, includeEnvironment = true) {
   const connection = queryTargetConnection(tab);
   const name = connection && connection.name
     ? connection.name
     : (tab && tab.profileId ? 'kết nối không còn tồn tại' : 'chưa gắn kết nối');
-  return `${name} · ${(tab && tab.database) || 'không chọn database'}`;
+  return `${name} · ${(tab && tab.database) || 'không chọn database'}${connection && includeEnvironment ? ` · ${connectionEnvironment(connection).label}${connection.readOnly ? ' · CHỈ ĐỌC' : ''}` : ''}`;
 }
 
 async function ensureQueryTarget(tab) {
@@ -837,7 +862,7 @@ async function refreshSqlSuggestions(editor, force = false) {
   const localCaret = editor.selectionStart - context.statementStart;
   const beforeCaret = context.statement.slice(0, Math.max(0, localCaret));
   const expectsTable = /\b(?:FROM|JOIN|UPDATE|INTO|TABLE|DESCRIBE|DESC)\s+(?:`[^`]*|[A-Za-z0-9_$]*)$/i.test(beforeCaret);
-  if (context.disabled || (!force && !context.qualifier && !context.prefix && !expectsTable)) {
+  if (context.disabled || (!force && !context.qualifier && !context.prefix && !expectsTable && !context.expectsColumn)) {
     closeSqlSuggestions();
     return;
   }
@@ -853,6 +878,8 @@ async function refreshSqlSuggestions(editor, force = false) {
   const tables = tableAutocompleteItems();
   let baseItems;
   if (context.qualifier) {
+    baseItems = [];
+  } else if (context.expectsColumn) {
     baseItems = [];
   } else if (expectsTable) {
     baseItems = tables;
@@ -1241,6 +1268,10 @@ async function init() {
   $('#connectionList').addEventListener('click', onConnectionClick);
   $('#connectionList').addEventListener('keydown', activateSidebarItem);
   $('#workspace').addEventListener('click', onBackupManagerClick);
+  $('#transactionBar')?.addEventListener('click', (event) => {
+    const action = event.target.closest('[data-transaction-action]')?.dataset.transactionAction;
+    if (action) void finishTransaction(action);
+  });
   $('#workspace').addEventListener('keydown', (event) => {
     if ((event.key === 'Enter' || event.key === ' ') && event.target.matches('[data-backup-row]')) {
       event.preventDefault();
@@ -1493,7 +1524,7 @@ function renderSidebar() {
           </button>
           <button class="more" data-menu="${esc(connection.id)}" title="Tùy chọn" aria-label="Tùy chọn kết nối ${esc(connection.name)}">···</button>
         </div>
-        <div class="connmeta" title="${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port} · ${esc(connectionSecuritySummary(connection))}">${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port}${connection.ssh?.enabled ? ' · SSH' : ''} · ${esc(connectionTransportBadge(connection))}</div>
+        <div class="connmeta" title="${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port} · ${esc(connectionSecuritySummary(connection))}">${connectionEnvironmentBadge(connection)} ${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port}${connection.ssh?.enabled ? ' · SSH' : ''} · ${esc(connectionTransportBadge(connection))}</div>
         ${isExpanded ? `<div class="conn-children">${activeBranch}</div>` : ''}
       </div>
     `;
@@ -3754,6 +3785,35 @@ async function refreshBackupList(database = app.database, connectionId = app.con
   }
 }
 
+function backupDetailsHtml(entry) {
+  if (!entry) return '';
+  const selection = entry.selection;
+  const names = (label, values) => Array.isArray(values) && values.length
+    ? `<h4>${esc(label)} (${values.length})</h4><ul class="backup-object-list">${values.map((name) => `<li>${esc(name)}</li>`).join('')}</ul>` : '';
+  return `<section class="backup-details" aria-label="Chi tiết bản sao lưu">
+    <h3>${esc(entry.name)}</h3>
+    <dl class="backup-details-grid">
+      <div><dt>Ngày tạo</dt><dd>${esc(new Date(entry.createdAt).toLocaleString('vi-VN'))}</dd></div>
+      <div><dt>Dung lượng</dt><dd>${formatBytes(entry.bytes)}</dd></div>
+      <div><dt>Database nguồn</dt><dd>${esc(entry.source?.database || 'Không có thông tin')}</dd></div>
+      <div><dt>Phiên bản máy chủ nguồn</dt><dd>${esc(entry.source?.serverVersion || 'Không có thông tin')}</dd></div>
+      <div><dt>Nội dung sao lưu</dt><dd>${selection ? [selection.includeStructure ? 'Cấu trúc' : '', selection.includeData ? 'Dữ liệu' : '', selection.dropTables ? 'Có lệnh DROP' : ''].filter(Boolean).join(' · ') : 'Không có metadata'}</dd></div>
+      <div><dt>Thống kê</dt><dd>${esc(backupObjectSummary(entry) || 'Không có thông tin')}</dd></div>
+      <div><dt>Xác minh</dt><dd>${esc(backupChecksumNote(entry))} · ${entry.verification?.restore === 'verified' ? 'Đã phục hồi thử' : 'Chưa xác nhận phục hồi thử'}</dd></div>
+      <div><dt>Mã tệp</dt><dd>${esc(entry.id)}</dd></div>
+    </dl>
+    ${entry.checksum ? `<p class="backup-checksum">SHA-256: ${esc(entry.checksum)}</p>` : ''}
+    ${entry.trial?`<p>Lần thử gần nhất: ${esc(entry.trial.finishedAt || '')} · ${esc(entry.trial.status || 'unknown')} · Dọn: ${esc(entry.trial.cleanup || 'unknown')}${entry.trial.checksum!==entry.checksum || entry.verification?.checksum!=='verified'?' · Chưa đối chiếu báo cáo với tệp hiện tại':''}</p>`:''}
+    <p class="hint">Danh sách theo metadata lúc tạo backup. Việc phục hồi còn phụ thuộc lựa chọn và kết quả kiểm tra trước khi phục hồi.</p>
+    ${names('Bảng / view', selection?.tables)}${names('Procedure / function', selection?.routines)}${names('Event', selection?.events)}
+    ${!selection ? '<p class="hint">Backup cũ chưa có danh sách đối tượng. Đọc tệp SQL để xem nội dung.</p>' : ''}
+    <button data-backup-action="inspect">⌕ Đọc danh sách từ tệp SQL</button>
+    <button data-backup-action="trial" ${connectionIsReadOnly()?'disabled':''}>↶ Phục hồi thử vào database tạm</button>
+    <div id="backupTrialReport" role="status" aria-live="polite"></div>
+    <div id="backupInventory" role="status" aria-live="polite"></div>
+  </section>`;
+}
+
 function renderBackupsView() {
   const selected = app.backups.find((entry) => entry.id === app.selectedBackupId);
   const rows = app.backups.map((entry) => `
@@ -3769,6 +3829,7 @@ function renderBackupsView() {
         <button data-backup-action="create" class="primary">＋ Tạo bản sao lưu</button>
         <button data-backup-action="restore" ${selected ? '' : 'disabled'}>↶ Phục hồi</button>
         <button data-backup-action="verify" ${selected ? '' : 'disabled'}>✓ Xác minh checksum</button>
+        <button data-backup-action="rename" ${selected ? '' : 'disabled'}>✎ Đổi tên</button>
         <button data-backup-action="copy-backup" ${selected ? '' : 'disabled'}>⎘ Sao chép (Ctrl+C)</button>
         <button data-backup-action="paste-backup" ${app.copiedBackup ? '' : 'disabled'}>📋 Dán (Ctrl+V)</button>
         <button data-backup-action="copy-to-db" ${selected ? '' : 'disabled'}>⧉ Sao chép sang DB khác…</button>
@@ -3779,6 +3840,7 @@ function renderBackupsView() {
       <div class="backup-manager-table"><table><thead><tr><th>Tên</th><th>Ngày tạo</th><th>Dung lượng</th><th>Ghi chú</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="4" class="backup-manager-empty">Chưa có bản sao lưu. Bấm “Tạo bản sao lưu” để bắt đầu.</td></tr>'}</tbody>
       </table></div>
+      ${backupDetailsHtml(selected)}
       <div class="backup-manager-footer">${app.backups.length} bản sao lưu · ${esc(app.database || '')}</div>
     </section>`;
 }
@@ -3789,6 +3851,7 @@ function backupContextMenuHtml(hasSelection) {
   return `
     ${item('restore', '↶', 'Phục hồi bản sao lưu', !hasSelection)}
     ${item('verify', '✓', 'Xác minh checksum', !hasSelection)}
+    ${item('rename', '✎', 'Đổi tên bản sao lưu…', !hasSelection)}
     ${item('copy-backup', '⎘', 'Sao chép bản sao lưu (Ctrl+C)', !hasSelection)}
     ${item('paste-backup', '📋', 'Dán bản sao lưu vào đây (Ctrl+V)', !canPaste)}
     ${item('copy-to-db', '⧉', 'Sao chép sang Database khác…', !hasSelection)}
@@ -3804,6 +3867,79 @@ function backupContextMenuHtml(hasSelection) {
 }
 
 async function runBackupManagerAction(action) {
+  if(action==='cancel-trial'){
+    const output=$('#backupTrialReport');
+    if(output?.dataset.taskId){await call(desktop.db.cancelTask(output.dataset.profileId,output.dataset.taskId));
+      const label=output.querySelector?.('[data-trial-status]');if(label)label.textContent='Đang dừng và kiểm tra dọn database tạm…';}
+    return;
+  }
+  if(action==='trial' && app.selectedBackupId){
+    const output=$('#backupTrialReport');
+    if(!output || output.dataset.loading==='true')return;
+    output.dataset.loading='true';
+    const taskId=`trial-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    output.dataset.taskId=taskId;output.dataset.profileId=app.connection?.id;
+    output.innerHTML='<span data-trial-status>Đang kiểm tra và phục hồi thử…</span> <button data-backup-action="cancel-trial">Hủy phục hồi thử</button>';
+    try{
+      const result=await call(desktop.db.trialBackup({profileId:app.connection?.id,database:app.database,id:app.selectedBackupId,taskId}));
+      if($('#backupTrialReport')!==output)return;
+      if(result.canceled){output.textContent='Đã hủy phục hồi thử.';return;}
+      const report=result.report;
+      const statuses={verified:'Đã đối chiếu thành công',unverified:'Chưa đủ điều kiện xác minh',failed:'Thất bại',cancelled:'Đã hủy',timeout:'Vượt thời gian cho phép'};
+      const cleanups={removed:'Đã xóa', 'not-created':'Chưa tạo', 'manual-required':'Cần dọn thủ công'};
+      output.innerHTML=`<p>Kết quả: ${esc(statuses[report.status] || report.status)} · Dọn database tạm: ${esc(cleanups[report.cleanup] || report.cleanup)}</p>${report.error?`<p>${esc(report.error)}</p>`:''}${report.cleanup!=='removed'&&report.cleanup!=='not-created'?`<p>Database cần kiểm tra: <strong>${esc(report.database)}</strong> · ${esc(report.cleanupError || '')}</p>`:''}${report.reportSaveError?`<p>Không lưu được báo cáo: ${esc(report.reportSaveError)}</p>`:''}<p class="backup-checksum">SHA-256: ${esc(report.checksum || 'Chưa xác định')}</p>`;
+    }catch(error){if($('#backupTrialReport')===output)output.textContent=error.message;}
+    finally{output.dataset.loading='false';}
+    return;
+  }
+  if (action === 'cancel-inspect') {
+    const output=$('#backupInventory');
+    if (output?.dataset.taskId && desktop.db.cancelInspectBackup) {
+      await call(desktop.db.cancelInspectBackup({profileId:output.dataset.profileId,taskId:output.dataset.taskId}));
+    }
+    return;
+  }
+  if (action === 'inspect' && app.selectedBackupId) {
+    const id = app.selectedBackupId;
+    const database = app.database;
+    const profileId = app.connection?.id;
+    const output = $('#backupInventory');
+    if (!output || output.dataset.loading === 'true') return;
+    output.dataset.loading = 'true';
+    const taskId=`inspect-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    output.dataset.taskId=taskId;
+    output.dataset.profileId=profileId;
+    output.innerHTML='<span data-inspection-progress>Đang đọc tệp SQL…</span> <button data-backup-action="cancel-inspect">Hủy quét</button><p class="hint">Các lượt xem cùng backup dùng chung một lần quét. Hủy sẽ dừng lần quét chung.</p>';
+    let progressTimer;
+    const pollProgress=async()=>{
+      if (output.dataset.loading!=='true' || $('#backupInventory')!==output) return;
+      try {
+        if (desktop.db.inspectBackupStatus) {
+          const status=await call(desktop.db.inspectBackupStatus({profileId,taskId}));
+          if (output.dataset.loading!=='true' || $('#backupInventory')!==output) return;
+          const label=output.querySelector?.('[data-inspection-progress]');
+          if (label && status.running) label.textContent=status.cancelling ? 'Đang hủy quét…' :
+            `Đã đọc ${formatBytes(status.bytes)} / ${formatBytes(status.totalBytes)}${status.totalBytes ? ` (${Math.floor(status.bytes/status.totalBytes*100)}%)` : ''} · ${Number(status.statements).toLocaleString()} câu lệnh. Đang phân tích/kiểm tra tệp.`;
+        }
+      } catch { /* Progress is advisory; final scan errors remain visible. */ }
+      if (output.dataset.loading==='true' && $('#backupInventory')===output) progressTimer=setTimeout(pollProgress,500);
+    };
+    progressTimer=setTimeout(pollProgress,500);
+    try {
+      const result = await call(desktop.db.inspectBackup({ id, database, profileId, taskId }));
+      if (app.selectedBackupId !== id || app.database !== database || app.connection?.id !== profileId || $('#backupInventory') !== output) return;
+      const objects = [...result.tables.map((entry) => ({ type: 'table', name: entry.name })), ...result.objects.filter((entry) => entry.type !== 'table')];
+      output.innerHTML = `<p>${Number(result.statements).toLocaleString()} câu lệnh SQL · ${objects.length} đối tượng</p>
+        <ul class="backup-object-list">${objects.map((entry) => `<li>${esc(entry.type)}: ${esc(entry.name)}</li>`).join('')}</ul>
+        ${result.truncated ? '<p>Danh sách vượt giới hạn hiển thị; có thể còn đối tượng khác.</p>' : ''}`;
+    } catch (error) {
+      if ($('#backupInventory') === output) output.textContent = `Không đọc được nội dung: ${error.message}`;
+    } finally {
+      output.dataset.loading = 'false';
+      clearTimeout(progressTimer);
+    }
+    return;
+  }
   if (action === 'create') return backupDatabase();
   if (action === 'restore-file') return restoreDatabase();
   if (action === 'restore' && app.selectedBackupId) return restoreDatabase(app.selectedBackupId);
@@ -3837,6 +3973,36 @@ async function runBackupManagerAction(action) {
     } catch (error) {
       toast(error.message, 'error');
     }
+    return;
+  }
+  if (action === 'rename' && app.selectedBackupId) {
+    const current = app.backups.find((entry) => entry.id === app.selectedBackupId);
+    if (!current) return;
+    modal(`<h2>Đổi tên bản sao lưu</h2>
+      <label>Tên hiển thị mới</label>
+      <input id="renameBackupInput" value="${esc(current.name)}" maxlength="120" autofocus>
+      <p class="hint">Đổi tên hiển thị giúp bạn dễ nhận biết bản sao lưu. Tệp gốc và checksum vẫn được giữ nguyên.</p>
+      <div class="actions">
+        <button data-click="close-modal">Hủy</button>
+        <button class="primary" id="confirmRenameBackupBtn">Đổi tên</button>
+      </div>`);
+    $('#confirmRenameBackupBtn')?.addEventListener('click', async () => {
+      const name = $('#renameBackupInput')?.value.trim();
+      if (!name) return toast('Vui lòng nhập tên bản sao lưu.', 'error');
+      try {
+        await call(desktop.db.renameBackup({
+          profileId: app.connection?.id || null,
+          database: app.database,
+          id: app.selectedBackupId,
+          name
+        }));
+        closeModal();
+        toast('Đã đổi tên bản sao lưu.');
+        await refreshBackupList();
+      } catch (error) {
+        toast(error.message, 'error');
+      }
+    });
     return;
   }
   if (action === 'copy-backup' && app.selectedBackupId) return copySelectedBackupToClipboard(app.selectedBackupId);
@@ -3988,11 +4154,11 @@ function renderQueryTabs() {
   const host = $('#queryTabs');
   if (!host) return;
   host.innerHTML = queryTabs.map((tab, index) => {
-    const target = queryTargetLabel(tab);
+    const target = queryTargetLabel(tab, false);
     return `
     <button class="querytab${mode === 'query' && index === activeQuery ? ' selected' : ''}" data-query-tab="${index}" title="${esc(`${tab.title} · ${target}`)}">
       ⌑ &nbsp; ${esc(tab.title)}${tab.running ? ' <span class="tabrunning">…</span>' : ''} &nbsp; <span class="tabclose" data-close-query="${index}" title="Đóng tab">×</span>
-      <span class="querytab-target">${esc(target)}</span>
+      <span class="querytab-target">${queryTargetConnection(tab) ? connectionEnvironmentBadge(queryTargetConnection(tab)) : ''} ${esc(target)}</span>
     </button>`;
   }).join('');
 }
@@ -4113,7 +4279,7 @@ function updateChrome() {
   document.body.classList.toggle('transfer-mode', mode === 'transfer');
   const label = mode === 'query' ? 'QUERY' : mode === 'history' ? 'WORKSPACE' : mode === 'data' ? 'TABLE' : mode.toUpperCase();
   const title = mode === 'transfer' ? 'Tác vụ database' : mode === 'backups' ? 'Backups' : mode === 'query' ? 'SQL Editor' : mode === 'history' ? 'Lịch sử truy vấn' : (table || app.database || 'Workspace');
-  $('#title').innerHTML = `${esc(title)} <span>${label}</span>`;
+  $('#title').innerHTML = `${esc(title)} <span>${label}</span> ${app.connection ? connectionEnvironmentBadge(app.connection) : ''}`;
   $('#eyebrow').textContent = `${(app.database || 'CHƯA CHỌN DATABASE').toUpperCase()} / ${mode === 'query' ? 'TRUY VẤN' : mode === 'history' ? 'LỊCH SỬ' : mode === 'backups' ? 'SAO LƯU' : mode === 'transfer' ? 'TÁC VỤ' : 'BẢNG'}`;
   const subtitles = {
     data: table ? `Bảng ${table} trong ${app.database}.` : 'Chọn một bảng để xem dữ liệu thật.',
@@ -4127,11 +4293,13 @@ function updateChrome() {
   };
   $('#subtitle').textContent = subtitles[mode] || '';
   $('#crumbDb').textContent = app.database || '—';
-  $('#crumbServer').textContent = app.connection ? `${app.serverType === 'mariadb' ? 'MARIADB' : 'MYSQL'}${app.server ? ` ${app.server}` : ''}` : 'CHƯA KẾT NỐI';
+  $('#crumbServer').textContent = app.connection ? `${app.connection.name || app.connection.host} · ${connectionEnvironment(app.connection).label} · ${app.serverType === 'mariadb' ? 'MARIADB' : 'MYSQL'}${app.server ? ` ${app.server}` : ''}` : 'CHƯA KẾT NỐI';
   $('#tabName').textContent = mode === 'backups' ? 'Backups' : mode === 'transfer' ? 'Tác vụ' : (table || '—');
   $('#dataTab').classList.toggle('selected', mode !== 'query' && mode !== 'transfer');
   renderQueryTabs();
   renderTransferTab();
+  renderTransactionBar();
+  void refreshSessionState(transactionProfileId());
   $('#subnav').style.display = ['query', 'history', 'backups', 'transfer'].includes(mode) ? 'none' : 'flex';
   [...$('#subnav').children].forEach((button, index) => {
     button.classList.toggle('current', ['data', 'structure', 'indexes', 'relations'][index] === mode);
@@ -4506,6 +4674,7 @@ function startInlineValueEdit({ td, column, value, save, onSaved, next, reload }
 }
 
 async function inlineEditCell(td) {
+  if (connectionIsReadOnly()) { toast('Kết nối đang ở chế độ chỉ đọc.', 'error'); return; }
   if (!td || td.classList.contains('editing-cell')) return;
   const name = td.dataset.col;
   const index = Number(td.dataset.row);
@@ -4531,23 +4700,24 @@ async function inlineEditCell(td) {
 }
 
 function renderDataView() {
-  const editable = app.primaryKey.length > 0;
+  const readOnly = connectionIsReadOnly();
+  const editable = !readOnly && app.primaryKey.length > 0;
   $('#workspace').innerHTML = `
     <div class="toolbar">
       <input class="filter" id="filter" placeholder="⌕  Tìm trong bảng…" value="${esc(app.search)}">
       <select id="filterColumn" aria-label="Cột tìm kiếm"><option value="">Tất cả cột</option>${app.columns.map((column) => `<option value="${esc(column.name)}" ${app.searchColumn === column.name ? 'selected' : ''}>${esc(column.name)}</option>`).join('')}</select>
       <select id="filterMode" aria-label="Cách tìm kiếm"><option value="contains">Chứa</option><option value="exact" ${app.searchMode === 'exact' ? 'selected' : ''}>Bằng</option></select>
-      <button id="addRowBtn">＋ Thêm bản ghi</button>
-      <button class="danger" id="deleteRowsBtn" ${editable ? '' : 'disabled title="Bảng không có khóa chính"'}>⌫ Xóa</button>
+      <button id="addRowBtn" ${readOnly ? 'disabled title="Kết nối chỉ đọc"' : ''}>＋ Thêm bản ghi</button>
+      <button class="danger" id="deleteRowsBtn" ${editable ? '' : `disabled title="${readOnly ? 'Kết nối chỉ đọc' : 'Bảng không có khóa chính'}"`}>⌫ Xóa</button>
       <button id="refreshBtn">↻</button>
-      <button id="importBtn">↥ Nhập</button>
+      <button id="importBtn" ${readOnly ? 'disabled title="Kết nối chỉ đọc"' : ''}>↥ Nhập</button>
       <button id="exportBtn">↧ Xuất</button>
     </div>
     <div id="grid">${dataGridHtml()}</div>
     <div class="hint">
       ${editable
         ? 'ⓘ <span><strong>Chỉnh sửa thật</strong> &nbsp; Nhấp đúp vào một dòng để sửa. Thay đổi ghi trực tiếp vào database.</span>'
-        : 'ⓘ <span><strong>Chỉ đọc</strong> &nbsp; Bảng không có khóa chính nên không thể sửa/xóa trực tiếp từ lưới.</span>'}
+        : readOnly ? 'ⓘ <span><strong>Kết nối chỉ đọc</strong> &nbsp; Có thể xem, lọc và xuất dữ liệu.</span>' : 'ⓘ <span><strong>Chỉ đọc</strong> &nbsp; Bảng không có khóa chính nên không thể sửa/xóa trực tiếp từ lưới.</span>'}
     </div>
   `;
   const filter = $('#filter');
@@ -5845,6 +6015,7 @@ function getActiveQueryResult() {
 }
 
 async function getQueryColumnPkInfo(result, colIdx, profileId = app.query?.profileId || app.connection?.id || null) {
+  if (connectionIsReadOnly(profileId)) return {editable:false,reason:'Kết nối đang ở chế độ chỉ đọc.'};
   if (!result || !result.columns || !result.columns[colIdx]) return null;
   const colMeta = result.columns[colIdx];
   const targetTable = colMeta.orgTable || colMeta.table || table;
@@ -5912,6 +6083,7 @@ async function getQueryColumnPkInfo(result, colIdx, profileId = app.query?.profi
 }
 
 async function queryResultWriteContext(result, rowIndex, colIdx, profileId) {
+  if (connectionIsReadOnly(profileId)) throw new Error('Kết nối đang ở chế độ chỉ đọc.');
   const row = result?.rows?.[rowIndex];
   const source = result?.columns?.[colIdx];
   if (!row || !source || (!source.orgTable && !source.table) || result.isExplain) {
@@ -6174,7 +6346,7 @@ function queryGridBodyHtml(result, start = 0) {
           const colName = colMeta ? colMeta.name.toLowerCase() : '';
           if (result.isExplain && colName === 'type' && !isNull) {
             const uType = String(value).toUpperCase();
-            if (uType === 'ALL') cellDisplay = '<span class="explain-badge bad" title="Quét toàn bộ bảng - Cần đánh thêm Index!">ALL ⚠️</span>';
+            if (uType === 'ALL') cellDisplay = '<span class="explain-badge warn" title="Quét toàn bộ bảng. Đánh giá cùng số dòng ước lượng, bộ lọc và index hiện có; đây có thể là kế hoạch phù hợp.">ALL</span>';
             else if (uType === 'INDEX') cellDisplay = '<span class="explain-badge warn" title="Quét toàn bộ chỉ mục">index</span>';
             else if (uType === 'RANGE') cellDisplay = '<span class="explain-badge info" title="Quét trong khoảng">range</span>';
             else if (['CONST', 'EQ_REF', 'REF'].includes(uType)) cellDisplay = `<span class="explain-badge good">${esc(value)} ✓</span>`;
@@ -6207,7 +6379,8 @@ function singleQueryResultHtml(result, compact = false) {
 
   const hasPk = result.columns && result.columns.some((c) => (c.flags & 2) || c.key === 'PRI');
   const hasTable = result.columns && result.columns.some((c) => c.table || c.orgTable);
-  const isEditable = !result.isExplain && (hasPk || (hasTable && Boolean(table) && app.primaryKey?.length));
+  const isEditable = !connectionIsReadOnly(app.query?.resultContext?.profileId || app.query?.profileId || app.connection?.id)
+    && !result.isExplain && (hasPk || (hasTable && Boolean(table) && app.primaryKey?.length));
 
   const viewport = queryGridViewport(result);
   const virtual = result.rows.length > 200;
@@ -6584,6 +6757,7 @@ function renderHistoryView() {
 
 async function editRow(index, target = null) {
   const profileId = target?.profileId || app.connection?.id || null;
+  if (connectionIsReadOnly(profileId)) { toast('Kết nối đang ở chế độ chỉ đọc.', 'error'); return; }
   const database = target?.database || app.database;
   const targetTable = target?.targetTable || table;
   if (!desktop || !database || !targetTable || !profileId) return;
@@ -6661,6 +6835,7 @@ async function editRow(index, target = null) {
 }
 
 async function deleteSelectedRows() {
+  if (connectionIsReadOnly()) { toast('Kết nối đang ở chế độ chỉ đọc.', 'error'); return; }
   const indexes = [...document.querySelectorAll('.rowcheck:checked')].map((checkbox) => Number(checkbox.value));
   if (!indexes.length) {
     toast('Chọn bản ghi cần xóa trước.', 'error');
@@ -6694,6 +6869,42 @@ async function deleteSelectedRows() {
     }
     toast(error.message, 'error');
   }
+}
+
+function productionPreviewHtml(preview) {
+  const labels = {'insert-row':'Thêm bản ghi','update-row':'Cập nhật bản ghi','delete-rows':'Xóa bản ghi',query:'Chạy SQL',commit:'Commit toàn phiên'};
+  return `<h2>Xác nhận ghi trên Production</h2>
+    <p><strong>${esc(preview.connectionName)}</strong> · ${esc(preview.host || '')}</p>
+    <p>Database: <strong>${esc(preview.database || 'Chưa chọn')}</strong>${preview.table ? ` · Bảng: <strong>${esc(preview.table)}</strong>` : ''}</p>
+    <p>Thao tác: ${esc(labels[preview.operation] || 'Ghi dữ liệu')}${preview.selectedRows === null ? ' · Số dòng ảnh hưởng chưa xác định' : ` · ${Number(preview.selectedRows).toLocaleString()} dòng được chọn (không tính tác động trigger/cascade)`}</p>
+    ${preview.columns?.length ? `<p>Cột thay đổi: ${preview.columns.map(esc).join(', ')}</p>` : ''}
+    <label>SQL dự kiến — giá trị đã che</label><pre class="production-sql-preview">${esc(preview.sql)}</pre>
+    ${preview.parameterCount ? `<p>${Number(preview.parameterCount).toLocaleString()} tham số · giá trị được che</p><ul class="production-parameters">${preview.parameters.map((entry) => `<li>#${Number(entry.position)} · ${esc(entry.type)} · ${esc(entry.value)}</li>`).join('')}</ul>` : ''}
+    <p class="hint">${esc(preview.note)}</p>
+    <p class="hint">Xác nhận có hiệu lực trong 2 phút và chỉ dùng một lần. Nếu phiên hoặc nội dung đã đổi, cần xem trước lại.</p>
+    <p class="securitywarning">${preview.inTransaction || preview.autocommit === false ? 'Thao tác nằm trong phiên có transaction/autocommit OFF; Commit/Rollback áp dụng toàn phiên. ' : ''}DDL có thể tự commit. Xác nhận không bảo đảm mọi thay đổi có thể hoàn tác.</p>
+    <div class="actions"><button id="productionCancel">Hủy</button><button class="danger" id="productionConfirm">Xác nhận đúng đích và thực hiện</button></div>`;
+}
+
+function confirmProductionWrite(preview) {
+  return new Promise((resolve) => {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'confirmation-dialog production-confirmation';
+    dialog.innerHTML = productionPreviewHtml(preview);
+    document.body.appendChild(dialog);
+    let settled = false;
+    const finish = (accepted) => {
+      if (settled) return;
+      settled = true;
+      dialog.close();dialog.remove();resolve(accepted);
+    };
+    dialog.addEventListener('close',() => finish(false));
+    dialog.addEventListener('cancel',(event) => {event.preventDefault();finish(false);});
+    dialog.querySelector('#productionCancel').addEventListener('click',() => finish(false));
+    dialog.querySelector('#productionConfirm').addEventListener('click',() => finish(true));
+    dialog.showModal();
+    dialog.querySelector('#productionCancel').focus();
+  });
 }
 
 function confirmAction(title, message, confirmLabel = 'Xác nhận', { separate = false } = {}) {
@@ -7386,6 +7597,13 @@ function connection(profile) {
         <div><label>Host</label><input id="connHost" value="${esc(p.host || 'localhost')}" required></div>
         <div><label>Port</label><input id="connPort" type="number" min="1" max="65535" value="${p.port || 3306}" required></div>
       </div>
+      <label for="connEnvironment">Môi trường</label>
+      <select id="connEnvironment">
+        ${[['unclassified', 'Chưa phân loại'], ['local', 'Local — phát triển'], ['staging', 'Staging — kiểm thử'], ['production', 'Production — dữ liệu thật']].map(([value, label]) => `<option value="${value}" ${connectionEnvironment(p).value === value ? 'selected' : ''}>${label}</option>`).join('')}
+      </select>
+      <p class="hint">Nhãn giúp nhận biết đích thao tác; không thay đổi quyền truy cập database.</p>
+      <label class="checkline"><input type="checkbox" id="connReadOnly" ${p.readOnly === true ? 'checked' : ''}> Chỉ đọc — chặn thao tác ghi trong SqlPro</label>
+      <p class="hint">Nên dùng tài khoản database chỉ có quyền đọc. Cú pháp/hàm chưa được hỗ trợ sẽ bị chặn; quyền database bảo vệ cả tác động gián tiếp từ view/routine.</p>
       <div class="formrow">
         <div><label>Username</label><input id="connUser" value="${esc(p.user || 'root')}"></div>
         <div><label>Password</label><input id="connPassword" type="password" placeholder="${savedPassword ? 'Để trống = giữ mật khẩu đã lưu' : 'Nhập mật khẩu'}"></div>
@@ -7566,6 +7784,8 @@ function connection(profile) {
       id: existing ? existing.id : undefined,
       workspaceId: $('#connWorkspace').value,
       name: $('#connName').value,
+      environment: $('#connEnvironment').value,
+      readOnly: $('#connReadOnly').checked,
       type: $('#connType').value,
       host: $('#connHost').value,
       port: Number($('#connPort').value),
@@ -7782,10 +8002,68 @@ async function importNavicat() {
   }
 }
 
-async function refreshSessionState(profileId = app.connection?.id || null) {
+let sessionStateRequestId = 0;
+let transactionActionPending = false;
+
+function transactionProfileId() {
+  return mode === 'query' ? app.query?.profileId : app.connection?.id;
+}
+
+function renderTransactionBar() {
+  const host = $('#transactionBar');
+  if (!host) return;
+  const profileId = transactionProfileId();
+  const state = app.transactionState;
+  const visible = state?.profileId === profileId && state.connected;
+  host.classList.toggle('hidden', !visible);
+  if (!visible) return;
+  const connection = app.connections.find((entry) => entry.id === profileId) || (app.connection?.id === profileId ? app.connection : null);
+  const pending = state.inTransaction || state.autocommit === false;
+  const disabled = !pending || state.busy || transactionActionPending;
+  host.innerHTML = `${connectionEnvironmentBadge(connection)} <strong>${esc(connection?.name || profileId)}</strong>
+    <span>Phiên ${esc(state.sessionId?.slice(0, 8) || '—')} · ${state.inTransaction ? 'Transaction đang mở' : 'Không có transaction đang mở'} · Autocommit ${state.autocommit ? 'ON' : 'OFF'}</span>
+    ${state.transactionObservedAt ? `<span>Ghi nhận từ ${esc(new Date(state.transactionObservedAt).toLocaleTimeString('vi-VN'))}</span>` : ''}
+    <button data-transaction-action="commit" ${disabled || connection?.readOnly ? 'disabled' : ''}>Commit</button>
+    <button data-transaction-action="rollback" ${disabled ? 'disabled' : ''}>Rollback</button>
+    <span class="hint">Các tab cùng kết nối dùng chung phiên. DDL có thể tự commit.</span>`;
+}
+
+async function finishTransaction(action) {
+  if (!['commit', 'rollback'].includes(action) || transactionActionPending || !desktop?.db?.transaction) return;
+  const state = app.transactionState;
+  if (!state?.connected || state.profileId !== transactionProfileId() || state.busy) return;
+  const profile = app.connections.find((entry) => entry.id === state.profileId) || app.connection;
+  const payload = { action, profileId: state.profileId, sessionId: state.sessionId, transactionRevision: state.transactionRevision };
+  transactionActionPending = true;
+  renderTransactionBar();
+  try {
+    const accepted = await confirmAction(action === 'commit' ? 'Commit transaction?' : 'Rollback transaction?',
+      `${profile?.name || state.profileId} · ${connectionEnvironment(profile).label}. Thao tác áp dụng cho toàn bộ transaction của phiên, gồm các tab dùng chung kết nối.`,
+      action === 'commit' ? 'Commit' : 'Rollback');
+    if (!accepted) return;
+    // Changing the visible target while confirming invalidates this UI action.
+    if (transactionProfileId() !== state.profileId || app.transactionState !== state) return;
+    await call(desktop.db.transaction(payload));
+    toast(action === 'commit' ? 'Đã commit transaction.' : 'Đã rollback transaction.');
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    transactionActionPending = false;
+    await refreshSessionState(transactionProfileId());
+    renderTransactionBar();
+  }
+}
+
+async function refreshSessionState(profileId = transactionProfileId() || app.connection?.id || null) {
   if (!desktop || !profileId || typeof desktop.db.sessionState !== 'function') return;
+  const requestId = ++sessionStateRequestId;
   try {
     const state = await call(desktop.db.sessionState(profileId));
+    if (requestId !== sessionStateRequestId) return;
+    if (transactionProfileId() === profileId) {
+      app.transactionState = state;
+      renderTransactionBar();
+    }
     if (app.connection?.id !== profileId || !state?.connected) return;
     app.sessionState = state;
     setConnectionState(

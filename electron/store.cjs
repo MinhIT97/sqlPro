@@ -265,6 +265,7 @@ function workspaceIds(store) {
 
 function normalizeProfile(input, existing, store) {
   if (!input || typeof input !== 'object') throw new Error('Thông tin kết nối không hợp lệ.');
+  if (input.readOnly !== undefined && typeof input.readOnly !== 'boolean') throw new Error('Chế độ chỉ đọc không hợp lệ.');
   const host = text(input.host, 255);
   if (!host) throw new Error('Host không được để trống.');
   const ssh = normalizeSsh(input.ssh, existing && existing.ssh);
@@ -299,6 +300,9 @@ function normalizeProfile(input, existing, store) {
   return {
     id: existing ? existing.id : crypto.randomUUID(),
     workspaceId,
+    environment: ['local', 'staging', 'production', 'unclassified'].includes(input.environment)
+      ? input.environment : (existing?.environment || 'unclassified'),
+    readOnly: input.readOnly === undefined ? existing?.readOnly === true : input.readOnly,
     name: text(input.name, 120) || `${text(input.user, 128) || 'root'}@${host}`,
     type,
     host,
@@ -326,6 +330,8 @@ function sanitize(profile) {
   return {
     id: profile.id,
     workspaceId: profile.workspaceId || DEFAULT_WORKSPACE_ID,
+    environment: ['local', 'staging', 'production'].includes(profile.environment) ? profile.environment : 'unclassified',
+    readOnly: profile.readOnly === true,
     name: profile.name,
     type: profile.type,
     host: profile.host,

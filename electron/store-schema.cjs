@@ -49,6 +49,9 @@ function normalizeConnectionForStore(input) {
     : DEFAULT_WORKSPACE_ID;
   return {
     ...input,
+    environment: ['local', 'staging', 'production'].includes(input.environment) ? input.environment : 'unclassified',
+    // Missing is a legacy writable profile; malformed explicit policy stays safe.
+    readOnly: input.readOnly !== undefined && input.readOnly !== false,
     workspaceId,
     updatedAt: validTimestamp(input.updatedAt) ? input.updatedAt : DEFAULT_TIMESTAMP
   };

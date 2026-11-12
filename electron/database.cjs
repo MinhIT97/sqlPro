@@ -10,6 +10,7 @@ const mysql = require('mysql2');
 const { Client: SshClient } = require('ssh2');
 const { SqlScriptParser, splitSqlStatements, stripLeadingComments, createTarget, skipReason, assertStatementScope, countInsertRows } = require('./sql-script.cjs');
 const { analyzeCreateObject, buildRestorePreflight } = require('./restore-preflight.cjs');
+const { assertWritable, assertReadOnlySql } = require('./connection-policy.cjs');
 const { CsvStreamParser } = require('./csv-stream.cjs');
 const { JsonArrayStreamParser, isJsonNumber, stringifyJsonValue } = require('./json-array-stream.cjs');
 const RowValues = require('../row-values.js');
@@ -1146,14 +1147,23 @@ class DatabaseSession {
 
   updateServerStatus(result) {
     if (!Number.isInteger(result?.serverStatus)) return;
-    this.inTransaction = Boolean(result.serverStatus & 1);
-    this.autocommit = Boolean(result.serverStatus & 2);
+    const inTransaction = Boolean(result.serverStatus & 1);
+    const autocommit = Boolean(result.serverStatus & 2);
+    if (inTransaction !== this.inTransaction || autocommit !== this.autocommit) {
+      this.transactionRevision = (this.transactionRevision || 0) + 1;
+    }
+    if (inTransaction && !this.inTransaction) this.transactionObservedAt = new Date().toISOString();
+    if (!inTransaction) this.transactionObservedAt = null;
+    this.inTransaction = inTransaction;
+    this.autocommit = autocommit;
   }
 
-  raw(sql, params = []) {
+  raw(sql, params = [], timeoutMs = null) {
     this.ensureOpen();
+    this.transactionRevision = (this.transactionRevision || 0) + 1;
     return new Promise((resolve, reject) => {
-      this.connection.query(sql, params, (error, result, fields) => {
+      const command = Number.isFinite(timeoutMs) && timeoutMs > 0 ? { sql, timeout: timeoutMs } : sql;
+      this.connection.query(command, params, (error, result, fields) => {
         if (error) {
           reject(error);
           return;
@@ -1519,6 +1529,7 @@ class DatabaseSession {
   }
 
   async runQueryScript(sql, timeoutMs = 30000, confirmed = false, taskId = null, options = {}) {
+    assertReadOnlySql(this.profile, sql);
     const requestedRows = Number(options?.rowLimit);
     const rowLimit = [5000, 20000, 50000, 100000].includes(requestedRows) ? requestedRows : 50000;
     const batchRowLimit = Math.min(MAX_QUERY_BATCH_ROWS, rowLimit * 2);
@@ -1548,6 +1559,7 @@ class DatabaseSession {
       }
     }
 
+    this.transactionRevision = (this.transactionRevision || 0) + 1;
     const task = this.setActiveTask(taskId, () => {
       if (this.cancelQuery) this.cancelQuery();
     });
@@ -1631,27 +1643,29 @@ class DatabaseSession {
     }
   }
 
-  async insertRow({ database, table, values }) {
+  async planInsertRow({ database, table, values }) {
     const columns = await this.listColumns(database, table);
     const byName = new Map(columns.map((column) => [column.name, column]));
     const entries = Object.entries(values || {})
       .filter(([name]) => byName.has(name))
       .filter(([name]) => !/auto_increment/i.test(byName.get(name).extra) && !/(virtual|stored) generated/i.test(byName.get(name).extra));
     if (!entries.length) {
-      const { result } = await this.raw(`INSERT INTO ${tableRef(database, table)} () VALUES ()`);
-      return { insertId: String(result.insertId), affectedRows: result.affectedRows };
+      return {sql:`INSERT INTO ${tableRef(database, table)} () VALUES ()`,params:[],columns};
     }
     const names = entries.map(([name]) => name);
     const params = entries.map(([name, value]) => coerceValue(value, byName.get(name)));
     const placeholders = names.map(() => '?').join(', ');
-    const { result } = await this.raw(
-      `INSERT INTO ${tableRef(database, table)} (${names.map(quoteId).join(', ')}) VALUES (${placeholders})`,
-      params
-    );
+    return {sql:`INSERT INTO ${tableRef(database, table)} (${names.map(quoteId).join(', ')}) VALUES (${placeholders})`,params,columns};
+  }
+
+  async insertRow(payload) {
+    assertWritable(this.profile);
+    const plan = await this.planInsertRow(payload);
+    const { result } = await this.raw(plan.sql,plan.params);
     return { insertId: String(result.insertId), affectedRows: result.affectedRows };
   }
 
-  async updateRow({ database, table, keys, values, original }) {
+  async planUpdateRow({ database, table, keys, values, original }) {
     const columns = await this.listColumns(database, table);
     const byName = new Map(columns.map((column) => [column.name, column]));
     const pkColumns = columns.filter((column) => column.key === 'PRI').map((column) => column.name);
@@ -1675,10 +1689,14 @@ class DatabaseSession {
       ...pkParams,
       ...guard.params
     ];
-    const { result } = await this.raw(
-      `UPDATE ${tableRef(database, table)} SET ${setSql} WHERE ${whereSql} LIMIT 1`,
-      params
-    );
+    return {sql:`UPDATE ${tableRef(database, table)} SET ${setSql} WHERE ${whereSql} LIMIT 1`,params,columns,pkColumns,pkParams,guard};
+  }
+
+  async updateRow(payload) {
+    assertWritable(this.profile);
+    const {database,table,original} = payload;
+    const {sql,params,pkColumns,pkParams,guard} = await this.planUpdateRow(payload);
+    const { result } = await this.raw(sql,params);
     if (Number(result.affectedRows) !== 1) {
       if (!guard.sql) {
         throw fail('Bản ghi không còn tồn tại hoặc khóa chính đã thay đổi. Nội dung đang sửa được giữ lại; hãy hủy chỉnh sửa và tải lại dữ liệu để kiểm tra.', 'ROW_NOT_FOUND');
@@ -1718,7 +1736,28 @@ class DatabaseSession {
     };
   }
 
+  async previewRowWrite(operation,payload) {
+    assertWritable(this.profile);
+    // A confirmation must compare against server metadata, not the editor cache.
+    this.metadata.delete(`columns:${payload.database}.${payload.table}`);
+    if (operation === 'insert-row') return this.planInsertRow(payload);
+    if (operation === 'update-row') return this.planUpdateRow(payload);
+    const {database,table,keysList} = payload;
+    if (operation !== 'delete-rows' || !Array.isArray(keysList) || !keysList.length || keysList.length > 1000) throw fail('Danh sách xóa không hợp lệ.','NO_ROWS');
+    const columns = await this.listColumns(database,table);
+    const pk = columns.filter((column) => column.key === 'PRI');
+    if (!pk.length) throw fail('Bảng không có khóa chính.','NO_PRIMARY_KEY');
+    const params = [];
+    const groups = keysList.map((keys) => {
+      if (!keys || pk.some((column) => !Object.hasOwn(keys,column.name))) throw fail('Thiếu khóa chính.','MISSING_PRIMARY_KEY');
+      params.push(...pk.map((column) => rowKeyParameter(keys[column.name],column)));
+      return `(${pk.map((column) => `${quoteId(column.name)} <=> ?`).join(' AND ')})`;
+    });
+    return {sql:`DELETE FROM ${tableRef(database,table)} WHERE ${groups.join(' OR ')}`,params,columns};
+  }
+
   async deleteRows({ database, table, keysList, originalValues }) {
+    assertWritable(this.profile);
     if (!Array.isArray(keysList) || !keysList.length) throw fail('Chưa chọn bản ghi cần xóa.', 'NO_ROWS');
     if (keysList.length > 1000) throw fail('Chỉ có thể xóa tối đa 1000 bản ghi mỗi lần.', 'TOO_MANY_ROWS');
     const columns = await this.listColumns(database, table);
@@ -1965,6 +2004,7 @@ class DatabaseSession {
   }
 
   async exportQueryFile(options, write, onProgress) {
+    assertReadOnlySql(this.profile, options?.sql);
     this.ensureOpen();
     const settings = options && typeof options === 'object' ? options : {};
     const statement = String(settings.sql || '').trim();
@@ -2101,6 +2141,7 @@ class DatabaseSession {
   }
 
   async importFile(options, onProgress) {
+    assertWritable(this.profile);
     this.ensureOpen();
     const settings = options && typeof options === 'object' ? options : {};
     const database = settings.database;
@@ -3265,6 +3306,7 @@ class DatabaseSession {
   }
 
   async restoreDatabase(options, onProgress) {
+    assertWritable(this.profile);
     const settings = options && typeof options === 'object' ? options : {};
     if (this.activeTask) throw fail('Phiên kết nối đang chạy một tác vụ khác.', 'SESSION_BUSY');
     const task = this.setActiveTask(

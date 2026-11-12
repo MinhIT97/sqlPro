@@ -17,6 +17,17 @@ test("exports built-in keyword, function and snippet suggestions", () => {
   assert.ok(SQL_SUGGESTIONS.every((item) => item.label && item.insertText && item.type && item.detail));
 });
 
+test('column suggestions open after filter clauses, including while typing a column', () => {
+  for (const suffix of ['where ', 'WHERE\n', 'WHERE na', 'WHERE id = 1 AND ', 'WHERE id = 1 OR ', 'ORDER BY ', 'GROUP BY ']) {
+    const context = getContext('select * from `tbl_items` ' + suffix);
+    assert.equal(context.expectsColumn, true, suffix);
+    assert.deepEqual(context.references, [{ table: 'tbl_items' }]);
+  }
+  assert.equal(getContext('SELECT * FROM tbl_items ').expectsColumn, false);
+  assert.equal(getContext("SELECT 'WHERE ' ").expectsColumn, false);
+  assert.equal(getContext('SELECT * FROM tbl_items -- WHERE\n').expectsColumn, false);
+});
+
 test("getContext selects the statement around the caret", () => {
   const sql = "SELECT 'first;value' FROM logs;\nSELECT us FROM users u;\nSELECT 3";
   const caret = sql.indexOf("us FROM") + 2;

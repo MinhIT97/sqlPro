@@ -6,10 +6,18 @@ class BackupInspection {
     Object.assign(this,{stat,scan,ttlMs,timeoutMs,now});
     this.cache=new Map();
     this.active=null;
+    this.generation=0;
   }
 
   identity(stats) {
     return [stats.dev,stats.ino,stats.size,stats.mtimeMs,stats.ctimeMs].join(':');
+  }
+
+  invalidate() {
+    this.generation++;
+    this.cache.clear();
+    const job = this.active;
+    if (job) this.cancel(job.profileId, job.taskId);
   }
 
   cancel(profileId,taskId) {
@@ -26,19 +34,33 @@ class BackupInspection {
     return {running:true,cancelling:job.task.canceled,...job.progress};
   }
 
-  async inspect({profileId,database,id,filePath,taskId}) {
+  observe(job, profileId, taskId, signal) {
+    if (!signal) return job.promise;
+    const cancel = () => this.cancel(profileId, taskId);
+    signal.addEventListener('abort', cancel, { once: true });
+    if (signal.aborted) cancel();
+    return job.promise.finally(() => signal.removeEventListener('abort', cancel));
+  }
+
+  async inspect({profileId,database,id,filePath,taskId,fresh=false,signal}) {
     if (typeof taskId!=='string' || !taskId || taskId.length>120) throw new Error('Thiếu mã tác vụ quét backup.');
+    const generation = this.generation;
+    const checkCanceled = () => {
+      if (signal?.aborted || generation !== this.generation) throw Object.assign(new Error('Đã hủy quét backup.'), { code: 'BACKUP_SCAN_CANCELLED' });
+    };
+    checkCanceled();
     const before=await this.stat(filePath);
+    checkCanceled();
     const identity=this.identity(before);
     const key=JSON.stringify([profileId,database,id]);
     const cached=this.cache.get(key);
-    if (cached && cached.identity===identity && cached.expiresAt>this.now()) return {...cached.result,cached:true};
+    if (!fresh && cached && cached.identity===identity && cached.expiresAt>this.now()) return {...cached.result,cached:true};
     this.cache.delete(key);
     if (this.active) {
       if (this.active.key===key && this.active.identity===identity && !this.active.task.canceled) {
         if (this.active.subscribers.size>=32 && !this.active.subscribers.has(taskId)) throw Object.assign(new Error('Quá nhiều lượt xem đang dùng chung tác vụ.'),{code:'BACKUP_SCAN_BUSY'});
         this.active.subscribers.add(taskId);
-        return this.active.promise;
+        return this.observe(this.active, profileId, taskId, signal);
       }
       throw Object.assign(new Error('Đang quét một backup khác. Hãy hủy hoặc đợi hoàn tất.'),{code:'BACKUP_SCAN_BUSY'});
     }
@@ -46,7 +68,7 @@ class BackupInspection {
       progress:{bytes:0,totalBytes:before.size,statements:0}};
     this.active=job;
     job.promise=this.run(job,{filePath,database,before,key,identity,profileId,taskId});
-    return job.promise;
+    return this.observe(job, profileId, taskId, signal);
   }
 
   async run(job,{filePath,database,before,key,identity,profileId,taskId}) {
@@ -64,7 +86,7 @@ class BackupInspection {
       const result={tables:tables.slice(0,5000).map(entry=>({name:entry.name})),
         objects:inventory.createdObjects.slice(0,5000).map(entry=>({name:entry.name,type:entry.type})),
         truncated:inventory.objectsTruncated || tables.length>5000 || inventory.createdObjects.length>5000,
-        statements:inventory.statements,checksum};
+        statements:inventory.statements,checksum,selectionPreview:inventory.selectionPreview || null};
       this.cache.set(key,{identity,expiresAt:this.now()+this.ttlMs,result});
       while (this.cache.size>4) this.cache.delete(this.cache.keys().next().value);
       return {...result,cached:false};

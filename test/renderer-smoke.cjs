@@ -195,11 +195,40 @@ handle('db:list-trial-recovery', () => ok([
 handle('db:cleanup-trial-recovery', payload => { trialRecoveryCalls.push(payload); return ok({ cleanup: 'removed' }); });
 handle('db:trial-backup',payload=>new Promise(resolve=>{pendingTrial={payload,resolve};}));
 handle('db:inspect-backup',()=>new Promise(resolve=>{pendingInspection=resolve;}));
+const selectionColumns = new (require('../electron/restore-selection.cjs').RestoreSelectionInventory)('test');
+for (const [index, sql] of [
+  'CREATE TABLE users (id bigint unsigned NOT NULL, email varchar(100)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin',
+  'CREATE TABLE `<img src=x>` (id int, FOREIGN KEY (id) REFERENCES users(id))',
+  "INSERT INTO users VALUES (1,'one')", 'INSERT INTO users VALUES (2,NOW())', 'INSERT INTO `<img src=x>` VALUES (1)', 'DROP TABLE users'
+].entries()) selectionColumns.add(sql, require('../electron/sql-script.cjs').assertStatementScope(sql, 'test', index + 1), index + 1);
+const selectionInventory = selectionColumns.finish();
+handle('db:preview-backup-selection', payload => ok({
+  ...require('../electron/restore-selection.cjs').previewRestoreSelection(selectionInventory, payload), checksum: 'a'.repeat(64), cached: true
+}));
+let holdSelectionTarget = false, pendingSelectionTarget;
+handle('db:preview-backup-selection-target', payload => {
+  if (holdSelectionTarget) return new Promise(resolve => { pendingSelectionTarget = { payload, resolve }; });
+  const source = require('../electron/restore-selection.cjs').previewRestoreSelection(selectionInventory, payload);
+  const checksum = 'a'.repeat(64);
+  const facts = { database: payload.targetDatabase, checkedAt: '2026-11-12T12:00:00Z', version: '8.4', lowerCaseTableNames: 0, databaseVisible: true,
+    objects: [{ name: 'users', type: 'table' }, { name: '<img src=x>', type: 'view' }], triggers: [{ name: '<img src=trigger>', table: 'users', event: 'INSERT' }],
+    foreignKeys: [{ name: 'fk_outside', tableSchema: 'other', table: 'external_child', column: 'user_id', referencedSchema: payload.targetDatabase, referencedTable: 'users', referencedColumn: 'id' }],
+    columns: [...selectionInventory.tables[0].columnSchema.columns].reverse().map((column, i) => ({ ...column, table: 'users', ordinal: i + 1,
+      ...(column.name === 'id' ? require('../electron/restore-selection-columns.cjs').normalizeColumnType('int') : {}) })), errors: [], truncated: [] };
+  const targetIdentity = 'b'.repeat(64);
+  const targetReview = require('../electron/restore-selection-target.cjs').buildSelectionTargetPreview({ source, checksum, targetIdentity, facts });
+  const draftPlan = require('../electron/restore-selection-plan.cjs').buildSelectionDraft({ inventory: selectionInventory, source, checksum, targetIdentity, targetReview });
+  return ok({ ...source, checksum, cached: false, targetReview, draftPlan });
+});
 handle('db:inspect-backup-status',()=>ok({running:true,cancelling:false,bytes:50,totalBytes:100,statements:3}));
 handle('db:cancel-inspect-backup',()=>{pendingInspection?.({ok:false,error:{code:'BACKUP_SCAN_CANCELLED',message:'Đã hủy quét backup.'}});return ok({canceled:true});});
 handle('file:save-text', () => ({ canceled: false }));
 handle('db:export-query', (payload) => new Promise((resolve) => { pendingQueryExport = { payload, resolve }; }));
 handle('db:cancel-task', (payload) => {
+  if (pendingSelectionTarget && payload.taskId === pendingSelectionTarget.payload.taskId && payload.profileId === pendingSelectionTarget.payload.profileId) {
+    pendingSelectionTarget.resolve({ ok: false, error: { code: 'SELECTION_PREVIEW_CANCELED', message: 'Đã hủy kiểm tra đích.' } });
+    pendingSelectionTarget = null; return ok({ canceled: true });
+  }
   if (pendingRetentionApply && payload.taskId === pendingRetentionApply.payload.taskId && payload.profileId === pendingRetentionApply.payload.profileId) {
     pendingRetentionApply.resolve(ok({ stopped: true, deleted: [], remaining: ['old'], failed: [], reclaimedBytes: 0 }));
     pendingRetentionApply = null; return ok({ canceled: true });
@@ -795,6 +824,96 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate("$('#modal .modal-card').scrollWidth <= $('#modal .modal-card').clientWidth"), true);
     await evaluate('closeModal()');
     await evaluate("app.backups=[]; app.selectedBackupId=null; mode='query'; renderQueryView();");
+  });
+
+  await check('selected-table source preview supports keyboard, flags missing FK, escapes names and never restores', async () => {
+    const writesBefore = calls.filter(call => call.name === 'db:restore').length;
+    await evaluate(`window.__selectionState={backups:app.backups,id:app.selectedBackupId};mode='backups';app.backups=[{id:'20261111000000-1234abcd.sql',name:'Selection',verification:{checksum:'verified'}}];app.selectedBackupId=app.backups[0].id;renderBackupsView();`);
+    await evaluate("window.__selectionPromise=runBackupManagerAction('selection-preview');void 0");
+    await untilNode(() => calls.at(-1)?.name === 'db:inspect-backup');
+    pendingInspection(ok({ selectionPreview: selectionInventory }));
+    await evaluate('window.__selectionPromise');
+    assert.equal(await evaluate("document.activeElement.dataset.selectionIndex"), '0');
+    assert.equal(await evaluate("$('#backupSelectionTables').querySelectorAll('img').length"), 0);
+    assert.equal(await evaluate("$('#backupSelectionTables').querySelectorAll('input:checked').length"), 0);
+    await evaluate("$('#backupSelectionTables input[data-selection-index=\"1\"]').click();$('#backupSelectionTables input[data-selection-index=\"1\"]').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return', modifiers: ['control'] });
+    await until("$('#backupSelectionResult').textContent.includes('Chưa chọn bảng')");
+    assert.equal(await evaluate("$('#backupSelectionResult').querySelectorAll('img').length"), 0);
+    assert.match(await evaluate("$('#backupSelectionResult').textContent"), /Chưa có thao tác thực thi/);
+    const request = calls.filter(call => call.name === 'db:preview-backup-selection').at(-1).args[0];
+    assert.deepEqual(request.tables, ['<img src=x>']);
+    assert.equal(request.profileId, await evaluate('app.connection.id'));
+    await evaluate("$('#backupSelectionTables input[data-selection-index=\"0\"]').click();$('#previewBackupSelection').click()");
+    await until("$('#backupSelectionResult').textContent.includes('users → <img src=x>')");
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    assert.equal(await evaluate("$('#backupSelectionEditor [data-click=close-modal]').getBoundingClientRect().bottom <= innerHeight"), true);
+    await captureReview('backup-selection-preview');
+    await evaluate("$('#selectionTargetDatabase').value='destination';$('#selectionTargetDatabase').dispatchEvent(new Event('input',{bubbles:true}));$('#reviewBackupSelectionTarget').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult').textContent.includes('Đối chiếu đích: destination')");
+    assert.match(await evaluate("$('#backupSelectionResult').textContent"), /trùng view/);
+    assert.match(await evaluate("$('#backupSelectionResult').textContent"), /ngoài lựa chọn tham chiếu/);
+    assert.match(await evaluate("$('#backupSelectionResult').textContent"), /không phải quyền chạy/);
+    assert.equal(await evaluate("$('#backupSelectionResult').querySelectorAll('img').length"), 0);
+    await captureReview('backup-selection-target');
+    await evaluate("$('#backupSelectionResult .backup-selection-draft summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-draft').open");
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-draft').textContent"), /DROP cần chính sách/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-draft').textContent"), /Chưa thể thực thi/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-draft').textContent"), /2 khớp cú pháp literal/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-draft').textContent"), /1 chưa hỗ trợ/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-draft').textContent"), /biểu thức hoặc cú pháp chưa hỗ trợ/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-draft').textContent"), /1 bộ VALUES × 2 giá trị/);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-draft').querySelectorAll('button,img').length"), 0);
+    await evaluate("$('#backupSelectionResult .backup-selection-draft').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-draft');
+    await evaluate("[...$('#backupSelectionResult .backup-selection-draft').querySelectorAll('tbody tr')].find(row=>row.textContent.includes('INSERT literal')).scrollIntoView({block:'center'})");
+    await captureReview('backup-selection-insert-syntax');
+    win.setContentSize(900, 650);
+    await until("innerWidth === 900 && innerHeight === 650");
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    assert.equal(await evaluate("$('#backupSelectionEditor [data-click=close-modal]').getBoundingClientRect().bottom <= innerHeight"), true);
+    await captureReview('backup-selection-draft-small');
+    await evaluate("[...$('#backupSelectionResult .backup-selection-draft').querySelectorAll('tbody tr')].find(row=>row.textContent.includes('INSERT literal')).scrollIntoView({block:'center'})");
+    await captureReview('backup-selection-insert-syntax-small');
+    win.setContentSize(1344, 835);
+    await until("innerWidth === 1344 && innerHeight === 835");
+    await evaluate("$('#backupSelectionResult .backup-selection-draft').open=false");
+    await evaluate("$('#backupSelectionResult .backup-column-review summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-column-review').open");
+    assert.match(await evaluate("$('#backupSelectionResult .backup-column-review').textContent"), /Kiểu\/độ dài\/precision khác nhau/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-column-review').textContent"), /Thứ tự hoặc số cột khác nhau/);
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    assert.equal(await evaluate("$('#backupSelectionEditor [data-click=close-modal]').getBoundingClientRect().bottom <= innerHeight"), true);
+    await evaluate("$('#backupSelectionResult .backup-column-review').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-columns');
+    win.setContentSize(900, 650);
+    await until("innerWidth === 900 && innerHeight === 650");
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    assert.equal(await evaluate("$('#backupSelectionEditor [data-click=close-modal]').getBoundingClientRect().bottom <= innerHeight"), true);
+    await captureReview('backup-selection-columns-small');
+    win.setContentSize(1344, 835);
+    await until("innerWidth === 1344 && innerHeight === 835");
+    holdSelectionTarget = true;
+    await evaluate("$('#reviewBackupSelectionTarget').click()");
+    await untilNode(() => Boolean(pendingSelectionTarget));
+    await evaluate("$('#cancelSelectionScan').click()");
+    await until("$('#backupSelectionStatus').textContent.includes('Đã hủy kiểm tra đích')");
+    holdSelectionTarget = false;
+    await evaluate("$('#selectionData').click()");
+    assert.equal(await evaluate("$('#backupSelectionResult').textContent"), '');
+    assert.equal(calls.filter(call => call.name === 'db:restore').length, writesBefore);
+    await evaluate("closeModal();app.backups=window.__selectionState.backups;app.selectedBackupId=window.__selectionState.id;mode='query';renderQueryView()");
   });
 
   await check('backup notes save by keyboard, pin protects deletion and failures preserve the draft', async () => {

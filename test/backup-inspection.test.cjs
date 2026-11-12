@@ -18,6 +18,37 @@ test('inspection caches only matching file identities and rejects files changed 
   await assert.rejects(service.inspect(request),{code:'BACKUP_FILE_CHANGED'});
 });
 
+test('fresh target observation bypasses a matching display cache and recomputes source hash', async () => {
+  let calls = 0;
+  const service = new BackupInspection({ stat: async () => ({ size: 1 }), scan: async () => { calls++; return result(); } });
+  await service.inspect(request);
+  assert.equal((await service.inspect(request)).cached, true);
+  assert.equal((await service.inspect({ ...request, fresh: true })).cached, false);
+  assert.equal(calls, 2);
+});
+
+test('aborted preview during initial stat never starts a scanner', async () => {
+  let finish, scans = 0;
+  const controller = new AbortController();
+  const service = new BackupInspection({ stat: () => new Promise(resolve => { finish = resolve; }), scan: async () => { scans++; return result(); } });
+  const pending = service.inspect({ ...request, signal: controller.signal });
+  controller.abort(); finish({ size: 1 });
+  await assert.rejects(pending, { code: 'BACKUP_SCAN_CANCELLED' });
+  assert.equal(scans, 0); assert.equal(service.active, null);
+});
+
+test('preview signal cancels its subscribed scan and releases admission', async () => {
+  let finish;
+  const controller = new AbortController();
+  const service = new BackupInspection({ stat: async () => ({ size: 1 }), scan: () => new Promise(resolve => { finish = resolve; }) });
+  const pending = service.inspect({ ...request, signal: controller.signal });
+  await new Promise(resolve => setImmediate(resolve)); controller.abort();
+  assert.equal(service.active.task.canceled, true);
+  finish(result());
+  await assert.rejects(pending, { code: 'BACKUP_SCAN_CANCELLED' });
+  assert.equal(service.active, null); assert.equal(service.cache.size, 0);
+});
+
 test('inspection cancellation is scoped and releases admission without caching cancelled results',async()=>{
   let finish;
   const service=new BackupInspection({stat:async()=>({size:1}),scan:()=>new Promise(resolve=>{finish=resolve;})});
@@ -86,4 +117,25 @@ test('cancel during final file stat cannot publish or cache a successful invento
   releaseStat();
   await assert.rejects(pending,{code:'BACKUP_SCAN_CANCELLED'});
   assert.equal(service.cache.size,0);
+});
+
+test('invalidation cancels subscribers, clears cache and rejects pre-invalidation pending stat', async () => {
+  const service = new BackupInspection({ stat: async () => ({ size: 1 }), scan: async () => result() });
+  await service.inspect(request);
+  assert.equal(service.cache.size, 1);
+  let finishStat, scans = 0;
+  service.stat = () => new Promise(resolve => { finishStat = resolve; });
+  service.scan = async () => { scans++; return result(); };
+  const pending = service.inspect({ ...request, id: 'other' });
+  service.invalidate(); finishStat({ size: 1 });
+  await assert.rejects(pending, { code: 'BACKUP_SCAN_CANCELLED' });
+  assert.equal(scans, 0); assert.equal(service.cache.size, 0);
+  service.stat = async () => ({ size: 1 });
+  let finishScan;
+  service.scan = () => new Promise(resolve => { finishScan = resolve; });
+  const active = service.inspect(request);
+  await new Promise(resolve => setImmediate(resolve));
+  service.invalidate(); finishScan(result());
+  await assert.rejects(active, { code: 'BACKUP_SCAN_CANCELLED' });
+  assert.equal(service.cache.size, 0); assert.equal(service.active, null);
 });

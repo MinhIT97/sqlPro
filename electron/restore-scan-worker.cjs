@@ -14,6 +14,7 @@ async function scan() {
       database: workerData.database,
       totalBytes: workerData.totalBytes,
       dropExisting: workerData.dropExisting,
+      selectionPreview: workerData.selectionPreview === true,
       readChunkBytes: 1024 * 1024,
       task,
       onProgress: (progress) => parentPort.postMessage({ type: 'progress', progress })

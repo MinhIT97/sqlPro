@@ -10,6 +10,7 @@ const mysql = require('mysql2');
 const { Client: SshClient } = require('ssh2');
 const { SqlScriptParser, splitSqlStatements, stripLeadingComments, createTarget, skipReason, assertStatementScope, countInsertRows } = require('./sql-script.cjs');
 const { analyzeCreateObject, buildRestorePreflight } = require('./restore-preflight.cjs');
+const { RestoreSelectionInventory } = require('./restore-selection.cjs');
 const { assertWritable, assertReadOnlySql } = require('./connection-policy.cjs');
 const { CsvStreamParser } = require('./csv-stream.cjs');
 const { JsonArrayStreamParser, isJsonNumber, stringifyJsonValue } = require('./json-array-stream.cjs');
@@ -2830,10 +2831,10 @@ class DatabaseSession {
     }
   }
 
-  async scanRestoreInventoryInWorker({ filePath, database, totalBytes, dropExisting, onProgress, task }) {
+  async scanRestoreInventoryInWorker({ filePath, database, totalBytes, dropExisting, onProgress, task, selectionPreview = false }) {
     const cancelFlag = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
     const worker = new Worker(path.join(__dirname, 'restore-scan-worker.cjs'), {
-      workerData: { filePath, database, totalBytes, dropExisting, cancelFlag: cancelFlag.buffer }
+      workerData: { filePath, database, totalBytes, dropExisting, selectionPreview, cancelFlag: cancelFlag.buffer }
     });
     if (task) {
       task.scanCancelFlag = cancelFlag;
@@ -2870,7 +2871,8 @@ class DatabaseSession {
     }
   }
 
-  async scanRestoreInventory({ filePath, database, totalBytes, dropExisting, onProgress, task, readChunkBytes = RESTORE_READ_CHUNK_BYTES }) {
+  async scanRestoreInventory({ filePath, database, totalBytes, dropExisting, onProgress, task, readChunkBytes = RESTORE_READ_CHUNK_BYTES, selectionPreview = false }) {
+    const selection = selectionPreview ? new RestoreSelectionInventory(database) : null;
     const inventory = {
       tables: new Map(),
       createdObjects: [],
@@ -2910,11 +2912,14 @@ class DatabaseSession {
       const sql = String(statement || '').trim();
       if (!sql) return;
       inventory.statements += 1;
-      if (skipReason(sql)) {
+      const skippedReason = skipReason(sql);
+      if (skippedReason) {
         inventory.skipped += 1;
+        selection?.recordSkipped(inventory.statements, skippedReason);
         return;
       }
       const analysis = assertStatementScope(sql, database, inventory.statements);
+      selection?.add(sql, analysis, inventory.statements);
       const command = analysis.command;
       const target = createTarget(sql);
       const recordOperation = (operation) => {
@@ -3040,6 +3045,7 @@ class DatabaseSession {
     for (const statement of parser.end()) processStatement(statement);
     if (task && task.canceled) throw canceled();
     report();
+    if (selection) inventory.selectionPreview = selection.finish();
     return { inventory, bytes, checksum: hash.digest('hex') };
   }
 

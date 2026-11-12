@@ -16,6 +16,11 @@ const { backupDirectory, listBackups } = require('../electron/backup-catalog.cjs
 const { BackupRetentionApply } = require('../electron/backup-retention-apply.cjs');
 const { runAutomaticRetention } = require('../electron/backup-retention-auto.cjs');
 const { createScheduleStore, BackupScheduler } = require('../electron/backup-scheduler.cjs');
+const { RestoreSelectionInventory, previewRestoreSelection } = require('../electron/restore-selection.cjs');
+const { assertStatementScope } = require('../electron/sql-script.cjs');
+const { collectSelectionTargetFacts, buildSelectionTargetPreview } = require('../electron/restore-selection-target.cjs');
+const { buildSelectionDraft } = require('../electron/restore-selection-plan.cjs');
+const { reviewLiteralInsert } = require('../electron/restore-selection-syntax.cjs');
 
 test('MySQL integration: snapshots, precise import, typed keys, full export and cancellation', {
   skip: !process.env.SQLPRO_TEST_MYSQL_PORT,
@@ -79,6 +84,119 @@ test('MySQL integration: snapshots, precise import, typed keys, full export and 
         await admin.query(`DROP DATABASE IF EXISTS \`${ownership.database}\``);
         await fs.rm(directory, { recursive: true, force: true });
       }
+    });
+
+    await t.test('selected-table source preview reads a real backup, identifies FK and never writes the target', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-real-selection-'));
+      const filePath = path.join(root, 'backup.sql');
+      await admin.query('CREATE TABLE selection_parent (id INT PRIMARY KEY) ENGINE=InnoDB');
+      await admin.query('CREATE TABLE selection_child (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES selection_parent(id)) ENGINE=InnoDB');
+      await admin.query('INSERT INTO selection_parent VALUES (1)');
+      await admin.query('INSERT INTO selection_child VALUES (2,1)');
+      try {
+        const writer = await session();
+        const backup = await saveBackupFile(filePath, write => writer.backupDatabase({ database, tables: ['selection_parent', 'selection_child'], includeStructure: true, includeData: true }, write, () => {}));
+        const reader = new DatabaseSession({});
+        reader.raw = async () => { throw new Error('source preview must not query target'); };
+        const scanned = await reader.scanRestoreInventoryInWorker({ filePath, database, selectionPreview: true, totalBytes: backup.bytes });
+        assert.equal(scanned.checksum, backup.checksum);
+        const partial = previewRestoreSelection(scanned.inventory.selectionPreview, { tables: ['selection_child'] });
+        assert.equal(partial.canExecute, false); assert.equal(partial.targetReviewed, false);
+        assert.ok(partial.findings.some(item => item.code === 'MISSING_DEPENDENCY' && item.dependency === 'selection_parent'));
+        assert.equal(partial.totals.createStatements, 1); assert.equal(partial.totals.dataStatements, 1);
+        const both = previewRestoreSelection(scanned.inventory.selectionPreview, { tables: ['selection_child', 'selection_parent'] });
+        assert.deepEqual(both.order, ['selection_parent', 'selection_child']);
+        await admin.query('CREATE TRIGGER selection_before BEFORE INSERT ON selection_parent FOR EACH ROW SET NEW.id = NEW.id');
+        const editor = await session(); await editor.runQuery('START TRANSACTION');
+        try {
+          const targetReader = await session();
+          const metadata = await collectSelectionTargetFacts(targetReader, database);
+          assert.deepEqual(metadata.errors, []);
+          const parentOnly = previewRestoreSelection(scanned.inventory.selectionPreview, { tables: ['selection_parent'] });
+          const review = buildSelectionTargetPreview({ source: parentOnly, checksum: scanned.checksum, targetIdentity: 'b'.repeat(64), facts: metadata });
+          assert.equal(review.canExecute, false);
+          for (const code of ['TARGET_STRUCTURE_CONFLICT', 'TARGET_TRIGGERS_PRESENT', 'TARGET_INBOUND_FK_FROM_UNSELECTED_TABLE']) assert.ok(review.findings.some(item => item.code === code), code);
+          const columnReview = review.rows.find(row => row.name === 'selection_parent').columnReview;
+          assert.equal(columnReview.sourceColumnCount, 1); assert.equal(columnReview.targetColumnCount, 1);
+          assert.deepEqual(columnReview.fields[0].differences, []);
+          const plan = buildSelectionDraft({ inventory: scanned.inventory.selectionPreview, source: parentOnly, checksum: scanned.checksum, targetIdentity: 'b'.repeat(64), targetReview: review });
+          assert.equal(plan.canExecute, false); assert.equal(plan.status, 'blocked');
+          assert.equal(plan.statementCount, scanned.inventory.statements);
+          assert.equal(plan.stepsTruncated, false);
+          assert.equal(plan.blockers.some(item => item.code === 'STATEMENT_LEDGER_INCOMPLETE'), false);
+          assert.ok(plan.steps.some(step => step.command === 'INSERT' && step.table === 'selection_parent' && step.decision === 'candidate'));
+          assert.equal(plan.syntaxTotals.matched, 1); assert.equal(plan.syntaxTotals.unsupported, 0);
+          assert.equal(plan.steps.find(step => step.command === 'INSERT' && step.table === 'selection_parent').syntaxReview.status, 'matched');
+          assert.ok(plan.steps.some(step => step.table === 'selection_child' && step.decision === 'excluded'));
+          assert.equal(plan.steps.some(step => step.command === 'DROP' && step.decision === 'candidate'), false);
+          const childOnly = previewRestoreSelection(scanned.inventory.selectionPreview, { tables: ['selection_child'], includeStructure: false });
+          const beforeColumns = buildSelectionTargetPreview({ source: childOnly, checksum: scanned.checksum, targetIdentity: 'b'.repeat(64), facts: await collectSelectionTargetFacts(targetReader, database, () => {}, ['selection_child']) });
+          const beforePlan = buildSelectionDraft({ inventory: scanned.inventory.selectionPreview, source: childOnly, checksum: scanned.checksum, targetIdentity: 'b'.repeat(64), targetReview: beforeColumns });
+          await admin.query('ALTER TABLE selection_child MODIFY id BIGINT NOT NULL');
+          const afterColumns = buildSelectionTargetPreview({ source: childOnly, checksum: scanned.checksum, targetIdentity: 'b'.repeat(64), facts: await collectSelectionTargetFacts(targetReader, database, () => {}, ['selection_child']) });
+          assert.notEqual(beforeColumns.snapshotId, afterColumns.snapshotId);
+          const changedPlan = buildSelectionDraft({ inventory: scanned.inventory.selectionPreview, source: childOnly, checksum: scanned.checksum, targetIdentity: 'b'.repeat(64), targetReview: afterColumns });
+          assert.notEqual(beforePlan.planId, changedPlan.planId);
+          assert.ok(afterColumns.rows[0].columnReview.findings.some(item => item.code === 'COLUMN_TYPE_DIFFERS' && item.column === 'id'));
+          assert.match(review.snapshotId, /^[a-f0-9]{64}$/);
+          assert.equal(editor.inTransaction, true);
+        } finally { await editor.runQuery('ROLLBACK'); }
+        assert.equal((await admin.query('SELECT COUNT(*) AS n FROM selection_parent'))[0][0].n, 1);
+        assert.equal((await admin.query('SELECT parent_id FROM selection_child WHERE id=2'))[0][0].parent_id, 1);
+      } finally {
+        await admin.query('DROP TRIGGER IF EXISTS selection_before');
+        await admin.query('DROP TABLE selection_child'); await admin.query('DROP TABLE selection_parent');
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+
+    await t.test('literal INSERT syntax fixtures preserve precise numbers/text/binary under default and strict ANSI/no-backslash modes', async () => {
+      assert.match(database, /^sqlpro_test_\d+_\d+$/);
+      const originalMode = (await admin.query('SELECT @@SESSION.sql_mode AS mode'))[0][0].mode;
+      await admin.query('CREATE TABLE literal_roundtrip (id INT PRIMARY KEY, amount DECIMAL(30,10), text_value TEXT CHARACTER SET utf8mb4, payload VARBINARY(10), bit_value BIT(4), flag BOOLEAN, exponent_value DOUBLE)');
+      const sql = "INSERT INTO `literal_roundtrip` (`id`,`amount`,`text_value`,`payload`,`bit_value`,`flag`,`exponent_value`) VALUES (1,12345678901234567890.1234567890,'Việt Nam ''quote'' /*value*/',X'00ff',B'1010',TRUE,1.25e2),(2,-0.0000000001,'',X'',0b0011,FALSE,-2.5E-2),(3,NULL,NULL,NULL,NULL,NULL,NULL)";
+      try {
+        for (const mode of [originalMode, 'ANSI_QUOTES,NO_BACKSLASH_ESCAPES,STRICT_TRANS_TABLES']) {
+          await admin.query('SET SESSION sql_mode = ?', [mode]);
+          const review = reviewLiteralInsert(sql);
+          assert.equal(review.status, 'matched'); assert.equal(review.rows, 3); assert.equal(review.valuesPerRow, 7);
+          assert.equal(JSON.stringify(review).includes('12345678901234567890'), false);
+          await admin.query(sql);
+          const rows = (await admin.query('SELECT id, CAST(amount AS CHAR) AS amount, text_value, HEX(payload) AS payload, CAST(bit_value AS UNSIGNED) AS bits, flag, exponent_value FROM literal_roundtrip ORDER BY id'))[0];
+          assert.equal(rows[0].amount, '12345678901234567890.1234567890');
+          assert.equal(rows[0].text_value, "Việt Nam 'quote' /*value*/"); assert.equal(rows[0].payload, '00FF'); assert.equal(rows[0].bits, 10);
+          assert.equal(rows[0].flag, 1); assert.equal(rows[0].exponent_value, 125);
+          assert.equal(rows[1].amount, '-0.0000000001'); assert.equal(rows[1].payload, ''); assert.equal(rows[1].bits, 3);
+          assert.equal(rows[1].text_value, ''); assert.equal(rows[1].flag, 0); assert.equal(rows[1].exponent_value, -0.025);
+          assert.deepEqual(Object.values(rows[2]).slice(1), [null, null, null, null, null, null]);
+          await admin.query('DELETE FROM literal_roundtrip');
+        }
+      } finally {
+        await admin.query('SET SESSION sql_mode = ?', [originalMode]);
+        await admin.query('DROP TABLE literal_roundtrip');
+      }
+    });
+
+    await t.test('unhandled column ON UPDATE metadata changes the snapshot without claiming attribute compatibility', async () => {
+      assert.match(database, /^sqlpro_test_\d+_\d+$/);
+      const ddl = 'CREATE TABLE review_column_attributes (id int, modified DATETIME DEFAULT NULL)';
+      await admin.query(ddl);
+      try {
+        const collector = new RestoreSelectionInventory(database);
+        collector.add(ddl, assertStatementScope(ddl, database), 1);
+        const source = previewRestoreSelection(collector.finish(), { tables: ['review_column_attributes'], includeData: false });
+        const reader = await session();
+        const before = await collectSelectionTargetFacts(reader, database, () => {}, source.selectedTables);
+        await admin.query('ALTER TABLE review_column_attributes MODIFY modified DATETIME DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP');
+        const after = await collectSelectionTargetFacts(reader, database, () => {}, source.selectedTables);
+        assert.deepEqual(after.errors, []);
+        assert.equal(before.columns[1].attributesKnown, true); assert.equal(after.columns[1].attributesKnown, false);
+        assert.notEqual(before.columns[1].extraFingerprint, after.columns[1].extraFingerprint);
+        const build = facts => buildSelectionTargetPreview({ source, checksum: 'a'.repeat(64), targetIdentity: 'b'.repeat(64), facts });
+        assert.notEqual(build(before).snapshotId, build(after).snapshotId);
+        assert.ok(build(after).rows[0].columnReview.findings.some(item => item.code === 'COLUMN_ATTRIBUTES_NOT_ANALYZED'));
+        assert.equal((await admin.query('SELECT COUNT(*) AS n FROM review_column_attributes'))[0][0].n, 0);
+      } finally { await admin.query('DROP TABLE review_column_attributes'); }
     });
 
     await t.test('scheduled backup writes all visible object groups on its own session and preserves editor transaction', async () => {

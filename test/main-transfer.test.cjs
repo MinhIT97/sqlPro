@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }), readOnlyProfiles = [], productionProfiles = [], profiles = {}, scheduleHarness, trialRecovery, backupCatalog = {}, retentionStore, retentionApply, retentionExport, retentionAuto, onConnect, retentionHistory = { read: () => [], begin: () => 'history-fixture', finish() {} } } = {}) {
+function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }), readOnlyProfiles = [], productionProfiles = [], profiles = {}, scheduleHarness, inspection, trialRecovery, backupCatalog = {}, retentionStore, retentionApply, retentionExport, retentionAuto, onConnect, onRaw, timers, retentionHistory = { read: () => [], begin: () => 'history-fixture', finish() {} } } = {}) {
   const handlers = new Map(), sessions = [];
   let chooseFile = async () => ({ filePath: '/review/export.json' });
   let chooseOpen = async () => ({ canceled: true, filePaths: [] });
@@ -17,6 +17,7 @@ function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }
   class Session {
     constructor(profile) { this.profile = profile; this.canceled = []; sessions.push(this); }
     async connect() { this.connection = {}; onConnect?.(this); }
+    async raw(sql, params, timeout) { return onRaw ? onRaw(sql, params, timeout, this) : { rows: [] }; }
     async close() { this.dead = true; }
     async listDatabases() { return ['demo']; }
     async listTables() { return [{ name: 'items' }, { name: 'item_view' }]; }
@@ -66,16 +67,17 @@ function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }
       };
       if (id === './sync.cjs') return sync;
       if (id === './navicat.cjs') return {};
-      if (id === './backup-file.cjs') return { saveBackupFile: (_file, run, options) => { savedBackupOptions = options; return run(async () => {}); } };
+      if (id === './backup-file.cjs') return { fileIdentity: require(path.join(root, id)).fileIdentity, saveBackupFile: (_file, run, options) => { savedBackupOptions = options; return run(async () => {}); } };
       if (id === './backup-catalog.cjs') return { backupDirectory: () => '/review/backups', backupName: () => 'test.sql', ...backupCatalog };
       if (id === './backup-retention-store.cjs' && retentionStore) return { createRetentionStore: () => retentionStore };
       if (id === './backup-retention-apply.cjs' && retentionApply) return { BackupRetentionApply: class { constructor() { return retentionApply; } } };
       if (id === './backup-retention-history.cjs') return { createRetentionHistory: () => retentionHistory };
       if (id === './backup-retention-export.cjs' && retentionExport) return { exportRetentionHistory: retentionExport };
       if (id === './backup-retention-auto.cjs' && retentionAuto) return { runAutomaticRetention: retentionAuto };
+      if (id === './backup-inspection.cjs' && inspection) return { BackupInspection: class { constructor() { return inspection; } } };
       if (id === 'node:fs') return { ...fs, mkdirSync() {}, writeFileSync() {}, renameSync() {}, promises: { ...fs.promises, mkdir: async () => {} } };
       return require(id.startsWith('./') ? path.join(root, id) : id);
-    }, __dirname: root, process, Buffer, console, setTimeout, clearTimeout, AbortController
+    }, __dirname: root, process, Buffer, console, setTimeout: timers?.setTimeout || setTimeout, clearTimeout: timers?.clearTimeout || clearTimeout, AbortController
   });
   return {
     call: (name, payload, options) => handlers.get(name)({ sender: null }, payload, options),
@@ -88,6 +90,121 @@ function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }
   };
 }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+test('selected-table preview derives scope from main inventory, never connects or executes restore', async () => {
+  const requests = [];
+  const data = { version: 1, database: 'demo', tables: [{ name: 't', createStatements: 1, dataStatements: 2, dropStatements: 0, dependencies: [] }], findings: [], opaqueObjects: [], truncated: false };
+  const r = setup({ readOnlyProfiles: ['p1'], inspection: { inspect: async request => { requests.push(request); return { selectionPreview: data, checksum: 'a'.repeat(64), cached: true }; } },
+    backupCatalog: { resolveBackup: async (_root, profileId, database, id) => {
+      assert.equal(profileId, 'p1'); assert.equal(database, 'demo'); assert.equal(id, 'fixture'); return '/review/fixture.sql';
+    } } });
+  const result = (await r.call('db:preview-backup-selection', { profileId: 'p1', database: 'demo', id: 'fixture', taskId: 'selection-test', tables: ['t'], canExecute: true, inventory: 'forged' })).data;
+  assert.equal(result.canExecute, false); assert.equal(result.targetReviewed, false);
+  assert.equal(result.totals.dataStatements, 2); assert.equal(result.checksum, 'a'.repeat(64));
+  assert.equal(requests[0].taskId, 'selection-test'); assert.equal(r.sessions.length, 0);
+  assert.equal((await r.call('db:preview-backup-selection', { profileId: 'p1', database: 'demo', id: 'fixture', taskId: 'selection-test', tables: ['forged'] })).ok, false);
+});
+
+test('selected-table preview rejects late results after logout', async () => {
+  let finish;
+  const r = setup({ sync: { logout() {} }, inspection: { inspect: () => new Promise(resolve => { finish = resolve; }) },
+    backupCatalog: { resolveBackup: async () => '/review/fixture.sql' } });
+  const pending = r.call('db:preview-backup-selection', { profileId: 'p1', database: 'demo', id: 'fixture', taskId: 'selection-late', tables: ['t'] });
+  await tick(); await r.call('account:logout'); finish({});
+  assert.equal((await pending).ok, false); assert.equal(r.sessions.length, 0);
+});
+
+test('initial inspection rejects late results after logout and invalidates local scan evidence', async () => {
+  let finish, invalidated = 0;
+  const r = setup({ backupCatalog: { resolveBackup: async () => '/fixture' }, sync: { logout() {} },
+    inspection: { inspect: () => new Promise(resolve => { finish = resolve; }), invalidate: () => { invalidated++; } } });
+  const pending = r.call('db:inspect-backup', { profileId: 'p1', database: 'demo', id: 'fixture', taskId: 'initial-late' });
+  await waitFor(() => typeof finish === 'function');
+  await r.call('account:logout'); finish({ selectionPreview: { private: 'old-account' } });
+  const result = await pending;
+  assert.equal(result.ok, false); assert.match(result.error.message, /Phiên ứng dụng đã thay đổi/);
+  assert.equal(invalidated, 1); assert.equal(r.sessions.length, 0);
+});
+
+function targetFixture(t, { scanDelayMs = 0, ...overrides } = {}) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlpro-target-preview-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, 'backup.sql'); fs.writeFileSync(filePath, 'source backup fixture');
+  const inspected = { selectionPreview: { version: 1, database: 'demo', tables: [{ name: 'items', createStatements: 1, dataStatements: 1, dropStatements: 0, dependencies: [] }], findings: [], opaqueObjects: [], truncated: false }, checksum: 'a'.repeat(64), cached: false };
+  const request = { profileId: 'p1', database: 'demo', id: 'fixture', taskId: 'target-fixture', tables: ['items'], targetDatabase: 'destination' };
+  const calls = [];
+  const r = setup({ readOnlyProfiles: ['p1'], backupCatalog: { resolveBackup: async () => filePath },
+    inspection: { inspect: async payload => {
+      assert.equal(payload.fresh, true);
+      if (scanDelayMs) await new Promise(resolve => setTimeout(resolve, scanDelayMs));
+      return inspected;
+    }, cancel: () => ({ canceled: true }) },
+    onRaw: async (sql, params) => {
+      calls.push({ sql, params }); assert.match(sql, /^SELECT /);
+      if (sql.includes('VERSION()')) return { rows: [{ version: '8.4', lowerCaseTableNames: 0 }] };
+      if (sql.includes('SCHEMATA')) return { rows: [{ name: 'destination' }] };
+      return { rows: [] };
+    }, ...overrides });
+  return { ...r, request, filePath, calls };
+}
+
+test('target metadata preview reserves its own slot, performs only reads and always closes the independent session', async t => {
+  const r = targetFixture(t);
+  const result = await r.call('db:preview-backup-selection-target', { ...r.request, targetIdentity: 'forged', checksum: 'forged', draftPlan: { canExecute: true, planId: 'forged' } });
+  assert.equal(result.ok, true, result.error?.message);
+  assert.equal(result.data.canExecute, false); assert.equal(result.data.targetReview.canExecute, false);
+  assert.equal(result.data.draftPlan.canExecute, false); assert.equal(result.data.draftPlan.status, 'blocked');
+  assert.equal(result.data.draftPlan.checksum, 'a'.repeat(64));
+  assert.equal(result.data.draftPlan.targetSnapshotId, result.data.targetReview.snapshotId);
+  assert.ok(result.data.draftPlan.blockers.some(item => item.code === 'STATEMENT_LEDGER_INCOMPLETE'));
+  assert.equal(result.data.checksum, 'a'.repeat(64)); assert.match(result.data.targetReview.snapshotId, /^[a-f0-9]{64}$/);
+  assert.equal(result.data.targetReview.database, 'destination'); assert.equal(r.calls.length, 6);
+  assert.equal(r.sessions.length, 1); assert.equal(r.sessions[0].dead, true);
+  assert.equal((await r.call('db:preview-backup-selection-target', { ...r.request, targetDatabase: '' })).ok, false);
+  assert.equal(r.sessions.length, 1);
+});
+
+test('target metadata cancellation is task scoped and prevents publication or overlapping backup', async t => {
+  let finish;
+  const r = targetFixture(t, { scanDelayMs: 25, onRaw: () => new Promise(resolve => { finish = resolve; }) });
+  const pending = r.call('db:preview-backup-selection-target', r.request); await waitFor(() => typeof finish === 'function');
+  assert.equal((await r.call('db:backup', { profileId: 'p1', database: 'demo' })).ok, false);
+  assert.equal((await r.call('db:cancel-task', { profileId: 'other', taskId: r.request.taskId })).data.canceled, false);
+  assert.equal((await r.call('db:cancel-task', { profileId: 'p1', taskId: r.request.taskId })).data.canceled, true);
+  finish({ rows: [] }); const result = await pending;
+  assert.equal(result.ok, false); assert.equal(result.error.code, 'SELECTION_PREVIEW_CANCELED');
+  assert.equal(r.sessions[0].dead, true);
+});
+
+test('target preview rejects profile drift, file changes and logout without publishing stale observations', async t => {
+  const profiles = { p1: { host: 'original' } };
+  const drift = targetFixture(t, { profiles, onConnect: () => { profiles.p1.host = 'changed'; } });
+  assert.equal((await drift.call('db:preview-backup-selection-target', drift.request)).ok, false);
+  assert.equal(drift.calls.length, 0); assert.equal(drift.sessions[0].dead, true);
+  let changed;
+  const file = targetFixture(t, { onRaw: async () => { if (!changed) { changed = true; fs.appendFileSync(file.filePath, 'change'); } return { rows: [] }; } });
+  const result = await file.call('db:preview-backup-selection-target', file.request);
+  assert.equal(result.ok, false); assert.match(result.error.message, /backup đã thay đổi/);
+  assert.equal(file.sessions[0].dead, true);
+  let finish;
+  const loggedOut = targetFixture(t, { sync: { logout() {} }, onRaw: () => new Promise(resolve => { finish = resolve; }) });
+  const pending = loggedOut.call('db:preview-backup-selection-target', loggedOut.request); await waitFor(() => typeof finish === 'function');
+  await loggedOut.call('account:logout'); finish({ rows: [] });
+  assert.equal((await pending).ok, false); assert.equal(loggedOut.sessions[0].dead, true);
+});
+
+test('target metadata deadline aborts its session and reports a timeout without waiting 60 seconds', async t => {
+  let deadline, finish, cleared = false;
+  const r = targetFixture(t, { onRaw: () => new Promise(resolve => { finish = resolve; }), timers: {
+    setTimeout: (callback, delay) => { assert.equal(delay, 60000); deadline = callback; return 1; },
+    clearTimeout: () => { cleared = true; }
+  } });
+  const pending = r.call('db:preview-backup-selection-target', r.request); await waitFor(() => typeof finish === 'function');
+  deadline(); finish({ rows: [] });
+  const result = await pending;
+  assert.equal(result.ok, false); assert.equal(result.error.code, 'SELECTION_PREVIEW_TIMEOUT');
+  assert.equal(r.sessions[0].dead, true); assert.equal(cleared, true);
+});
 
 test('main publishes catalog backups exclusively and derives target identity from trusted profile', async () => {
   const profile = { id: 'p1', host: 'trusted-host', ssh: {}, readOnly: false, environment: 'local' };

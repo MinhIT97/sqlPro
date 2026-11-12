@@ -3816,6 +3816,7 @@ function backupDetailsHtml(entry) {
     ${names('Bảng / view', selection?.tables)}${names('Procedure / function', selection?.routines)}${names('Event', selection?.events)}
     ${!selection ? '<p class="hint">Backup cũ chưa có danh sách đối tượng. Đọc tệp SQL để xem nội dung.</p>' : ''}
     <button data-backup-action="inspect">⌕ Đọc danh sách từ tệp SQL</button>
+    <button data-backup-action="selection-preview">Xem phạm vi chọn bảng…</button>
     <button data-backup-action="trial" ${connectionIsReadOnly()?'disabled':''}>↶ Phục hồi thử vào database tạm</button>
     <div id="backupTrialReport" role="status" aria-live="polite"></div>
     <div id="backupInventory" role="status" aria-live="polite"></div>
@@ -3878,6 +3879,191 @@ function backupContextMenuHtml(hasSelection) {
     <div class="context-menu-sep"></div>
     ${item('folder', '▣', 'Mở thư mục chứa backup')}
     ${item('refresh', '↻', 'Làm mới')}`;
+}
+
+function backupSelectionColumnsHtml(row) {
+  const review = row.columnReview;
+  if (!review) return '';
+  const labels = { SOURCE_COLUMNS_INCOMPLETE: 'Chưa đọc đủ định nghĩa cột nguồn', TARGET_COLUMNS_INCOMPLETE: 'Chưa đọc đủ metadata cột đích',
+    COLUMN_NOT_SEEN_AT_TARGET: 'Không thấy cột ở đích', COLUMN_TYPE_NOT_ANALYZED: 'Kiểu dữ liệu chưa được phân tích', COLUMN_TYPE_DIFFERS: 'Kiểu/độ dài/precision khác nhau; cần kiểm tra chuyển đổi giá trị', COLUMN_ATTRIBUTES_NOT_ANALYZED: 'Có thuộc tính cột chưa được phân tích',
+    COLUMN_NULLABILITY_DIFFERS: 'Khác quy định NULL', COLUMN_AUTO_INCREMENT_DIFFERS: 'Khác auto-increment', COLUMN_GENERATED_DIFFERS: 'Khác trạng thái generated',
+    COLUMN_GENERATED_STORAGE_DIFFERS: 'Khác cách lưu generated (stored/virtual)', COLUMN_VISIBILITY_DIFFERS: 'Khác trạng thái invisible',
+    COLUMN_DEFAULT_PRESENCE_DIFFERS: 'Khác thông tin có default', GENERATED_EXPRESSION_NOT_COMPARED: 'Chưa đối chiếu biểu thức generated',
+    DEFAULT_VALUE_NOT_COMPARED: 'Chưa đối chiếu giá trị/biểu thức default', COLUMN_CHARSET_OR_COLLATION_UNKNOWN: 'Chưa xác định charset/collation',
+    COLUMN_CHARSET_DIFFERS: 'Khác charset', COLUMN_COLLATION_DIFFERS: 'Khác collation', POSITIONAL_INSERT_REQUIRES_REVIEW: 'INSERT theo vị trí cần đối chiếu cả thứ tự và giá trị',
+    POSITIONAL_COLUMN_ORDER_OR_COUNT_DIFFERS: 'Thứ tự hoặc số cột khác nhau với INSERT theo vị trí', INSERT_COLUMNS_UNKNOWN: 'Chưa xác định đầy đủ cột được INSERT',
+    EXTRA_TARGET_COLUMN: 'Đích có cột ngoài định nghĩa nguồn', REQUIRED_TARGET_COLUMN_NOT_SUPPLIED: 'INSERT thiếu cột bắt buộc ở đích',
+    INSERT_COLUMN_NOT_IN_SOURCE_DEFINITION: 'INSERT nêu cột không thấy trong định nghĩa nguồn' };
+  return `<details class="backup-column-review"><summary>Đối chiếu cột: ${esc(row.name)} · ${Number(review.sourceColumnCount)} nguồn / ${Number(review.targetColumnCount)} đích</summary>
+    <p class="hint">Chỉ so metadata đã nhận diện. Chưa xác nhận giá trị INSERT chuyển đổi được, biểu thức/default giống nhau hoặc phục hồi an toàn.</p>
+    <ul>${review.findings.map(item => `<li>${esc(labels[item.code] || item.code)}${item.column ? ` · ${esc(item.column)}` : ''}</li>`).join('') || '<li>Chưa thấy khác biệt trong thuộc tính đã so; chưa phải xác nhận tương thích đầy đủ.</li>'}</ul>
+    ${review.truncated ? '<p>Còn cột/cảnh báo ngoài giới hạn phân tích hoặc hiển thị. Hãy giảm phạm vi chọn để đối chiếu.</p>' : ''}
+    <div class="backup-selection-table"><table><thead><tr><th>Cột</th><th>Kiểu nguồn</th><th>Kiểu đích</th><th>Quan sát</th></tr></thead><tbody>${review.fields.map(field => `<tr><td>${esc(field.name)}</td><td>${esc(field.sourceType)}</td><td>${esc(field.targetType || 'Chưa thấy')}</td><td>${field.differences.map(code => esc(labels[code] || code)).join('; ') || (field.targetType ? 'Chưa thấy khác biệt trong thuộc tính đã so' : 'Chưa đủ metadata để so')}</td></tr>`).join('')}</tbody></table></div></details>`;
+}
+
+function backupSelectionDraftHtml(plan) {
+  if (!plan) return '';
+  const labels = { EXECUTION_NOT_IMPLEMENTED: 'Chưa có luồng thực thi chọn bảng', SOURCE_SUBSET_NOT_VALIDATED: 'Chưa kiểm chứng cú pháp được hỗ trợ và tác động SQL',
+    TARGET_RECHECK_REQUIRED: 'Phải kiểm tra lại đích sát lúc ghi', WRITE_PRIVILEGES_NOT_REVIEWED: 'Chưa kiểm tra quyền ghi', STATEMENT_LEDGER_INCOMPLETE: 'Danh sách câu lệnh chưa đầy đủ',
+    SOURCE_REVIEW_INCOMPLETE: 'Phân tích nguồn chưa đầy đủ', SOURCE_REVIEW_FINDING: 'Cảnh báo nguồn cần xử lý', TARGET_REVIEW_FINDING: 'Cảnh báo đích cần xử lý',
+    TARGET_REVIEW_INCOMPLETE: 'Đối chiếu đích chưa đầy đủ', COLUMNS_REQUIRE_REVIEW: 'Cột cần đối chiếu thêm', STATEMENT_NOT_CLASSIFIED: 'Chưa phân loại được phạm vi câu lệnh',
+    TABLE_NOT_SELECTED: 'Bảng ngoài lựa chọn', PART_NOT_SELECTED: 'Phần cấu trúc/dữ liệu ngoài lựa chọn', SCHEMA_MAPPING_REQUIRED: 'Schema ghi rõ chưa được ánh xạ sang đích',
+    DESTRUCTIVE_POLICY_REQUIRED: 'DROP cần chính sách thay/xóa đối tượng', SOURCE_SQL_REQUIRES_VALIDATION: 'Thuộc lựa chọn; SQL chưa được kiểm chứng để chạy',
+    SESSION_CONTEXT_NOT_PLANNED: 'Chưa lập phạm vi thiết lập session/transaction', DIRECTIVE_SKIPPED_BY_CURRENT_RESTORE: 'Luồng restore hiện có bỏ qua chỉ thị USE/DATABASE',
+    TARGET_STRUCTURE_CONFLICT: 'Trùng bảng đã có', TARGET_VIEW_CONFLICT: 'Trùng tên view', TARGET_AMBIGUOUS_OBJECT: 'Tên đối tượng đích chưa phân biệt chắc chắn',
+    TARGET_TRIGGERS_PRESENT: 'Bảng đích có trigger', TARGET_FOREIGN_KEYS_PRESENT: 'Có khóa ngoại liên quan',
+    TARGET_INBOUND_FK_FROM_UNSELECTED_TABLE: 'Có bảng ngoài lựa chọn tham chiếu vào bảng đích', TARGET_DATABASE_NOT_VISIBLE: 'Chưa thấy database đích trong quyền tài khoản',
+    TARGET_METADATA_ERROR: 'Có metadata đích chưa đọc được', TARGET_METADATA_TRUNCATED: 'Metadata đích vượt giới hạn', TARGET_CASE_POLICY_UNKNOWN: 'Chưa xác định chính sách hoa/thường',
+    TARGET_DATA_TABLE_NOT_VISIBLE: 'Chưa thấy bảng để ghi dữ liệu', TARGET_DATA_SCHEMA_NOT_VALIDATED: 'Chưa xác nhận khả năng ghi giá trị vào đích',
+    SOURCE_DROP_REQUIRES_EXPLICIT_POLICY: 'DROP cần chính sách thay/xóa đối tượng', SOURCE_SCHEMA_MAPPING_NOT_VALIDATED: 'Chưa kiểm chứng ánh xạ database nguồn sang đích',
+    CONDITIONAL_CREATE: 'CREATE có điều kiện IF NOT EXISTS', REPEATED_CREATE: 'Nhiều CREATE cho cùng bảng', NON_TABLE_DEFINITION: 'Có định nghĩa ngoài bảng',
+    UNSUPPORTED_TABLE_DEFINITION: 'Định nghĩa bảng ngoài phạm vi phân tích', UNKNOWN_DEPENDENCY: 'Có phụ thuộc chưa phân tích được', UNSUPPORTED_STATEMENT: 'Có câu lệnh ngoài phạm vi phân tích',
+    CASE_AMBIGUITY: 'Tên bảng chỉ khác hoa/thường', STRUCTURE_UNAVAILABLE: 'Chưa có đúng một CREATE cho bảng', EXTERNAL_DEPENDENCY: 'FK tham chiếu database khác',
+    MISSING_DEPENDENCY: 'Chưa chọn bảng được FK tham chiếu', DEPENDENCY_NOT_IN_BACKUP: 'Bảng được FK tham chiếu chưa có trong backup', FK_CYCLE_OR_BLOCKED: 'Có vòng FK hoặc phụ thuộc chưa xếp được',
+    INVENTORY_TRUNCATED: 'Inventory vượt giới hạn', TARGET_STRUCTURE_NOT_CHECKED: 'Cấu trúc đích cần đối chiếu', DEFINITION_LIMIT: 'Định nghĩa vượt giới hạn phân tích',
+    EXECUTABLE_COMMENT: 'Có executable comment', DEFINITION_SYNTAX: 'Định nghĩa chưa phân tích được', DATA_DEPENDENCIES_NOT_ANALYZED: 'INSERT có phụ thuộc chưa phân tích',
+    SQL_MODE_CONTEXT: 'SQL_MODE cần đối chiếu', SOURCE_COLUMNS_INCOMPLETE: 'Chưa đọc đủ định nghĩa cột nguồn',
+    LITERAL_INSERT_MATCHED: 'Khớp cú pháp INSERT literal; chưa xác nhận khả năng ghi vào đích', INSERT_SYNTAX_NOT_REVIEWED: 'Chưa kiểm tra cú pháp INSERT',
+    INSERT_FORM_UNSUPPORTED: 'Dạng INSERT chưa hỗ trợ', INSERT_VALUE_EXPRESSION: 'Giá trị có biểu thức hoặc cú pháp chưa hỗ trợ', INSERT_TRAILING_SQL: 'Có phần SQL nối sau VALUES chưa hỗ trợ',
+    INSERT_QUOTING_UNSUPPORTED: 'Có kiểu quote/escape chưa hỗ trợ', INSERT_COMMENT_UNSUPPORTED: 'Có comment cần phân tích thêm',
+    INSERT_LITERAL_UNSUPPORTED: 'Literal chưa hỗ trợ hoặc chưa đúng định dạng', INSERT_IDENTIFIER_UNSUPPORTED: 'Tên đối tượng chưa hỗ trợ',
+    INSERT_COLUMN_LIST_INVALID: 'Danh sách cột chưa hợp lệ hoặc vượt giới hạn', INSERT_ARITY_MISMATCH: 'Số giá trị giữa các bộ VALUES hoặc danh sách cột không khớp',
+    INSERT_VALIDATION_LIMIT: 'Kiểm tra cú pháp INSERT vượt giới hạn', INSERT_TARGET_MISMATCH: 'Các bước phân tích chưa thống nhất bảng/schema của INSERT' };
+  const decisions = { candidate: 'Thuộc lựa chọn', excluded: 'Ngoài lựa chọn', blocked: 'Chưa xử lý', skipped: 'Chỉ thị được bỏ qua' };
+  return `<details class="backup-selection-draft"><summary>Bản nháp kế hoạch · ${Number(plan.statementCount)} câu lệnh nguồn · Chưa thể thực thi</summary>
+    <p>Đích: ${esc(plan.targetDatabase)}. Chỉ để review; chưa cấp quyền chạy. Thứ tự bên dưới giữ theo tệp nguồn, chưa phải thứ tự phục hồi được xác nhận. Không tự bỏ qua câu chưa xử lý hoặc tự chấp thuận DROP.</p>
+    <p>Mã bản nháp: <code>${esc(plan.planId)}</code></p>
+    ${plan.syntaxTotals ? `<p>INSERT trong lựa chọn: ${Number(plan.syntaxTotals.matched)} khớp cú pháp literal · ${Number(plan.syntaxTotals.unsupported)} chưa hỗ trợ · ${Number(plan.syntaxTotals.notReviewed)} chưa kiểm tra. Chỉ kiểm tra cú pháp, chưa xác nhận chuyển đổi giá trị hoặc tác động trigger/FK. Số bộ VALUES không phải số dòng đã ghi.</p>` : ''}
+    <p>${Number(plan.totals.candidate)} thuộc lựa chọn · ${Number(plan.totals.excluded)} ngoài lựa chọn · ${Number(plan.totals.blocked)} chưa xử lý · ${Number(plan.totals.skipped)} chỉ thị được luồng hiện có bỏ qua${plan.stepsTruncated ? ' (danh sách có giới hạn)' : ''}.</p>
+    <h4>Các phần còn chặn thực thi</h4><ul>${plan.blockers.map(item => `<li>${esc(labels[item.code] || item.code)}${item.table ? ` · ${esc(item.table)}` : ''}${item.detail ? ` · ${esc(labels[item.detail] || item.detail)}` : ''}</li>`).join('')}</ul>
+    ${plan.blockersTruncated ? '<p>Còn lý do ngoài giới hạn 100 mục.</p>' : ''}
+    <div class="backup-selection-table"><table><thead><tr><th># nguồn</th><th>Lệnh / bảng</th><th>Phạm vi</th><th>Kiểm tra cú pháp</th><th>Lý do</th></tr></thead><tbody>${plan.steps.map(step => `<tr><td>${Number(step.number)}</td><td>${esc(step.command)}${step.table ? ` · ${esc(`${step.schema ? `${step.schema}.` : ''}${step.table}`)}` : ''}</td><td>${esc(decisions[step.decision] || step.decision)}</td><td>${step.syntaxReview?.status === 'matched' ? `INSERT literal · ${Number(step.syntaxReview.rows)} bộ VALUES × ${Number(step.syntaxReview.valuesPerRow)} giá trị` : step.syntaxReview ? esc(labels[step.syntaxReview.code] || step.syntaxReview.code) : 'Chưa kiểm tra'}</td><td>${esc(labels[step.reason] || step.reason)}</td></tr>`).join('')}</tbody></table></div>
+    ${plan.stepsTruncated ? '<p>Chỉ hiện tối đa 200 câu lệnh; inventory giữ tối đa 10.000. Danh sách bị cắt không đủ căn cứ thực thi.</p>' : ''}</details>`;
+}
+
+function backupSelectionTargetHtml(review) {
+  if (!review) return '';
+  const labels = { ACCOUNT_VISIBLE_METADATA_ONLY: 'Chỉ thấy metadata trong quyền tài khoản; kết quả trống không chứng minh đối tượng không tồn tại',
+    TARGET_RECHECK_REQUIRED: 'Phải đọc lại đích sát lúc chạy; đây chưa phải xác nhận thực thi', TARGET_METADATA_NOT_ATOMIC: 'Metadata được đọc qua nhiều truy vấn, có thể thay đổi giữa các lần đọc',
+    SOURCE_SQL_EFFECTS_NOT_VALIDATED: 'Chưa chứng minh tác động của toàn bộ SQL nguồn', TARGET_CASE_POLICY_UNKNOWN: 'Chưa đọc được chính sách hoa/thường của máy chủ',
+    TARGET_DATABASE_NOT_VISIBLE: 'Không thấy database đích; có thể chưa có hoặc thiếu quyền', TARGET_METADATA_ERROR: 'Có phần metadata chưa đọc được',
+    TARGET_METADATA_TRUNCATED: 'Metadata vượt giới hạn đọc', TARGET_AMBIGUOUS_OBJECT: 'Tên đối tượng đích chưa phân biệt được chắc chắn',
+    TARGET_VIEW_CONFLICT: 'Tên bảng được chọn trùng view ở đích', TARGET_STRUCTURE_CONFLICT: 'Cấu trúc được chọn trùng bảng đã có ở đích',
+    TARGET_DATA_TABLE_NOT_VISIBLE: 'Chọn dữ liệu nhưng chưa thấy bảng đích', TARGET_DATA_SCHEMA_NOT_VALIDATED: 'Chưa xác nhận đầy đủ khả năng ghi giá trị vào cấu trúc đích',
+    TARGET_TRIGGERS_PRESENT: 'Bảng đích có trigger, ghi dữ liệu có thể tác động gián tiếp', TARGET_FOREIGN_KEYS_PRESENT: 'Có khóa ngoại liên quan ở đích',
+    TARGET_INBOUND_FK_FROM_UNSELECTED_TABLE: 'Có bảng ngoài lựa chọn tham chiếu vào bảng đích', SOURCE_DROP_REQUIRES_EXPLICIT_POLICY: 'Tệp nguồn có DROP, chưa có chính sách chấp thuận thay/xóa đối tượng',
+    SOURCE_SCHEMA_MAPPING_NOT_VALIDATED: 'Database nguồn và đích khác nhau; chưa kiểm chứng ánh xạ schema ghi rõ trong SQL' };
+  return `<section class="backup-target-review"><h3>Đối chiếu đích: ${esc(review.database)}</h3>
+    <p>Máy chủ ${esc(review.serverVersion || 'chưa xác định')} · ${esc(new Date(review.checkedAt).toLocaleString('vi-VN'))}. Kiểm tra metadata một phần, chưa thực thi phục hồi.</p>
+    <p>Mã đối chiếu snapshot (không phải quyền chạy): <code>${esc(review.snapshotId)}</code></p>
+    <ul>${review.findings.map(item => `<li>${esc(labels[item.code] || item.code)}${item.table ? ` · ${esc(item.table)}` : ''}${item.detail ? ` · ${esc(item.detail)}` : ''}</li>`).join('')}</ul>
+    ${review.findingsTruncated ? '<p>Còn cảnh báo ngoài giới hạn 100 mục; hãy giảm phạm vi để đối chiếu.</p>' : ''}
+    <div class="backup-selection-table"><table><thead><tr><th>Bảng chọn</th><th>Đối tượng thấy ở đích</th><th>Trigger thấy ở đích</th></tr></thead><tbody>${review.rows.map(row => `<tr><td>${esc(row.name)}</td><td>${row.objects.map(object => `${esc(object.type)}: ${esc(object.name)}`).join(', ') || 'Chưa thấy'}${row.objectCount > row.objects.length ? ` · Chỉ hiện ${row.objects.length}/${Number(row.objectCount)}` : ''}</td><td>${row.triggers.map(trigger => `${esc(trigger.name)} (${esc(trigger.event)})`).join(', ') || 'Chưa thấy'}${row.triggerCount > row.triggers.length ? ` · Chỉ hiện ${row.triggers.length}/${Number(row.triggerCount)}` : ''}</td></tr>`).join('')}</tbody></table></div>
+    <h4>Khóa ngoại liên quan (${review.foreignKeys.length} cặp cột thấy được)</h4><ul>${review.foreignKeys.slice(0, 100).map(fk => `<li>${esc(fk.name)} · ${esc(`${fk.tableSchema}.${fk.table}.${fk.column}`)} → ${esc(`${fk.referencedSchema}.${fk.referencedTable}.${fk.referencedColumn}`)}</li>`).join('') || '<li>Chưa thấy trong metadata đọc được.</li>'}</ul>
+    ${review.foreignKeys.length > 100 ? '<p>Chỉ hiển thị 100 cặp cột đầu tiên.</p>' : ''}${review.rows.map(backupSelectionColumnsHtml).join('')}</section>`;
+}
+
+async function showBackupSelectionPreview() {
+  const profileId = app.connection?.id;
+  const database = app.database;
+  const id = app.selectedBackupId;
+  if (!profileId || !database || !id) return;
+  modal(`<section id="backupSelectionEditor"><h2>Xem phạm vi chọn bảng</h2><p>${esc(app.connection?.name || profileId)} · ${esc(database)} · ${esc(id)}</p>
+    <div class="backup-selection-body" role="region" aria-label="Nội dung xem trước phạm vi bảng" tabindex="0">
+    <p class="hint">Chọn bảng để đọc phạm vi SQL nguồn; có thể kiểm tra metadata đích bằng phiên riêng chỉ đọc. Chưa thực thi phục hồi từng bảng. Khóa ngoại nguồn chỉ được phân tích từ CREATE TABLE; các phụ thuộc khác chưa đầy đủ. Lựa chọn ở đây không thay đổi nút Phục hồi toàn bộ hiện có.</p>
+    <p id="backupSelectionStatus" role="status" aria-live="polite">Đang đọc tệp SQL…</p>
+    <button id="cancelSelectionScan">Hủy quét</button>
+    <div id="backupSelectionForm" hidden>
+      <fieldset><legend>Bảng có trong tệp SQL</legend><div id="backupSelectionTables" class="backup-object-list"></div></fieldset>
+      <label class="checkline"><input id="selectionStructure" type="checkbox" checked> Xem phần cấu trúc (CREATE/DROP)</label>
+      <label class="checkline"><input id="selectionData" type="checkbox" checked> Xem phần ghi dữ liệu (số câu INSERT, không phải số dòng)</label>
+      <button id="previewBackupSelection" class="primary">Xem phạm vi (Ctrl+Enter)</button>
+      <label for="selectionTargetDatabase">Database đích trên cùng kết nối</label><input id="selectionTargetDatabase" value="${esc(database)}" maxlength="64" autocomplete="off">
+      <button id="reviewBackupSelectionTarget">Kiểm tra đích (chỉ đọc)</button>
+    </div>
+    <div id="backupSelectionResult" role="status" aria-live="polite"></div>
+    </div><div class="actions"><button data-click="close-modal">Đóng</button></div></section>`, true);
+  const editor = $('#backupSelectionEditor');
+  const status = $('#backupSelectionStatus');
+  const form = $('#backupSelectionForm');
+  const list = $('#backupSelectionTables');
+  const output = $('#backupSelectionResult');
+  const button = $('#previewBackupSelection');
+  const targetButton = $('#reviewBackupSelectionTarget');
+  const targetInput = $('#selectionTargetDatabase');
+  const cancel = $('#cancelSelectionScan');
+  const structure = $('#selectionStructure');
+  const data = $('#selectionData');
+  let busy = true, generation = 0, taskId = newTransferTaskId('inspect-selection'), entries = [], reviewingTarget = false;
+  const matches = () => $('#backupSelectionEditor') === editor && app.connection?.id === profileId && app.database === database && app.selectedBackupId === id;
+  cancel.addEventListener('click', async () => {
+    if (!busy || !matches() || cancel.disabled) return;
+    const canceledTaskId = taskId, canceledGeneration = generation;
+    const current = () => matches() && busy && taskId === canceledTaskId && generation === canceledGeneration;
+    cancel.disabled = true;
+    try {
+      const result = await call(reviewingTarget ? desktop.db.cancelTask(profileId, taskId) : desktop.db.cancelInspectBackup({ profileId, taskId }));
+      if (current()) status.textContent = result.canceled ? 'Đã gửi yêu cầu hủy kiểm tra.' : 'Lượt kiểm tra đã kết thúc hoặc chưa bắt đầu; đang đợi kết quả.';
+    } catch (error) { if (current()) status.textContent = error.message; }
+    finally { if (matches() && taskId === canceledTaskId) cancel.disabled = false; }
+  });
+  const labels = { CONDITIONAL_CREATE: 'CREATE IF NOT EXISTS cần đối chiếu bảng đích', REPEATED_CREATE: 'Có nhiều CREATE cho cùng bảng',
+    NON_TABLE_DEFINITION: 'Có đối tượng ngoài bảng; phụ thuộc chưa phân tích đầy đủ', UNSUPPORTED_TABLE_DEFINITION: 'Định nghĩa bảng nằm ngoài phạm vi phân tích',
+    UNKNOWN_DEPENDENCY: 'Không phân tích được một phụ thuộc', UNSUPPORTED_STATEMENT: 'Có câu lệnh ngoài phạm vi xem trước chọn bảng',
+    CASE_AMBIGUITY: 'Tên bảng khác nhau chỉ bởi hoa/thường; cần kiểm tra cấu hình đích', STRUCTURE_UNAVAILABLE: 'Không có đúng một CREATE cho bảng đã chọn',
+    EXTERNAL_DEPENDENCY: 'Khóa ngoại tham chiếu database khác', MISSING_DEPENDENCY: 'Chưa chọn bảng được khóa ngoại tham chiếu',
+    DEPENDENCY_NOT_IN_BACKUP: 'Bảng được khóa ngoại tham chiếu không có trong inventory', FK_CYCLE_OR_BLOCKED: 'Có vòng FK hoặc bảng bị phụ thuộc vào vòng FK',
+    INVENTORY_TRUNCATED: 'Inventory vượt giới hạn, chưa đầy đủ', TARGET_STRUCTURE_NOT_CHECKED: 'Chọn dữ liệu: chưa kiểm tra cấu trúc và trigger ở đích',
+    DEFINITION_LIMIT: 'Định nghĩa vượt giới hạn phân tích', EXECUTABLE_COMMENT: 'Có executable comment trong định nghĩa', DEFINITION_SYNTAX: 'Định nghĩa chưa phân tích được',
+    DATA_DEPENDENCIES_NOT_ANALYZED: 'INSERT có SELECT; phụ thuộc dữ liệu chưa phân tích', SQL_MODE_CONTEXT: 'Tệp có SQL_MODE; cần đối chiếu chế độ phân tích trên server đích', SOURCE_COLUMNS_INCOMPLETE: 'Chưa đọc đầy đủ định nghĩa cột nguồn' };
+  const preview = async (withTarget = false) => {
+    if (busy || !matches() || !entries.length) return;
+    const tables = [...list.querySelectorAll('input[data-selection-index]:checked')].map(input => entries[Number(input.dataset.selectionIndex)]?.name);
+    if (!tables.length) { status.textContent = 'Hãy chọn ít nhất một bảng.'; return; }
+    if (!structure.checked && !data.checked) { status.textContent = 'Hãy chọn cấu trúc hoặc dữ liệu.'; return; }
+    const targetDatabase = targetInput.value;
+    if (withTarget && (!targetDatabase || targetDatabase.length > 64 || targetDatabase.includes('\0'))) { status.textContent = 'Hãy nhập database đích hợp lệ (1–64 ký tự).'; targetInput.focus(); return; }
+    const request = ++generation;
+    taskId = newTransferTaskId('inspect-selection');
+    reviewingTarget = withTarget;
+    busy = true; button.disabled = targetButton.disabled = true; cancel.hidden = false; cancel.disabled = false;
+    status.textContent = withTarget ? 'Đang quét lại tệp nguồn và đọc metadata đích bằng phiên riêng…' : 'Đang kiểm tra phạm vi lựa chọn…'; output.textContent = '';
+    try {
+      const api = withTarget ? 'previewBackupSelectionTarget' : 'previewBackupSelection';
+      const result = await call(desktop.db[api]({ profileId, database, id, taskId, tables,
+        includeStructure: structure.checked, includeData: data.checked, ...(withTarget ? { targetDatabase } : {}) }));
+      if (!matches() || request !== generation) return;
+      status.textContent = withTarget ? 'Đã đối chiếu metadata đích một phần. Chưa ghi vào database.' : 'Đã xem phạm vi từ tệp nguồn. Chưa ghi vào database.';
+      output.innerHTML = `${backupSelectionDraftHtml(result.draftPlan)}${backupSelectionTargetHtml(result.targetReview)}<p>${result.rows.length} bảng đã chọn · ${Number(result.totals.createStatements)} CREATE · ${Number(result.totals.dropStatements)} DROP trong tệp · ${Number(result.totals.dataStatements)} INSERT. Bỏ ngoài lựa chọn ${Number(result.excludedTables)} bảng; ${Number(result.excludedDefinitions)} định nghĩa ngoài bảng chưa được phân tích đầy đủ.</p>
+        <p class="hint">Đây là số câu lệnh nguồn, không phải cam kết số dòng phục hồi. Biểu thức INSERT và trigger có thể có tác động gián tiếp; SQL nguồn chưa được chứng minh an toàn. Đối chiếu metadata đích nếu có chưa xác nhận đủ quyền, cấu trúc cột hay dung lượng để phục hồi. Chưa có thao tác thực thi từ bản xem trước này.</p>
+        <p>SHA-256 nguồn${result.cached ? ' (inventory cache còn khớp file identity)' : ''}: <code>${esc(result.checksum)}</code></p>
+        ${result.findings.length ? `<ul>${result.findings.map(item => `<li>${esc(labels[item.code] || item.code)}${item.table ? ` · ${esc(item.table)}` : ''}${item.dependency ? ` → ${esc(item.dependency)}` : ''}</li>`).join('')}</ul>` : '<p>Chưa phát hiện phụ thuộc FK thiếu trong các CREATE TABLE đã phân tích. Điều này chưa xác nhận phục hồi được.</p>'}
+        ${result.findingsTruncated ? '<p>Có thêm cảnh báo ngoài giới hạn 100 mục hiển thị. Hãy giảm số bảng được chọn để xem chi tiết.</p>' : ''}
+        <p>Thứ tự FK tham khảo (bảng được tham chiếu trước): ${result.order.map(esc).join(' → ') || 'Chưa xác định'}.</p>
+        ${result.unresolvedOrder.length ? `<p>Chưa xếp được: ${result.unresolvedOrder.map(esc).join(', ')}.</p>` : ''}
+        <div class="backup-selection-table"><table><thead><tr><th>Bảng</th><th>CREATE / DROP / INSERT</th><th>FK tham chiếu</th></tr></thead><tbody>${result.rows.map(row => `<tr><td>${esc(row.name)}</td><td>${Number(row.createStatements)} / ${Number(row.dropStatements)} / ${Number(row.dataStatements)}</td><td>${row.dependencies.map(ref => esc(`${ref.schema ? `${ref.schema}.` : ''}${ref.table}`)).join(', ') || 'Chưa phát hiện'}</td></tr>`).join('')}</tbody></table></div>`;
+    } catch (error) { if (matches() && request === generation) status.textContent = error.message; }
+    finally { busy = false; reviewingTarget = false; if (matches()) { button.disabled = targetButton.disabled = false; cancel.hidden = true; } }
+  };
+  form.addEventListener('change', () => { generation++; output.textContent = ''; status.textContent = 'Lựa chọn đã đổi. Hãy xem phạm vi lại.'; });
+  targetInput.addEventListener('input', () => { generation++; output.textContent = ''; status.textContent = 'Đích đã đổi. Hãy kiểm tra lại.'; });
+  button.addEventListener('click', () => preview());
+  targetButton.addEventListener('click', () => preview(true));
+  editor.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void preview(); }
+  });
+  try {
+    const result = await call(desktop.db.inspectBackup({ profileId, database, id, taskId }));
+    if (!matches()) return;
+    const inventory = result.selectionPreview;
+    if (!inventory || inventory.version !== 1 || !Array.isArray(inventory.tables)) throw new Error('Chưa có inventory chọn bảng. Hãy đóng và quét lại sau khi cập nhật ứng dụng.');
+    entries = inventory.tables;
+    list.innerHTML = entries.map((entry, index) => `<label class="checkline"><input type="checkbox" data-selection-index="${index}"> ${esc(entry.name)}</label>`).join('');
+    form.hidden = !entries.length;
+    status.textContent = entries.length ? `Đã đọc ${entries.length} bảng${inventory.truncated ? '; inventory chưa đầy đủ do vượt giới hạn' : ''}. Chọn bảng để xem phạm vi.` : 'Không tìm thấy bảng trong phạm vi phân tích. Chưa hỗ trợ chọn view/routine/trigger/event.';
+    list.querySelector('input')?.focus();
+  } catch (error) { if (matches()) status.textContent = error.message; }
+  finally { busy = false; if (matches()) cancel.hidden = true; }
 }
 
 async function showBackupSchedule() {
@@ -4293,6 +4479,7 @@ function editBackupAnnotations() {
 }
 
 async function runBackupManagerAction(action) {
+  if (action === 'selection-preview') return showBackupSelectionPreview();
   if (action === 'schedule') return showBackupSchedule();
   if (action === 'retention-history') return showBackupRetentionHistory();
   if (action === 'retention-preview') return previewBackupRetention();

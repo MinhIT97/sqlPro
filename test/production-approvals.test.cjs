@@ -59,9 +59,9 @@ test('insert/update previews use the same planner as execution and do not execut
 test('row preview refreshes cached columns before planning after external DDL', async () => {
   const session = new DatabaseSession({});
   const stale = [{name:'old_column',type:'int',key:'PRI'}];
-  session.metadata.set('columns:db.users', stale);
+  session.metadata.set(JSON.stringify(['columns', 'db', 'users']), stale);
   session.listColumns = async (database,table) => {
-    const cached = session.metadata.get(`columns:${database}.${table}`);
+    const cached = session.metadata.get(JSON.stringify(['columns', database, table]));
     return cached || [{name:'id',type:'int',key:'PRI',extra:''},{name:'new_column',type:'varchar(20)',extra:''}];
   };
   const plan = await session.previewRowWrite('insert-row',{database:'db',table:'users',values:{new_column:'value'}});

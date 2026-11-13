@@ -201,6 +201,7 @@ test('xóa hàng loạt chỉ commit sau khi tất cả bản ghi khớp giá tr
   const logs = [];
   session.raw = async (sql, params) => {
     logs.push({ sql, params });
+    if (sql.includes('information_schema.TABLES')) return { rows: [{ engine: 'InnoDB' }] };
     if (/^SELECT .* FOR UPDATE$/s.test(sql)) {
       return { rows: [{ id: 1, name: 'A', m0: 1 }, { id: 2, name: 'B', m1: 1 }] };
     }
@@ -234,6 +235,7 @@ for (const mode of ['autocommit-off', 'existing']) {
       const commands = [];
       session.raw = async (sql) => {
         commands.push(sql);
+        if (sql.includes('information_schema.TABLES')) return { rows: [{ engine: 'InnoDB' }] };
         if (/^SELECT .*FOR UPDATE$/s.test(sql)) return { rows: [{ id: 1, m0: outcome === 'success' ? 1 : 0 }] };
         if (/^DELETE/.test(sql)) return { result: { affectedRows: 1 } };
         return { rows: [] };
@@ -250,6 +252,25 @@ for (const mode of ['autocommit-off', 'existing']) {
     });
   }
 }
+
+test('guarded deletion refuses partial snapshots and nontransactional/unknown engines without DELETE', async () => {
+  for (const originals of [[{ id: 1 }, null], [null], [{ id: 1 }], null]) {
+    const { session, transactions } = setup();
+    await assert.rejects(session.deleteRows({ database: 'demo', table: 'items', keysList: [{ id: 1 }, { id: 2 }], originalValues: originals }), { code: 'ORIGINAL_VALUES_REQUIRED' });
+    assert.deepEqual(transactions, []);
+  }
+  for (const engine of ['MyISAM', null]) {
+    const { session, transactions } = setup(); let deletes = 0;
+    session.raw = async sql => {
+      if (sql.includes('FOR UPDATE')) return { rows: [{ id: 1, m0: 1 }] };
+      if (sql.includes('information_schema.TABLES')) return { rows: engine ? [{ engine }] : [] };
+      if (/^DELETE/.test(sql)) deletes++;
+      return { rows: [] };
+    };
+    await assert.rejects(session.deleteRows({ database: 'demo', table: 'items', keysList: [{ id: 1 }], originalValues: [{ id: 1 }] }), { code: 'ROW_GUARD_ENGINE_UNSUPPORTED' });
+    assert.equal(deletes, 0); assert.deepEqual(transactions, ['begin', 'rollback']);
+  }
+});
 
 test('literal ellipses are guarded as text; binary previews require full-value hashes', async () => {
   const { session } = setup([column('id', 'int', { key: 'PRI' }), column('note', 'text'), column('data', 'blob')]);

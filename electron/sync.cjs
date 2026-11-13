@@ -104,6 +104,34 @@ function requestUrl(serverUrl, pathname) {
   return `${serverUrl}${pathname}`;
 }
 
+async function readResponseText(response, maxBytes) {
+  const length = Number(response.headers.get('content-length'));
+  if (Number.isFinite(length) && length > maxBytes) {
+    try { await response.body?.cancel?.(); } catch { /* Preserve the size error. */ }
+    throw makeError('Phản hồi từ server quá lớn.', 'RESPONSE_TOO_LARGE');
+  }
+  if (!response.body) {
+    const text = await response.text();
+    if (Buffer.byteLength(text, 'utf8') > maxBytes) throw makeError('Phản hồi từ server quá lớn.', 'RESPONSE_TOO_LARGE');
+    return text;
+  }
+  const reader = response.body.getReader();
+  const chunks = []; let bytes = 0, finished = false;
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) { finished = true; break; }
+      bytes += chunk.value.byteLength;
+      if (bytes > maxBytes) throw makeError('Phản hồi từ server quá lớn.', 'RESPONSE_TOO_LARGE');
+      chunks.push(Buffer.from(chunk.value));
+    }
+    return Buffer.concat(chunks, bytes).toString('utf8');
+  } finally {
+    if (!finished) { try { await reader.cancel(); } catch { /* Preserve the read error. */ } }
+    reader.releaseLock();
+  }
+}
+
 async function apiRequest(session, pathname, { method = 'GET', body, maxBytes = MAX_RESPONSE_BYTES, signal = session.signal } = {}) {
   let response;
   try {
@@ -120,13 +148,11 @@ async function apiRequest(session, pathname, { method = 'GET', body, maxBytes = 
   } catch {
     throw makeError('Không kết nối được tới server đồng bộ.', 'NETWORK_ERROR');
   }
-  const length = Number(response.headers.get('content-length'));
-  if (Number.isFinite(length) && length > maxBytes) {
-    throw makeError('Phản hồi từ server quá lớn.', 'RESPONSE_TOO_LARGE');
-  }
-  const text = await response.text();
-  if (Buffer.byteLength(text, 'utf8') > maxBytes) {
-    throw makeError('Phản hồi từ server quá lớn.', 'RESPONSE_TOO_LARGE');
+  let text;
+  try { text = await readResponseText(response, maxBytes); }
+  catch (error) {
+    if (error.code === 'RESPONSE_TOO_LARGE') throw error;
+    throw makeError('Không đọc được phản hồi từ server đồng bộ.', 'NETWORK_ERROR');
   }
   let data = null;
   if (text) {
@@ -560,9 +586,10 @@ async function runSync(choices = null) {
 
 async function resolveConflicts(choices) {
   if (!runtime) throw makeError('Chưa đăng nhập tài khoản đồng bộ.', 'NOT_LOGGED_IN');
+  if (inflight) throw makeError('Đang đồng bộ. Hãy đợi hoàn tất rồi chọn lại cách xử lý xung đột.', 'SYNC_BUSY');
   const normalized = normalizeConflictChoices(choices);
   if (!normalized.size) throw makeError('Chưa chọn hướng xử lý xung đột.', 'SYNC_CHOICE_REQUIRED');
-  return runSync(normalized);
+  return startSync(normalized);
 }
 
 function listRecovery() {
@@ -575,18 +602,22 @@ function restoreRecovery(id) {
   return result;
 }
 
+function startSync(choices = null) {
+  pending = false;
+  const task = runSync(choices).finally(() => {
+    if (inflight === task) inflight = null;
+  });
+  inflight = task;
+  return task;
+}
+
 function syncNow() {
   if (!runtime) return Promise.reject(makeError('Chưa đăng nhập tài khoản đồng bộ.', 'NOT_LOGGED_IN'));
   if (inflight) {
     pending = true;
     return inflight;
   }
-  pending = false;
-  const task = runSync().finally(() => {
-    if (inflight === task) inflight = null;
-  });
-  inflight = task;
-  return task;
+  return startSync();
 }
 
 function schedule(delay = 2000) {

@@ -731,7 +731,7 @@ function invalidateSqlAutocomplete() {
 }
 
 function autocompleteCacheKey(database, tableName) {
-  return `${app.connection?.id || ''}\u0000${database || ''}\u0000${tableName || ''}`.toLocaleLowerCase();
+  return JSON.stringify([app.connection?.id || '', database || '', tableName || '']);
 }
 
 function loadAutocompleteColumns(database, tableName) {
@@ -2731,7 +2731,7 @@ function queryResultTableTarget(result) {
 }
 
 function queryResultPrimaryKeyIndexes(result, target) {
-  const cacheKey = `${target.profileId || ''}.${target.database}.${target.targetTable}`;
+  const cacheKey = JSON.stringify([target.profileId || '', target.database, target.targetTable]);
   const cached = queryTablePkCache.get(cacheKey);
   const currentTable = target.targetTable === table && target.database === app.database
     && target.profileId === app.connection?.id ? app.primaryKey : null;
@@ -3215,7 +3215,7 @@ function setupContextMenu() {
         void call(desktop.db.columns(tableTarget.database, tableTarget.targetTable, tableTarget.profileId)).then((columns) => {
           if (menu.firstElementChild !== menuContent || menu.classList.contains('hidden') || !tr.classList.contains('query-context-selected')
             || getActiveQueryResult() !== result) return;
-          const cacheKey = `${tableTarget.profileId || ''}.${tableTarget.database}.${tableTarget.targetTable}`;
+          const cacheKey = JSON.stringify([tableTarget.profileId || '', tableTarget.database, tableTarget.targetTable]);
           queryTablePkCache.set(cacheKey, columns.filter((column) => column.key === 'PRI').map((column) => column.name));
           const editable = queryResultPrimaryKeyIndexes(result, tableTarget).length > 0;
           const deleteButton = menu.querySelector('[data-query-action="delete"]');
@@ -6702,7 +6702,7 @@ async function getQueryColumnPkInfo(result, colIdx, profileId = app.query?.profi
   if (!pkCols.length) {
     let pks = (table === targetTable && app.database === targetDb && (app.connection?.id || null) === profileId && app.primaryKey?.length) ? app.primaryKey : null;
     if (!pks) {
-      const cacheKey = `${profileId || ''}.${targetDb}.${targetTable}`;
+      const cacheKey = JSON.stringify([profileId || '', targetDb, targetTable]);
       if (queryTablePkCache.has(cacheKey)) {
         pks = queryTablePkCache.get(cacheKey);
       } else if (desktop?.db?.columns) {
@@ -6886,7 +6886,7 @@ async function deleteQueryResultRows(result, rowIndexes) {
   try {
     const columns = await call(desktop.db.columns(target.database, target.targetTable, target.profileId));
     if (getActiveQueryResult() !== result) return;
-    queryTablePkCache.set(`${target.profileId || ''}.${target.database}.${target.targetTable}`,
+    queryTablePkCache.set(JSON.stringify([target.profileId || '', target.database, target.targetTable]),
       columns.filter((column) => column.key === 'PRI').map((column) => column.name));
     const primaryIndexes = queryResultPrimaryKeyIndexes(result, target);
     if (!primaryIndexes.length) throw new Error('Kết quả cần có đầy đủ khóa chính để xóa bản ghi.');
@@ -8675,7 +8675,7 @@ function renderTransactionBar() {
   if (!host) return;
   const profileId = transactionProfileId();
   const state = app.transactionState;
-  const visible = state?.profileId === profileId && state.connected;
+  const visible = Boolean(state?.connected && state.profileId === profileId);
   host.classList.toggle('hidden', !visible);
   if (!visible) return;
   const connection = app.connections.find((entry) => entry.id === profileId) || (app.connection?.id === profileId ? app.connection : null);

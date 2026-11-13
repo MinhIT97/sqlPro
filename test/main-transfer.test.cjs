@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }), readOnlyProfiles = [], productionProfiles = [], profiles = {}, scheduleHarness, inspection, trialRecovery, backupCatalog = {}, retentionStore, retentionApply, retentionExport, retentionAuto, onConnect, onRaw, timers, retentionHistory = { read: () => [], begin: () => 'history-fixture', finish() {} } } = {}) {
+function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }), readOnlyProfiles = [], productionProfiles = [], removedProfiles = [], profiles = {}, scheduleHarness, inspection, trialRecovery, backupCatalog = {}, retentionStore, retentionApply, retentionExport, retentionAuto, onConnect, onRaw, timers, retentionHistory = { read: () => [], begin: () => 'history-fixture', finish() {} } } = {}) {
   const handlers = new Map(), sessions = [];
   let chooseFile = async () => ({ filePath: '/review/export.json' });
   let chooseOpen = async () => ({ canceled: true, filePaths: [] });
@@ -54,7 +54,10 @@ function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }
         DatabaseSession: Session,
         normalizeFileFormat: (format) => (['csv', 'tsv', 'json'].includes(format) ? format : 'csv')
       };
-      if (id === './store.cjs') return { getWithSecrets: (id) => ({ id, ssh: {}, readOnly: readOnlyProfiles.includes(id), environment:productionProfiles.includes(id)?'production':'local', ...profiles[id] }), resetLocalData: reset };
+      if (id === './store.cjs') return { getWithSecrets: (id) => {
+        if (removedProfiles.includes(id)) throw new Error('Không tìm thấy kết nối.');
+        return { id, ssh: {}, readOnly: readOnlyProfiles.includes(id), environment:productionProfiles.includes(id)?'production':'local', ...profiles[id] };
+      }, resetLocalData: reset };
       if (id === './backup-scheduler.cjs' && scheduleHarness) {
         const scheduler = require(path.join(root, id));
         return { ...scheduler, createScheduleStore: () => scheduleHarness.repository, BackupScheduler: class {
@@ -90,6 +93,81 @@ function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }
   };
 }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+test('a pending row write excludes SQL and database switches on that session while other profiles remain available', async () => {
+  const r = setup();
+  await r.call('db:connect', 'p1'); await r.call('db:connect', 'p2');
+  const [first, other] = r.sessions;
+  let finish, writes = 0, uses = 0;
+  first.deleteRows = () => new Promise(resolve => { finish = resolve; });
+  first.runQueryScript = async () => { writes++; return {}; };
+  first.useDatabase = async () => { uses++; };
+  const pending = r.call('db:delete-rows', { profileId: 'p1', database: 'demo', table: 'items', keysList: [{ id: 1 }] });
+  await waitFor(() => typeof finish === 'function');
+  assert.equal((await r.call('db:query', { profileId: 'p1', sql: 'COMMIT', confirmed: true })).error?.code, 'SESSION_BUSY');
+  assert.equal((await r.call('db:use-database', { profileId: 'p1', database: 'other' })).error?.code, 'SESSION_BUSY');
+  assert.equal(writes, 0); assert.equal(uses, 0);
+  other.runQueryScript = async () => ({ kind: 'ok' });
+  assert.equal((await r.call('db:query', { profileId: 'p2', sql: 'SELECT 1' })).ok, true);
+  finish({ affectedRows: 1 }); assert.equal((await pending).ok, true);
+  assert.equal((await r.call('db:query', { profileId: 'p1', sql: 'SELECT 1' })).ok, true);
+});
+
+test('query database binding is exclusive before the SQL task starts, and errors release the gate', async () => {
+  const r = setup(); await r.call('db:connect', 'p1');
+  const session = r.sessions[0]; let finish;
+  session.useDatabase = database => new Promise(resolve => { finish = () => { session.database = database; resolve(); }; });
+  session.runQueryScript = async () => { throw new Error('expected SQL failure'); };
+  const first = r.call('db:query', { profileId: 'p1', database: 'first', sql: 'SELECT 1' });
+  await waitFor(() => typeof finish === 'function');
+  assert.equal((await r.call('db:query', { profileId: 'p1', database: 'second', sql: 'SELECT 2' })).error?.code, 'SESSION_BUSY');
+  finish(); assert.equal((await first).ok, false); assert.equal(session.database, 'first');
+  session.runQueryScript = async () => ({ kind: 'ok' });
+  assert.equal((await r.call('db:query', { profileId: 'p1', sql: 'SELECT 3' })).ok, true);
+});
+
+test('a synced endpoint change blocks cached-session writes and COMMIT while preserving explicit rollback', async () => {
+  const profiles = { p1: { host: 'original.example' } };
+  const r = setup({ profiles }); await r.call('db:connect', 'p1');
+  const session = r.sessions[0]; let commands = 0;
+  session.inTransaction = true;
+  session.runQueryScript = async () => { commands++; session.inTransaction = false; return {}; };
+  const state = (await r.call('db:session-state', 'p1')).data;
+  profiles.p1.host = 'changed.example';
+  assert.equal((await r.call('db:query', { profileId: 'p1', sql: 'UPDATE items SET n=1', confirmed: true })).error?.code, 'PROFILE_TARGET_CHANGED');
+  assert.equal((await r.call('db:transaction', { ...state, action: 'commit' })).error?.code, 'PROFILE_TARGET_CHANGED');
+  assert.equal(commands, 0); assert.equal(session.dead, undefined); assert.equal(session.inTransaction, true);
+  assert.equal((await r.call('db:transaction', { ...state, action: 'rollback' })).ok, true);
+  assert.equal(commands, 1);
+});
+
+test('endpoint drift during connect closes the new socket; cosmetic/policy sync changes keep the target session', async () => {
+  const changed = { p1: { host: 'first.example' } };
+  const stale = setup({ profiles: changed, onConnect: () => { changed.p1.host = 'second.example'; } });
+  assert.equal((await stale.call('db:connect', 'p1')).error?.code, 'PROFILE_TARGET_CHANGED');
+  assert.equal(stale.sessions[0].dead, true);
+  const profiles = { p1: { host: 'same.example', name: 'Old' } };
+  const r = setup({ profiles }); await r.call('db:connect', 'p1');
+  r.sessions[0].runQueryScript = async () => ({ kind: 'rows' });
+  Object.assign(profiles.p1, { name: 'New', environment: 'production', readOnly: true, updatedAt: 'new-time' });
+  assert.equal((await r.call('db:query', { profileId: 'p1', sql: 'SELECT 1' })).ok, true);
+  assert.equal((await r.call('db:query', { profileId: 'p1', sql: 'DELETE FROM items' })).error?.code, 'CONNECTION_READ_ONLY');
+  assert.equal(r.sessions.length, 1);
+});
+
+test('explicit rollback still uses the observed session when sync removed its stored profile', async () => {
+  const removedProfiles = [];
+  const r = setup({ removedProfiles }); await r.call('db:connect', 'p1');
+  const session = r.sessions[0], commands = [];
+  session.inTransaction = true;
+  session.runQueryScript = async sql => { commands.push(sql); session.inTransaction = false; };
+  const state = (await r.call('db:session-state', 'p1')).data;
+  removedProfiles.push('p1');
+  assert.equal((await r.call('db:transaction', { ...state, action: 'commit' })).ok, false);
+  assert.equal((await r.call('db:transaction', { ...state, action: 'rollback' })).ok, true);
+  assert.deepEqual(commands, ['ROLLBACK']);
+  assert.equal(r.sessions.length, 1);
+});
 
 test('selected-table preview derives scope from main inventory, never connects or executes restore', async () => {
   const requests = [];

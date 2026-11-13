@@ -85,15 +85,18 @@ const sessionRegistry = new SessionRegistry({
   limit: MAX_OPEN_SESSIONS,
   isProtected: (entry) => entry === activeSession,
   create: async (profileId, options) => {
-    const profile = runtimeProfile(store.getWithSecrets(profileId));
+    const stored = store.getWithSecrets(profileId);
+    const fingerprint = sessionProfileFingerprint(stored);
+    const profile = runtimeProfile(stored);
     if (options.sshHostKey) profile.ssh = { ...profile.ssh, knownHostKey: options.sshHostKey };
     const session = new DatabaseSession(profile);
     try {
       await session.connect();
+      if (sessionProfileFingerprint(store.getWithSecrets(profileId)) !== fingerprint) throw profileTargetChanged();
       if (options.sshHostKey) {
         try { store.trustSshHostKey(profileId, options.sshHostKey); } catch { /* Ask again next time if trust cannot be stored. */ }
       }
-      return { profileId, session, sessionId: crypto.randomUUID() };
+      return { profileId, session, sessionId: crypto.randomUUID(), profileFingerprint: sessionProfileFingerprint(store.getWithSecrets(profileId)) };
     } catch (error) { await session.close().catch(() => {}); throw error; }
   }
 });
@@ -212,6 +215,19 @@ function productionProfileFingerprint(profile) {
   })).digest('hex');
 }
 
+function sessionProfileFingerprint(profile) {
+  return crypto.createHash('sha256').update(serialize({ target: targetIdentity(profile), database: profile.database,
+    password: profile.password, sshPassword: profile.sshPassword, sshPassphrase: profile.sshPassphrase })).digest('hex');
+}
+
+function profileTargetChanged() {
+  return Object.assign(new Error('Đích hoặc thông tin đăng nhập đã thay đổi. Phiên đang mở vẫn thuộc cấu hình cũ. Có thể Rollback transaction hiện tại; hãy chủ động ngắt kết nối và kết nối lại trước khi chạy tiếp.'), { code: 'PROFILE_TARGET_CHANGED' });
+}
+
+function assertSessionProfile(current) {
+  if (sessionProfileFingerprint(store.getWithSecrets(current.profileId)) !== current.profileFingerprint) throw profileTargetChanged();
+}
+
 async function confirmProductionTransfer(profileId, database, filePath, operation, details) {
   const profile = store.getWithSecrets(profileId);
   if (profile.environment !== 'production') return true;
@@ -294,7 +310,7 @@ async function withWriteReview(profileId,operation,payload,execute) {
         return await execute(session,{...snapshot,confirmed:true});
       } finally { current.productionWriteInProgress = false; release(); }
     });
-  });
+  }, { exclusive: true });
 }
 
 function activeTransactions() {
@@ -700,6 +716,7 @@ async function closeAllSessions() {
 async function openSession(profileId, makeActive = true, options = {}, expected) {
   const current = await (expected ? sessionRegistry.reopen(expected, options) : sessionRegistry.open(profileId, options));
   if (openSessions.get(profileId) !== current) throw Object.assign(new Error('Yêu cầu kết nối đã bị hủy.'), { code: 'SESSION_OPEN_CANCELED' });
+  assertSessionProfile(current);
   if (makeActive) activeSession = current;
   return current;
 }
@@ -708,6 +725,7 @@ async function ensureSession(profileId) {
   if (profileId) {
     const current = openSessions.get(profileId);
     if (!current || current.session.dead) return openSession(profileId, activeSession?.profileId === profileId);
+    assertSessionProfile(current);
     return current;
   }
   if (!activeSession) {
@@ -716,17 +734,31 @@ async function ensureSession(profileId) {
   if (activeSession.session.dead) {
     await openSession(activeSession.profileId);
   }
+  assertSessionProfile(activeSession);
   return activeSession;
 }
 
-async function withSessionFor(profileId, handler, { retry = false } = {}) {
-  return withSession(handler, { retry, profileId });
+async function withSessionFor(profileId, handler, { retry = false, exclusive = false } = {}) {
+  return withSession(handler, { retry, profileId, exclusive });
 }
 
-async function withSession(handler, { retry = false, profileId = null } = {}) {
+async function withSession(handler, { retry = false, profileId = null, exclusive = false } = {}) {
   let current = await ensureSession(profileId);
-  if (current.productionWriteInProgress) throw Object.assign(new Error('Phiên đang xác nhận và thực hiện thao tác Production.'), { code: 'SESSION_BUSY' });
-  let release = sessionRegistry.acquire(current);
+  const acquire = entry => {
+    assertSessionProfile(entry);
+    if (entry.productionWriteInProgress || entry.exclusiveOperation || entry.session.activeTask
+        || exclusive && sessionRegistry.leases.get(entry)) throw Object.assign(new Error('Phiên đang bận. Hãy đợi tác vụ hoàn tất rồi thử lại.'), { code: 'SESSION_BUSY' });
+    const releaseLease = sessionRegistry.acquire(entry);
+    if (exclusive) entry.exclusiveOperation = true;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      if (exclusive) entry.exclusiveOperation = false;
+      releaseLease();
+    };
+  };
+  let release = acquire(current);
   try {
     return await handler(current.session);
   } catch (error) {
@@ -735,7 +767,7 @@ async function withSession(handler, { retry = false, profileId = null } = {}) {
       current.session.dead = true;
       release();
       current = await openSession(current.profileId, activeSession === current, {}, current);
-      release = sessionRegistry.acquire(current);
+      release = acquire(current);
       return await handler(current.session);
     }
     throw error;
@@ -1012,7 +1044,7 @@ async function executeTransaction(payload, expected = null) {
   if (current.session.activeTask || sessionRegistry.leases.get(current)) {
     throw Object.assign(new Error('Phiên đang bận. Hãy đợi tác vụ hoàn tất.'), { code: 'SESSION_BUSY' });
   }
-  if (payload.action === 'commit') checkConnectionPolicy(payload.profileId);
+  if (payload.action === 'commit') { assertSessionProfile(current); checkConnectionPolicy(payload.profileId); }
   if (!current.session.inTransaction && current.session.autocommit !== false) return sessionState(current);
   const release = sessionRegistry.acquire(current);
   try {
@@ -1026,8 +1058,11 @@ handle('db:transaction', async (payload) => {
     throw Object.assign(new Error('Thao tác transaction không hợp lệ.'), { code: 'INVALID_TRANSACTION_ACTION' });
   }
   const current = openSessions.get(payload.profileId);
+  // Roll back only the observed socket, even if sync removed its saved profile.
+  if (payload.action === 'rollback') return executeTransaction(payload);
   const profile = store.getWithSecrets(payload.profileId);
-  if (payload.action !== 'commit' || profile.environment !== 'production') return executeTransaction(payload);
+  if (current) assertSessionProfile(current);
+  if (profile.environment !== 'production') return executeTransaction(payload);
   checkConnectionPolicy(payload.profileId);
   if (!current || current.session.dead || current.sessionId !== payload.sessionId
       || (current.session.transactionRevision || 0) !== payload.transactionRevision) {
@@ -1069,7 +1104,7 @@ handle('db:use-database', (payload) => {
   const profileId = payload && typeof payload === 'object' ? payload.profileId : null;
   const database = payload && typeof payload === 'object' ? payload.database : payload;
   if (typeof database !== 'string' || !database) throw new Error('Database không hợp lệ.');
-  return withSessionFor(profileId, (session) => session.useDatabase(database), { retry: true });
+  return withSessionFor(profileId, (session) => session.useDatabase(database), { retry: true, exclusive: true });
 });
 
 handle('db:tables', (payload) => {

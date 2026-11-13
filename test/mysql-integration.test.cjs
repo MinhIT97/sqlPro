@@ -39,6 +39,36 @@ test('MySQL integration: snapshots, precise import, typed keys, full export and 
     await admin.query("INSERT INTO parents VALUES (1,'before-parent')");
     await admin.query("INSERT INTO children VALUES (1,'before-child')");
 
+    await t.test('guarded deletion refuses MyISAM before deleting any rows', async () => {
+      await admin.query('CREATE TABLE guarded_myisam (id INT PRIMARY KEY, label VARCHAR(30)) ENGINE=MyISAM');
+      await admin.query("INSERT INTO guarded_myisam VALUES (1,'before')");
+      try {
+        const reader = await session();
+        await assert.rejects(reader.deleteRows({ database, table: 'guarded_myisam', keysList: [{ id: 1 }],
+          originalValues: [{ id: 1, label: 'before' }] }), { code: 'ROW_GUARD_ENGINE_UNSUPPORTED' });
+        assert.equal((await admin.query('SELECT label FROM guarded_myisam'))[0][0].label, 'before');
+      } finally { await admin.query('DROP TABLE guarded_myisam'); }
+    });
+
+    await t.test('metadata cache keeps real dotted database/table names separate for keys and row updates', async () => {
+      const plain = `${database}_dot`, dotted = `${plain}.part`;
+      await admin.query(`CREATE DATABASE \`${plain}\``); await admin.query(`CREATE DATABASE \`${dotted}\``);
+      try {
+        await admin.query(`CREATE TABLE \`${dotted}\`.items (first_key INT PRIMARY KEY, name VARCHAR(20))`);
+        await admin.query(`CREATE TABLE \`${plain}\`.\`part.items\` (second_key INT PRIMARY KEY, name VARCHAR(20))`);
+        await admin.query(`INSERT INTO \`${dotted}\`.items VALUES(1,'first')`);
+        await admin.query(`INSERT INTO \`${plain}\`.\`part.items\` VALUES(2,'second')`);
+        const reader = await session();
+        assert.equal((await reader.listColumns(dotted, 'items'))[0].name, 'first_key');
+        assert.equal((await reader.listColumns(plain, 'part.items'))[0].name, 'second_key');
+        assert.equal((await reader.listIndexes(dotted, 'items'))[0].columns[0].name, 'first_key');
+        assert.equal((await reader.listIndexes(plain, 'part.items'))[0].columns[0].name, 'second_key');
+        await reader.updateRow({ database: plain, table: 'part.items', keys: { second_key: 2 }, values: { name: 'changed' } });
+        assert.equal((await admin.query(`SELECT name FROM \`${dotted}\`.items`))[0][0].name, 'first');
+        assert.equal((await admin.query(`SELECT name FROM \`${plain}\`.\`part.items\``))[0][0].name, 'changed');
+      } finally { await admin.query(`DROP DATABASE \`${dotted}\``); await admin.query(`DROP DATABASE \`${plain}\``); }
+    });
+
     await t.test('restore trial restores an unqualified InnoDB backup and removes its temporary database',async()=>{
       const directory=await fs.mkdtemp(path.join(os.tmpdir(),'sqlpro-real-trial-'));
       const filePath=path.join(directory,'backup.sql');

@@ -26,7 +26,11 @@ SQL result giữ tối đa 5.000 dòng và 8 MiB JSON của dữ liệu dòng ch
 
 Registry giữ tối đa 8 phiên, gộp các yêu cầu mở cùng profile và chỉ loại phiên rảnh khỏi cache. Phiên có tác vụ/lease, transaction hoặc autocommit tắt được bảo vệ; khi hết chỗ ứng dụng báo bận thay vì ngắt tác vụ nền. Server đồng bộ chạy scrypt bất đồng bộ với tối đa 2 hash đang xử lý và 32 yêu cầu chờ; khi đầy trả HTTP 503 `AUTH_BUSY` và `Retry-After`.
 
+SQL Editor, thao tác ghi dòng và đổi database giữ quyền sử dụng riêng trên phiên trong suốt quá trình chuẩn bị/chạy. Nếu một tab khác cùng kết nối đang chạy thao tác đó, yêu cầu mới báo `SESSION_BUSY`; hãy đợi hoàn tất rồi thử lại. Các kết nối khác vẫn có thể sử dụng.
+
 Sửa/xóa dòng từ lưới đối chiếu giá trị gốc để phát hiện xung đột; text phân biệt hoa/thường/dấu/khoảng trắng, JSON được so sánh như document và BLOB preview dùng hash của toàn bộ byte. Khi thiếu dữ liệu gốc đầy đủ, thao tác báo lỗi và giữ nội dung nhập. Xóa trong phiên có transaction hoặc autocommit tắt dùng savepoint, không tự commit thay người dùng; cần Commit/Rollback theo luồng SQL của phiên.
+
+Xóa có đối chiếu dữ liệu gốc hiện chỉ hỗ trợ bảng InnoDB. Engine khác hoặc không đọc được engine bị chặn trước DELETE; danh sách snapshot phải có một mục cho mỗi dòng yêu cầu. Điều này không bảo đảm rollback tác động gián tiếp của trigger lên bảng không có transaction. SQL DELETE tự nhập vẫn theo hành vi của server.
 
 ### Giới hạn của chế độ chỉ đọc
 
@@ -35,6 +39,8 @@ Sửa/xóa dòng từ lưới đối chiếu giá trị gốc để phát hiện
 Chế độ này cho phép SELECT thông thường, CTE SELECT cơ bản, một số hàm dựng sẵn, SHOW/DESCRIBE, EXPLAIN SELECT, USE và ROLLBACK. Câu ghi, locking read, INTO OUTFILE/DUMPFILE, executable comment, EXPLAIN ANALYZE, hàm tùy biến hoặc cú pháp chưa nhận diện sẽ bị từ chối trước khi chạy batch. Chuỗi có backslash bị từ chối để tránh đoán sai SQL mode; có thể dùng dấu nháy đơn lặp đôi khi phù hợp. Kết nối không bật chỉ đọc giữ hành vi SQL hiện có.
 
 Không thể sửa cấu hình kết nối khi có transaction, autocommit OFF hoặc tác vụ đang chạy. Kết thúc transaction và bật lại autocommit trước khi lưu; ứng dụng không tự rollback để đổi cấu hình.
+
+Nếu đồng bộ thay đổi đích/thông tin đăng nhập của profile đang mở, phiên cũ được giữ và yêu cầu chạy tiếp/Commit bị chặn (`PROFILE_TARGET_CHANGED`). Có thể dùng nút Rollback cho transaction đã quan sát trên phiên cũ, kể cả khi profile đã bị đồng bộ xóa; sau đó chủ động ngắt và kết nối lại để dùng cấu hình mới. Ứng dụng không tự Commit hoặc chuyển transaction sang máy chủ mới.
 
 ### Xác nhận thao tác trên Production
 
@@ -107,6 +113,7 @@ Tài khoản là **tùy chọn**. Không đăng nhập, SqlPro hoạt động đ
 - Trước khi khôi phục thủ công, thoát ứng dụng và sao lưu thư mục user data. Với secret dùng AES local, cần giữ **cả** `connections.json` (hoặc bản backup) và `.connections-key` gốc; khôi phục đúng cặp từ cùng bản sao lưu. Không tạo khóa ngẫu nhiên để thay khóa bị mất. Secret dùng `safeStorage` cần truy cập được kho khóa của tài khoản hệ điều hành đã mã hóa nó; sao chép riêng JSON sang máy khác không đủ.
 - Nếu không còn khóa gốc, ciphertext local không thể tự khôi phục. Có thể nhập lại thông tin kết nối hoặc lấy từ vault bằng mật khẩu tài khoản đồng bộ nếu đã có bản cloud. Để bắt đầu lại sau khi đã sao lưu, chọn **Sao lưu & xóa dữ liệu local…**, thoát ứng dụng rồi chuyển tệp `.connections-key` hỏng sang bản lưu riêng; lần lưu secret mới sẽ tạo khóa mới. Giữ các bản backup cũ để còn khả năng phục hồi nếu tìm lại được khóa gốc.
 - Đăng xuất/reset vô hiệu hóa công việc đồng bộ đang chờ và hủy request mạng của phiên cũ. Phản hồi đến muộn không được ghi lại store, revision hoặc trạng thái phiên mới. Request đã được server xử lý trước khi hủy có thể đã cập nhật vault cloud của tài khoản cũ.
+- Xử lý xung đột và đồng bộ thường dùng chung một lượt chạy; nếu đang đồng bộ, hãy đợi trước khi gửi lựa chọn xử lý xung đột. Phản hồi HTTP được giới hạn byte trong lúc đọc, kể cả khi không có Content-Length.
 
 > **Quan trọng:** không có khóa khôi phục và chưa hỗ trợ quên mật khẩu. Nếu quên mật khẩu, dữ liệu đã đồng bộ trên server không thể giải mã. Dữ liệu local vẫn còn trên máy.
 

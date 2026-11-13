@@ -1279,7 +1279,7 @@ class DatabaseSession {
   }
 
   async listColumns(database, table) {
-    const cacheKey = `columns:${database}.${table}`;
+    const cacheKey = JSON.stringify(['columns', database, table]);
     if (this.metadata.has(cacheKey)) return this.metadata.get(cacheKey);
     const { result } = await this.raw(
       `SELECT COLUMN_NAME AS name, COLUMN_TYPE AS type, IS_NULLABLE AS nullable,
@@ -1305,7 +1305,7 @@ class DatabaseSession {
   }
 
   async listIndexes(database, table) {
-    const cacheKey = `indexes:${database}.${table}`;
+    const cacheKey = JSON.stringify(['indexes', database, table]);
     if (this.metadata.has(cacheKey)) return this.metadata.get(cacheKey);
     const { result } = await this.raw(
       `SELECT INDEX_NAME AS name, NON_UNIQUE AS nonUnique, SEQ_IN_INDEX AS sequence,
@@ -1740,7 +1740,7 @@ class DatabaseSession {
   async previewRowWrite(operation,payload) {
     assertWritable(this.profile);
     // A confirmation must compare against server metadata, not the editor cache.
-    this.metadata.delete(`columns:${payload.database}.${payload.table}`);
+    this.metadata.delete(JSON.stringify(['columns', payload.database, payload.table]));
     if (operation === 'insert-row') return this.planInsertRow(payload);
     if (operation === 'update-row') return this.planUpdateRow(payload);
     const {database,table,keysList} = payload;
@@ -1773,8 +1773,12 @@ class DatabaseSession {
       for (const name of pkColumns) params.push(rowKeyParameter(keys[name], byName.get(name)));
     }
     if (!groups.length) throw fail('Không xác định được khóa chính của bản ghi.', 'MISSING_PRIMARY_KEY');
-    const originals = Array.isArray(originalValues) ? originalValues : [];
-    const guarded = originals.some((entry) => entry && typeof entry === 'object');
+    if (originalValues !== undefined && !Array.isArray(originalValues)) throw fail('Snapshot gốc để xóa không hợp lệ.', 'ORIGINAL_VALUES_REQUIRED');
+    const originals = originalValues || [];
+    const guarded = originals.length > 0;
+    if (guarded && (originals.length !== keysList.length || originals.some(entry => !entry || typeof entry !== 'object' || Array.isArray(entry)))) {
+      throw fail('Thiếu snapshot gốc của một hoặc nhiều bản ghi. Hãy tải lại dữ liệu trước khi xóa.', 'ORIGINAL_VALUES_REQUIRED');
+    }
     if (!guarded) {
       const { result } = await this.raw(
         `DELETE FROM ${tableRef(database, table)} WHERE ${groups.join(' OR ')}`,
@@ -1851,6 +1855,10 @@ class DatabaseSession {
         error.conflicts = conflicts;
         throw error;
       }
+      // Check under the transaction's table metadata lock, after FOR UPDATE.
+      // Nontransactional engines cannot uphold this path's guard/rollback contract.
+      const engine = (await this.raw('SELECT ENGINE AS engine FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 1', [database, table])).rows?.[0]?.engine;
+      if (typeof engine !== 'string' || engine.toLowerCase() !== 'innodb') throw fail('Xóa có kiểm tra dữ liệu gốc hiện chỉ hỗ trợ bảng InnoDB. Chưa gửi DELETE; hãy kiểm tra engine và tải lại dữ liệu.', 'ROW_GUARD_ENGINE_UNSUPPORTED');
       const { result } = await this.raw(
         `DELETE FROM ${tableRef(database, table)} WHERE ${uniqueGroups.join(' OR ')}`,
         whereParams

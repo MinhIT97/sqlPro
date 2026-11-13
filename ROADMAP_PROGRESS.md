@@ -1,6 +1,14 @@
 # Tiến độ roadmap SqlPro
 
-Cập nhật: 12/11/2026. Đối chiếu `DATABASE_PRODUCT_ROADMAP.md`. Đợt 1 và đợt 2 (`bd0b78e`) đã có commit local; chưa phát hành. Xem git log và báo cáo review bên dưới.
+Cập nhật: 13/11/2026. Đối chiếu `DATABASE_PRODUCT_ROADMAP.md`. Đợt 1–4 đã có commit local (đợt 4: `9431b98`); chưa phát hành. Xem git log và báo cáo review bên dưới.
+
+## 13/11 — Rà soát các luồng chính sau đợt 4
+
+- Rà soát session/transaction, CRUD/cache metadata, đồng bộ, backup/restore/retention và auth/vault server; chi tiết phạm vi, bằng chứng và giới hạn tại [CODE_REVIEW_FULL_2026_11_13.md](CODE_REVIEW_FULL_2026_11_13.md).
+- Sửa 7 nhóm lỗi: cache lẫn identifier có dấu chấm/khác hoa thường; thao tác cùng phiên chen vào quá trình chuẩn bị SQL/ghi; tái dùng socket cũ sau đồng bộ đổi đích; resolve conflict chạy song song với sync; body sync chỉ giới hạn sau khi đọc hết; DELETE có guard trên engine không bảo đảm rollback hoặc thiếu snapshot từng dòng; thanh transaction đọc state chưa tồn tại. Rollback vẫn dùng đúng phiên cũ khi profile bị đồng bộ xóa.
+- Sửa fixture retention lấy ngày thực tế nhưng planner cố định 12/11, gây test hỏng khi đổi ngày. Giữ nguyên cơ chế bảo vệ backup có ngày tương lai; cố định thời gian manifest trong fixture.
+- Kiểm chứng cuối: check **70/70 nhóm**, Electron **56/56**, MySQL 8.4 tmpfs riêng **29/29** không skip, website **14/14**, server **17/17**, server syntax và diff qua. Không dùng database ứng dụng thật. Chưa kiểm chứng MariaDB/Windows/bộ cài/crash/tải lớn; test xanh không chứng nhận không còn lỗi.
+- Chốt các bản sửa của lượt rà soát này thành commit local; tra git log để đối chiếu mã commit. Không push/phát hành và không đánh dấu hoàn tất các nhóm roadmap còn dở. Kết quả kiểm thử cuối và giới hạn được ghi trong báo cáo.
 
 ## 12/11 — Rà soát và chốt đợt 4
 

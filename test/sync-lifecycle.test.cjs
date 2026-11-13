@@ -77,6 +77,59 @@ test('late vault fetch after logout/reset cannot restore profiles or emit synced
   assert.equal(r.api.status().state, 'signed-out');
 });
 
+test('conflict resolution and automatic sync never run concurrently for the same account', async () => {
+  const r = setup(); await r.start('old');
+  const delayed = deferred();
+  r.route(call => call.url.endsWith('/api/vault') ? delayed.promise : response({}));
+  const running = r.api.syncNow();
+  const choices = [{ connectionId: 'fixture', fields: { name: 'local' } }];
+  const competing = r.api.resolveConflicts(choices).then(() => null, error => error);
+  await tick();
+  const requests = r.calls.filter(call => call.url.endsWith('/api/vault')).length;
+  delayed.resolve(response({ revision: 0 })); await running;
+  assert.equal((await competing)?.code, 'SYNC_BUSY'); assert.equal(requests, 1);
+  const next = deferred(); r.route(() => next.promise);
+  const resolution = r.api.resolveConflicts(choices);
+  const before = r.calls.length;
+  const normal = r.api.syncNow();
+  assert.equal(r.calls.length, before);
+  next.resolve(response({ revision: 0 })); await Promise.all([resolution, normal]);
+  r.api.shutdown();
+});
+
+test('streamed sync JSON keeps UTF-8 across chunks; oversize headers and read failures close the body', async () => {
+  const r = setup(); r.remembered('old');
+  const body = Buffer.from(JSON.stringify({ user: { id: 'old', email: 'Việt@example.test' }, vaultSalt: 'fixture', revision: 2 }));
+  const split = body.indexOf(Buffer.from('ệ')) + 1;
+  const chunks = [body.subarray(0, split), body.subarray(split)];
+  r.route(() => ({ ok: true, status: 200, headers: { get: () => null }, body: { getReader: () => ({
+    read: async () => chunks.length ? { value: chunks.shift(), done: false } : { done: true }, releaseLock() {}
+  }) } }));
+  assert.equal((await r.api.startup()).email, 'Việt@example.test');
+  let canceled = false;
+  r.route(() => ({ ok: true, status: 200, headers: { get: () => '100000' }, body: { cancel: async () => { canceled = true; } } }));
+  await r.api.startup(); assert.equal(r.api.status().error.code, 'RESPONSE_TOO_LARGE'); assert.equal(canceled, true);
+  canceled = false;
+  r.route(() => ({ ok: true, status: 200, headers: { get: () => null }, body: { getReader: () => ({
+    read: async () => { throw new Error('private-server-message'); }, cancel: async () => { canceled = true; }, releaseLock() {}
+  }) } }));
+  await r.api.startup(); assert.equal(r.api.status().error.code, 'NETWORK_ERROR'); assert.equal(canceled, true);
+  assert.equal(r.api.status().error.message.includes('private-server'), false); r.api.shutdown();
+});
+
+test('chunked sync responses stop at the byte budget before reading the whole body', async () => {
+  const r = setup(); r.remembered('old');
+  let reads = 0, canceled = false, released = false, textRead = false;
+  r.route(() => ({ ok: true, status: 200, headers: { get: () => null }, body: { getReader: () => ({
+    read: async () => { reads++; return { done: false, value: Buffer.alloc(40000) }; },
+    cancel: async () => { canceled = true; }, releaseLock: () => { released = true; }
+  }) }, text: async () => { textRead = true; return '{}'; } }));
+  const status = await r.api.startup();
+  assert.equal(status.error?.code, 'RESPONSE_TOO_LARGE');
+  assert.equal(reads, 2); assert.equal(textRead, false); assert.equal(canceled, true); assert.equal(released, true);
+  assert.equal(r.writes.length, 0); r.api.shutdown();
+});
+
 for (const outcome of ['success', 'conflict', 'auth-error', 'network-error']) {
   test(`late PUT ${outcome} cannot affect a new account or clear its in-flight job`, async () => {
     const r = setup(); await r.start('old'); r.local(fixture('local'));

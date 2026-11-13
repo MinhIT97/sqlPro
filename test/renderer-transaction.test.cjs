@@ -15,6 +15,18 @@ function setup(transaction) {
   return { ...r, host };
 }
 
+test('transaction bar stays hidden without a selected profile or session state', () => {
+  let hidden;
+  const host = { innerHTML: '', classList: { toggle: (_name, value) => { hidden = value; } } };
+  const r = loadRenderer({ elements: new Map([['#transactionBar', host]]) });
+  for (const mode of ['query', 'data']) {
+    for (const state of ['undefined', 'null']) {
+      r.evaluate(`mode='${mode}'; app.connection=null; app.query=null; app.transactionState=${state}; renderTransactionBar()`);
+      assert.equal(hidden, true);
+    }
+  }
+});
+
 test('transaction UI names the query session and escapes profile names', () => {
   const r = setup();
   r.evaluate('renderTransactionBar()');

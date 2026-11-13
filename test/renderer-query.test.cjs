@@ -6,6 +6,20 @@ const { loadRenderer } = require('./helpers/renderer.cjs');
 
 const rowResult = () => ({ kind: 'rows', columns: [{ name: 'value', type: 'INT' }], rows: [[1]], durationMs: 1 });
 
+test('autocomplete metadata keeps case-sensitive tables separate and PK cache keeps identifier boundaries', async () => {
+  const calls = [];
+  const r = loadRenderer({ desktop: { db: { columns: async (database, name) => {
+    calls.push([database, name]); return { ok: true, data: [{ name: name === 'Items' ? 'upper_key' : 'lower_key', key: 'PRI' }] };
+  } } } });
+  r.evaluate("app.connection={id:'p'}");
+  assert.equal((await r.evaluate("loadAutocompleteColumns('demo','Items')"))[0].name, 'upper_key');
+  assert.equal((await r.evaluate("loadAutocompleteColumns('demo','items')"))[0].name, 'lower_key');
+  assert.equal(calls.length, 2);
+  r.evaluate("queryTablePkCache.set(JSON.stringify(['p','a.b','c']),['first']);queryTablePkCache.set(JSON.stringify(['p','a','b.c']),['second'])");
+  const indexes = r.evaluate("queryResultPrimaryKeyIndexes({columns:[{name:'first',orgTable:'b.c',db:'a'},{name:'second',orgTable:'b.c',db:'a'}]}, {profileId:'p',database:'a',targetTable:'b.c'})");
+  assert.equal(JSON.stringify(indexes), '[1]');
+});
+
 test('SQL editor uses a five-minute default and honors each tab timeout', async () => {
   const r = setup();
   await r.evaluate('runQuery()');
@@ -48,7 +62,7 @@ function selectionRenderer(outcome = { ok: true, data: { affectedRows: 1 } }) {
         {name:'id',orgName:'id',orgTable:'users',db:'demo',type:'INT',flags:2},
         {name:'name',orgName:'name',orgTable:'users',db:'demo',type:'VARCHAR'}
       ], rows:[[2,'B'],[1,'A'],[3,'C'],[2,'B']],originalHashes:[{},{},{},{}]}};
-    queryTablePkCache.set('original.demo.users',['id']);
+    queryTablePkCache.set(JSON.stringify(['original','demo','users']),['id']);
     confirmAction=async()=>true; refreshQueryResultAfterWrite=()=>{};
     showRowConflict=(error)=>messages.push({message:error.message,type:error.code});`);
   return { ...r, requests, metadataCalls: () => metadataCalls };

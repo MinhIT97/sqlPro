@@ -9,13 +9,20 @@ const { BackupRetentionApply } = require('../electron/backup-retention-apply.cjs
 const { backupDirectory, listBackups, updateBackupAnnotations } = require('../electron/backup-catalog.cjs');
 const { saveBackupFile } = require('../electron/backup-file.cjs');
 
+async function saveFixtureBackup(file, writer, createdAt) {
+  await saveBackupFile(file, writer);
+  const manifest = JSON.parse(await fs.readFile(`${file}.json`, 'utf8'));
+  manifest.createdAt = createdAt;
+  await fs.writeFile(`${file}.json`, JSON.stringify(manifest));
+}
+
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-retention-apply-'));
   const directory = backupDirectory(root, 'p1', 'db');
   await fs.mkdir(directory, { recursive: true });
   const ids = ['20260101000000-aaaaaaaa.sql', '20260201000000-bbbbbbbb.sql', '20260301000000-cccccccc.sql'];
   for (const [index, id] of ids.entries()) {
-    await saveBackupFile(path.join(directory, id), async write => { await write(`SELECT ${index};`); return { bytes: 9 }; });
+    await saveFixtureBackup(path.join(directory, id), async write => { await write(`SELECT ${index};`); return { bytes: 9 }; }, new Date(Date.UTC(2026, index, 1)).toISOString());
   }
   let now = Date.parse('2026-11-12T12:00:00Z');
   const service = new BackupRetentionApply({ root, now: () => now });
@@ -144,10 +151,10 @@ test('abort interrupts the anchor hash with progress and deletes no candidate', 
   const r = await fixture();
   try {
     const anchor = r.ids.at(-1);
-    await saveBackupFile(path.join(r.directory, anchor), async write => {
+    await saveFixtureBackup(path.join(r.directory, anchor), async write => {
       const text = `-- ${'x'.repeat(4 * 1024 * 1024)}`;
       await write(text); return { bytes: Buffer.byteLength(text) };
-    });
+    }, '2026-03-01T00:00:00.000Z');
     const preview = await r.service.preview('p1', 'db', { maxCount: 1 });
     const controller = new AbortController();
     const updates = [];

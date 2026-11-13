@@ -39,7 +39,7 @@ test('index visibility integration: capability, drift and conservative observati
       assert.ok(['mysql-visible', 'mariadb-ignored'].includes(kind));
       if (process.env.SQLPRO_TEST_INDEX_KIND) assert.equal(kind, process.env.SQLPRO_TEST_INDEX_KIND);
       initial = preview(facts);
-      assert.equal(initial.version, 9); assert.equal(initial.rows[0].indexReview.complete, true);
+      assert.equal(initial.version, 10); assert.equal(initial.rows[0].indexReview.complete, true);
       assert.equal(reviewTargetReferencedIndex(initial.rows[0].indexReview, ['a', 'b']).status, 'observed-match');
       assert.equal(plan(initial).canExecute, false); assert.equal(editor.inTransaction, true);
       assert.deepEqual((await admin.query('SELECT * FROM visibility_parent'))[0].map(row => [row.id, row.a, row.b]), [[1, 10, 20]]);

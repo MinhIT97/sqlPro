@@ -121,7 +121,7 @@ test('collector sends only fixed metadata SELECT statements with bound schema va
   } };
   const result = await collectSelectionTargetFacts(session, database);
   assert.equal(result.databaseVisible, true); assert.deepEqual(result.objects, [{ name: '__proto__', type: 'table' }]);
-  assert.equal(queries.length, 9); assert.deepEqual(queries.find(query => query.sql.includes('KEY_COLUMN_USAGE')).params, [database, database]);
+  assert.equal(queries.length, 10); assert.deepEqual(queries.find(query => query.sql.includes('KEY_COLUMN_USAGE')).params, [database, database]);
   await assert.rejects(() => collectSelectionTargetFacts(session, 'invalid\0database'));
 });
 
@@ -135,7 +135,7 @@ test('collector bounds metadata, masks raw errors and treats malformed results a
   } }, 'target_db');
   assert.equal(result.objects.length, 5000); assert.deepEqual(result.truncated, ['objects']);
   assert.equal(result.lowerCaseTableNames, null); assert.equal(result.databaseVisible, false);
-  assert.equal(JSON.stringify(result).includes('password'), false); assert.equal(result.errors.length, 7);
+  assert.equal(JSON.stringify(result).includes('password'), false); assert.equal(result.errors.length, 8);
   const many = facts({ triggers: Array.from({ length: 30 }, (_, i) => ({ name: `trigger${i}`, table: 'parent', event: 'INSERT' })) });
   assert.equal(report(many).rows[0].triggers.length, 10); assert.equal(report(many).rows[0].triggerCount, 30);
 });
@@ -242,7 +242,7 @@ test('index metadata errors, malformed rows and quotas remain unknown and cancel
 test('target index snapshot binds order, prefix, uniqueness and type drift; missing legacy evidence stays unknown', () => {
   const index = { table: 'parent', name: 'pair', nonUnique: false, ordinal: 1, column: 'id', prefixLength: null, direction: 'A', type: 'BTREE', visibility: 'visible' };
   const first = report(facts({ indexes: [index] }));
-  assert.equal(first.version, 9); assert.equal(first.rows[0].indexReview.complete, true);
+  assert.equal(first.version, 10); assert.equal(first.rows[0].indexReview.complete, true);
   for (const changes of [{ nonUnique: true }, { ordinal: 2 }, { prefixLength: 8 }, { direction: 'D' }, { type: 'HASH' }, { column: null }, { visibility: 'invisible' }]) {
     assert.notEqual(report(facts({ indexes: [{ ...index, ...changes }] })).snapshotId, first.snapshotId);
   }
@@ -279,8 +279,8 @@ test('capability probe chooses only fixed visibility columns and validates YES/N
     assert.deepEqual(result.indexVisibility, { version: 1, status: 'observed', kind });
     assert.equal(result.indexes[0].visibility, state);
     assert.deepEqual(queries.find(query => query.sql.includes('LIMIT 3')).params, ['information_schema', 'STATISTICS', 'IS_VISIBLE', 'IGNORED']);
-    assert.match(queries.at(-1).sql, new RegExp(`${name} AS indexVisibility`));
-    assert.deepEqual(queries.at(-1).params, ['target_db', 'parent']);
+    assert.match(queries.find(query => query.sql.includes('information_schema.STATISTICS')).sql, new RegExp(`${name} AS indexVisibility`));
+    assert.deepEqual(queries.find(query => query.sql.includes('information_schema.STATISTICS')).params, ['target_db', 'parent']);
   }
 });
 

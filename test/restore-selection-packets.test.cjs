@@ -74,7 +74,7 @@ test('scope and skip policy exclude work but never override an explicit schema m
 
 test('draft binds/freezes sizes and server limits, blocks known excess and missing report detail, and retains no SQL', () => {
   const input = fixture(), first = draft(input);
-  assert.equal(first.version, 22); assert.equal(first.canExecute, false);
+  assert.equal(first.version, 23); assert.equal(first.canExecute, false);
   assert.equal(first.steps[1].reason, 'PACKET_STATEMENT_TOO_LARGE');
   assert.equal(Object.isFrozen(first.packetReview.rows[0]), true); assert.equal(Object.isFrozen(first.steps[1].sizeReview), true);
   input.targetReview.packetSettings.maxAllowedPacket = 2048;

@@ -7,6 +7,7 @@ const { reviewTargetForeignKeys } = require('./restore-selection-target-foreign-
 const { normalizeSessionSettings, projectSessionSettings } = require('./restore-selection-session-policy.cjs');
 const { projectValueColumns } = require('./restore-selection-values.cjs');
 const { normalizePacketSettings, projectPacketSettings } = require('./restore-selection-packets.cjs');
+const { collectTargetChecks, reviewTargetChecks } = require('./restore-selection-checks.cjs');
 const LIMIT = 5000;
 const validName = value => typeof value === 'string' && value.length > 0 && value.length <= 64 && !value.includes('\0');
 
@@ -106,6 +107,8 @@ async function collectSelectionTargetFacts(session, database, checkContext = () 
       visibility: facts.indexVisibility.kind === 'mysql-visible' ? row.indexVisibility === 'YES' ? 'visible' : 'invisible'
         : facts.indexVisibility.kind === 'mariadb-ignored' ? row.indexVisibility === 'YES' ? 'ignored' : 'not-ignored' : 'unknown' };
   }, 20000) || [];
+  const checks = await collectTargetChecks(read, database, selectedTables);
+  facts.checkCapabilities = checks.capabilities; facts.checks = checks.rows;
   checkContext();
   return facts;
 }
@@ -183,18 +186,22 @@ function buildSelectionTargetPreview({ source, checksum, targetIdentity, facts }
     }
   }
   if (foreignKeys.length) add('TARGET_FOREIGN_KEYS_PRESENT');
+  const targetCheckReview = reviewTargetChecks(facts, source.selectedTables);
+  if (!targetCheckReview.complete) add('TARGET_CHECKS_REQUIRE_REVIEW');
+  if (targetCheckReview.totals.observed + targetCheckReview.totals.unknown) add('TARGET_CHECKS_PRESENT');
+  if (targetCheckReview.truncated) add('TARGET_CHECK_REPORT_LIMIT');
   if (source.includeStructure && source.totals.dropStatements) add('SOURCE_DROP_REQUIRES_EXPLICIT_POLICY');
   if (facts.database !== source.sourceDatabase) add('SOURCE_SCHEMA_MAPPING_NOT_VALIDATED');
   // The digest names an observation, never an approval token or executable plan.
   // Exclude observation time; include full collected metadata even if the UI is bounded.
   const { checkedAt, ...metadata } = facts;
-  const snapshotId = crypto.createHash('sha256').update(JSON.stringify({ version: 9, checksum, targetIdentity,
+  const snapshotId = crypto.createHash('sha256').update(JSON.stringify({ version: 10, checksum, targetIdentity,
     sourceDatabase: source.sourceDatabase, tables: [...source.selectedTables].sort(),
     includeStructure: source.includeStructure, includeData: source.includeData, metadata })).digest('hex');
-  return { version: 9, canExecute: false, snapshotId, checkedAt, database: facts.database, serverVersion: facts.version,
+  return { version: 10, canExecute: false, snapshotId, checkedAt, database: facts.database, serverVersion: facts.version,
     lowerCaseTableNames: facts.lowerCaseTableNames, sessionSettings: projectSessionSettings(facts.sessionSettings), packetSettings: projectPacketSettings(facts.packetSettings), visibility: 'account-visible', status: 'partial',
-    metadataStatus: { databaseVisible: facts.databaseVisible === true, complete: targetForeignKeyReview.complete && indexMetadataComplete && facts.errors.length === 0 && facts.truncated.length === 0 },
-    rows, foreignKeys, targetForeignKeyReview, findings, findingsTruncated };
+    metadataStatus: { databaseVisible: facts.databaseVisible === true, complete: targetCheckReview.complete && targetForeignKeyReview.complete && indexMetadataComplete && facts.errors.length === 0 && facts.truncated.length === 0 },
+    rows, foreignKeys, targetForeignKeyReview, targetCheckReview, findings, findingsTruncated };
 }
 
 module.exports = { collectSelectionTargetFacts, buildSelectionTargetPreview };

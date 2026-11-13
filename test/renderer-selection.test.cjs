@@ -30,6 +30,20 @@ function setup(overrides = {}) {
   return { ...r, ready, calls, canceled, selected, get: selector => elements.get(selector), click: selector => elements.get(selector).listeners.click() };
 }
 
+test('target CHECK report escapes names, bounds detail and never displays expressions or write controls', () => {
+  const r = setup();
+  r.context.checks = { version: 1, totals: { observed: 201, unknown: 0 }, findings: ['TARGET_CHECK_DATA_NOT_VALIDATED'],
+    requires: ['TARGET_CHECK_EXPRESSION_NOT_EVALUATED', 'TARGET_CHECK_SESSION_NOT_REVIEWED'], truncated: true,
+    rows: Array.from({ length: 200 }, () => ({ table: '<img src=table>', name: '<img src=check>', clauseObserved: true,
+      declaredEnforcement: 'yes', reason: 'TARGET_CHECK_DATA_NOT_VALIDATED', expression: 'private-expression', clauseDigest: 'c'.repeat(64) })) };
+  const html = r.evaluate('backupSelectionTargetChecksHtml(checks)');
+  assert.match(html, /201 định nghĩa quan sát được/); assert.match(html, /100 CHECK/); assert.match(html, /chưa kiểm chứng dữ liệu phục hồi/);
+  assert.match(html, /ENFORCED chỉ là metadata/); assert.match(html, /YES \(metadata\)/); assert.match(html, /&lt;img/);
+  assert.equal((html.match(/<tr><td>/g) || []).length, 100); assert.equal(html.includes('<img'), false); assert.equal(html.includes('<button'), false);
+  assert.equal(html.includes('private-expression'), false); assert.equal(html.includes('c'.repeat(64)), false);
+  assert.match(r.evaluate('backupSelectionTargetChecksHtml({version:0})'), /cần kiểm tra lại metadata/);
+});
+
 test('packet report escapes names, bounds detail and never represents within-limit as permission to restore', () => {
   const r = setup();
   r.context.packets = { version: 1, settings: { version: 1, maxAllowedPacket: 1024 },

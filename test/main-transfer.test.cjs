@@ -221,7 +221,8 @@ function targetFixture(t, { scanDelayMs = 0, ...overrides } = {}) {
       calls.push({ sql, params }); assert.match(sql, /^SELECT /);
       if (sql.includes('VERSION()')) return { rows: [{ version: '8.4', lowerCaseTableNames: 0 }] };
       if (sql.includes('AS foreignKeyChecks')) return { rows: [{ foreignKeyChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES', charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4', maxAllowedPacket: 67108864 }] };
-    if (sql.includes('SCHEMATA')) return { rows: [{ name: 'destination' }] };
+      if (sql.includes('AS tableName, COLUMN_NAME AS name FROM')) return { rows: ['CONSTRAINT_SCHEMA', 'CONSTRAINT_NAME', 'CHECK_CLAUSE'].map(name => ({ tableName: 'CHECK_CONSTRAINTS', name })) };
+      if (sql.includes('SCHEMATA')) return { rows: [{ name: 'destination' }] };
       return { rows: [] };
     }, ...overrides });
   return { ...r, request, filePath, calls };
@@ -237,7 +238,7 @@ test('target metadata preview reserves its own slot, performs only reads and alw
   assert.equal(result.data.draftPlan.targetSnapshotId, result.data.targetReview.snapshotId);
   assert.ok(result.data.draftPlan.blockers.some(item => item.code === 'STATEMENT_LEDGER_INCOMPLETE'));
   assert.equal(result.data.checksum, 'a'.repeat(64)); assert.match(result.data.targetReview.snapshotId, /^[a-f0-9]{64}$/);
-  assert.equal(result.data.targetReview.database, 'destination'); assert.equal(r.calls.length, 9);
+  assert.equal(result.data.targetReview.database, 'destination'); assert.equal(r.calls.length, 11);
   assert.equal(r.sessions.length, 1); assert.equal(r.sessions[0].dead, true);
   assert.equal((await r.call('db:preview-backup-selection-target', { ...r.request, targetDatabase: '' })).ok, false);
   assert.equal(r.sessions.length, 1);
@@ -248,6 +249,7 @@ test('conflict policy is validated before I/O, captured before await and never t
     assert.match(sql, /^SELECT /);
     if (sql.includes('VERSION()')) return { rows: [{ version: '8.4', lowerCaseTableNames: 0 }] };
     if (sql.includes('AS foreignKeyChecks')) return { rows: [{ foreignKeyChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES', charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4', maxAllowedPacket: 67108864 }] };
+    if (sql.includes('AS tableName, COLUMN_NAME AS name FROM')) return { rows: ['CONSTRAINT_SCHEMA', 'CONSTRAINT_NAME', 'CHECK_CLAUSE'].map(name => ({ tableName: 'CHECK_CONSTRAINTS', name })) };
     if (sql.includes('SCHEMATA')) return { rows: [{ name: 'destination' }] };
     if (sql.includes('information_schema.TABLES')) return { rows: [{ name: 'items', type: 'BASE TABLE' }] };
     return { rows: [] };
@@ -263,7 +265,7 @@ test('conflict policy is validated before I/O, captured before await and never t
   assert.equal(result.ok, true, result.error?.message);
   const review = result.data.draftPlan.conflictPolicyReview;
   assert.equal(review.policy, 'skip-existing'); assert.equal(review.canExecute, false);
-  assert.equal(review.rows[0].disposition, 'skip'); assert.equal(result.data.draftPlan.canExecute, false);
+  assert.equal(review.rows[0].disposition, 'skip', JSON.stringify(result.data.targetReview)); assert.equal(result.data.draftPlan.canExecute, false);
   assert.equal(r.sessions.length, 1); assert.equal(r.sessions[0].dead, true);
 });
 

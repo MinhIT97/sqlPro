@@ -260,7 +260,7 @@ for (const [index, sql] of [
 ].entries()) timestampCollector.add(sql, require('../electron/sql-script.cjs').assertStatementScope(sql, 'test', index + 1), index + 1);
 const timestampInventory = timestampCollector.finish();
 const selectionInventories = new Map([
-  ['timestamp_destination', timestampInventory], ['year_destination', yearInventory],
+  ['checks_destination', timestampInventory], ['timestamp_destination', timestampInventory], ['year_destination', yearInventory],
   ['time_destination', timeInventory], ['packet_destination', packetInventory], ['temporal_destination', temporalInventory],
   ['omitted_destination', omittedInventory], ['text_destination', textInventory], ['decimal_destination', decimalInventory]
 ]);
@@ -304,6 +304,8 @@ handle('db:preview-backup-selection-target', payload => {
     facts.columns = temporalInventory.tables[0].columnSchema.columns.map(column => ({ ...column, table: 'users',
       ...(column.name === 'dt' ? require('../electron/restore-selection-columns.cjs').normalizeColumnType('datetime(3)') : {}) }));
   }
+  facts.checks = []; facts.checkCapabilities = { version: 1, status: 'observed', tableColumn: false, enforcedColumn: true };
+  if (payload.targetDatabase === 'checks_destination') facts.checks = [{ constraintSchema: payload.targetDatabase, tableSchema: payload.targetDatabase, table: 'users', name: '<img src=check>', clauseDigest: 'c'.repeat(64), declaredEnforcement: 'yes' }];
   facts.packetSettings = { version: 1, maxAllowedPacket: 67108864 };
   if (payload.targetDatabase === 'packet_destination') {
     facts.packetSettings.maxAllowedPacket = 1024;
@@ -1316,8 +1318,25 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
     await evaluate("$('#backupSelectionResult .backup-selection-values').scrollIntoView({block:'start'})");
     await captureReview('backup-selection-timestamp-small');
+    await evaluate("$('#selectionTargetDatabase').value='checks_destination';$('#selectionTargetDatabase').dispatchEvent(new Event('input',{bubbles:true}));$('#reviewBackupSelectionTarget').click()");
+    await until("Boolean($('#backupSelectionResult .backup-selection-checks'))");
+    await evaluate("$('#backupSelectionResult .backup-selection-checks summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-checks').open");
+    const checksText = await evaluate("$('#backupSelectionResult .backup-selection-checks').textContent");
+    assert.match(checksText, /CHECK ở đích/); assert.match(checksText, /1 định nghĩa quan sát được/);
+    assert.match(checksText, /ENFORCED chỉ là metadata/); assert.match(checksText, /chưa kiểm chứng dữ liệu phục hồi/);
+    assert.equal(checksText.includes('c'.repeat(64)), false);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-checks').querySelectorAll('button,img').length"), 0);
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    await evaluate("$('#backupSelectionResult .backup-selection-checks').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-checks-small');
     win.setContentSize(1344, 835);
     await until("innerWidth === 1344 && innerHeight === 835");
+    await evaluate("$('#backupSelectionResult .backup-selection-checks').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-checks');
     holdSelectionTarget = true;
     await evaluate("$('#reviewBackupSelectionTarget').click()");
     await untilNode(() => Boolean(pendingSelectionTarget));

@@ -143,7 +143,7 @@ test('plan blocks known bad value statements, freezes reports and binds changes 
   const input = fixture('`id` BIGINT UNSIGNED', ['INSERT INTO items VALUES(18446744073709551615)'], ['tinyint']);
   input.source.includeStructure = false;
   const build = () => buildSelectionDraft({ ...input, checksum: 'b'.repeat(64), targetIdentity: 'c'.repeat(64) });
-  const first = build(); assert.equal(first.version, 22); assert.equal(first.canExecute, false);
+  const first = build(); assert.equal(first.version, 23); assert.equal(first.canExecute, false);
   assert.equal(first.steps[1].reason, 'VALUE_BASIC_ISSUES'); assert.equal(first.steps[1].decision, 'blocked');
   assert.equal(Object.isFrozen(first.valueReview.rows[0].fields[0].source), true);
   assert.equal(JSON.stringify(first).includes('18446744073709551615'), false);

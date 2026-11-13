@@ -35,7 +35,7 @@ Không phát hiện thêm lỗi chặn commit trong phạm vi đã rà soát. Đ
 | Packet fixture 32 KiB | 6/6 mỗi engine, không skip |
 | git diff --check | Qua |
 
-Fixture dùng database tự tạo trên container tmpfs loopback riêng cổng 13317–13320; không dùng database ứng dụng. Tổng fixture hai cấu hình 52 kiểm tra mỗi engine, ngoài MySQL đầy đủ. Hai container packet đã dọn; hai container mặc định được dùng tiếp cho công việc sau commit và phải dọn khi kết thúc lượt làm.
+Fixture dùng database tự tạo trên container tmpfs loopback riêng cổng 13317–13320; không dùng database ứng dụng. Tổng fixture hai cấu hình 52 kiểm tra mỗi engine, ngoài MySQL đầy đủ. Hai container packet đã dọn trước commit; hai container mặc định được dùng tiếp cho phần CHECK sau commit và đã dọn khi kết thúc lượt làm. Xem mục CHECK tiếp nối trong ROADMAP_PROGRESS.md.
 
 ## Giới hạn còn lại
 

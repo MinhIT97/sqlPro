@@ -48,7 +48,7 @@ test('text preview integration: Unicode length, encoded bytes, charset and nativ
       ]) {
         await admin.query(`CREATE TABLE \`${table}\` (v ${type} CHARACTER SET utf8mb4) ENGINE=InnoDB`);
         const report = await preview(table, sourceType, values);
-        assert.equal(report.targetReview.version, 9); assert.equal(report.draft.version, 22);
+        assert.equal(report.targetReview.version, 10); assert.equal(report.draft.version, 23);
         assert.deepEqual(report.draft.valueReview.rows.map(row => row.status), ['basic-checked', 'basic-checked', 'issues']);
         assert.equal(String((await admin.query(`SELECT COUNT(*) AS n FROM \`${table}\``))[0][0].n), '0');
         await admin.query(`INSERT INTO \`${table}\` VALUES (?)`, [values[0]]); await admin.query(`INSERT INTO \`${table}\` VALUES (?)`, [values[1]]);

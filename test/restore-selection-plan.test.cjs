@@ -20,7 +20,7 @@ function inventory(sql) {
 function draft(data, options = {}, overrides = {}) {
   const source = previewRestoreSelection(data, { tables: ['items'], ...options });
   const checksum = 'a'.repeat(64), targetIdentity = 'b'.repeat(64);
-  const facts = { database: 'demo', checkedAt: '2026-11-12T12:00:00Z', version: '8.4', lowerCaseTableNames: 0,
+  const facts = { checks: [], checkCapabilities: { version: 1, status: 'observed', tableColumn: false, enforcedColumn: true }, database: 'demo', checkedAt: '2026-11-12T12:00:00Z', version: '8.4', lowerCaseTableNames: 0,
     databaseVisible: true, objects: options.includeStructure === false ? [{ name: 'items', type: 'table' }] : [], triggers: [], foreignKeys: [], foreignKeyMetadataVersion: 2, columns: [], indexes: [], errors: [], truncated: [] };
   const targetReview = buildSelectionTargetPreview({ source, checksum, targetIdentity, facts });
   return buildSelectionDraft({ inventory: data, source, checksum, targetIdentity, targetReview, ...overrides });
@@ -116,7 +116,7 @@ test('draft checks syntax evidence target/shape and projects only the review fie
 test('CREATE evidence is required, bound to target/shape and projected without defaults or extra fields', () => {
   const data = inventory("CREATE TABLE `items` (`id` int DEFAULT 123456789, PRIMARY KEY (`id`)) ENGINE=InnoDB; CREATE TABLE `other` (`id` int) ENGINE=MyISAM;");
   const first = draft(data);
-  assert.equal(first.version, 22); assert.equal(first.canExecute, false);
+  assert.equal(first.version, 23); assert.equal(first.canExecute, false);
   assert.equal(first.steps[0].reason, 'BASIC_CREATE_MATCHED');
   assert.deepEqual(first.createSyntaxTotals, { matched: 1, unsupported: 0, notReviewed: 0 });
   assert.equal(first.steps[0].syntaxReview.columns, 1); assert.equal(first.steps[0].syntaxReview.indexes, 1);

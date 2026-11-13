@@ -62,7 +62,7 @@ test('value evidence projects bounded fixed-point aggregates and rejects inconsi
 test('decimal endpoints and exact zero fit, excess integer digits and negative unsigned remain issues', () => {
   const values = ['999.99', '-999.99', '1000', '-1000', '.01', '-0.00', '1.2300', '0'];
   const result = fixture('DECIMAL(5,2)', values).build();
-  assert.equal(result.version, 22); assert.equal(result.valueReview.version, 8); assert.equal(result.canExecute, false);
+  assert.equal(result.version, 23); assert.equal(result.valueReview.version, 8); assert.equal(result.canExecute, false);
   assert.deepEqual(result.valueReview.rows.map(row => row.status), ['basic-checked', 'basic-checked', 'issues', 'issues', 'basic-checked', 'basic-checked', 'basic-checked', 'basic-checked']);
   assert.ok(result.valueReview.rows[2].fields[0].target.findings.includes('VALUE_DECIMAL_OUT_OF_RANGE'));
   const unsigned = fixture('DECIMAL(5,2)', ['-0.00', '-0.01'], 'decimal(5,2) unsigned').build();

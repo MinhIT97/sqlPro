@@ -101,7 +101,7 @@ test('old projections, incomplete CREATE/metadata/evidence, schema mapping, skip
 
 test('draft binds/freezes omission observations and blocks known issues and omitted quota rows', () => {
   const input = fixture(), first = draft(input);
-  assert.equal(first.version, 22); assert.equal(first.canExecute, false);
+  assert.equal(first.version, 23); assert.equal(first.canExecute, false);
   assert.equal(first.steps[1].reason, 'OMITTED_REQUIRED_COLUMN');
   assert.equal(Object.isFrozen(first.omittedValueReview.rows[0].target.columns[0]), true);
   targetColumns(input)[1].hasDefault = true;

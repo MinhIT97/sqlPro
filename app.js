@@ -4223,6 +4223,27 @@ function backupSelectionTargetForeignKeysHtml(review) {
     ${review.truncated || review.rows.length > 100 ? '<p>Hiện tối đa 100 định nghĩa; báo cáo hoặc cặp cột còn ngoài giới hạn. Hãy giảm phạm vi chọn và kiểm tra lại.</p>' : ''}</details>`;
 }
 
+const BACKUP_SELECTION_CHECK_LABELS = Object.freeze({
+  TARGET_CHECK_CAPABILITY_UNKNOWN: 'Chưa xác nhận được khả năng đọc metadata CHECK', TARGET_CHECK_METADATA_INVALID: 'Metadata CHECK không hợp lệ',
+  TARGET_CHECK_SCHEMA_MISMATCH: 'Schema của CHECK chưa khớp đích', TARGET_CHECK_DUPLICATE_METADATA: 'Có metadata CHECK trùng, chưa xác định được định nghĩa',
+  TARGET_CHECK_DEFINITION_UNKNOWN: 'Chưa đọc được định nghĩa CHECK trong giới hạn', TARGET_CHECK_TABLE_NOT_OBSERVED: 'Chưa xác nhận đúng bảng chứa CHECK',
+  TARGET_CHECK_METADATA_INCOMPLETE: 'Metadata CHECK chưa đầy đủ', TARGET_CHECK_DATA_NOT_VALIDATED: 'Có CHECK ở đích; chưa kiểm chứng dữ liệu phục hồi thỏa điều kiện',
+  TARGET_CHECK_REPORT_LIMIT: 'Báo cáo CHECK vượt giới hạn', TARGET_CHECK_EXPRESSION_NOT_EVALUATED: 'Chưa đánh giá biểu thức CHECK trên dữ liệu',
+  TARGET_CHECK_SESSION_NOT_REVIEWED: 'Cần kiểm chứng thiết lập phiên và hiệu lực CHECK trên server', TARGET_CHECK_RECHECK_REQUIRED: 'Phải đọc lại CHECK trước khi ghi'
+});
+
+function backupSelectionTargetChecksHtml(review) {
+  if (review?.version !== 1) return '<p>Chưa có báo cáo CHECK; cần kiểm tra lại metadata đích.</p>';
+  const code = value => esc(BACKUP_SELECTION_CHECK_LABELS[value] || value);
+  const enforcement = { yes: 'YES (metadata)', no: 'NO (metadata)', unknown: 'Chưa xác định' };
+  return `<details class="backup-selection-checks"><summary>Ràng buộc CHECK ở đích · Chỉ xem trước</summary>
+    <p>${Number(review.totals.observed)} định nghĩa quan sát được · ${Number(review.totals.unknown)} chưa đủ căn cứ. Chỉ thấy trong quyền tài khoản; kết quả trống không chứng minh không có CHECK.</p>
+    <p>Không hiển thị hoặc thực thi biểu thức CHECK. Cờ ENFORCED chỉ là metadata, chưa chứng minh hiệu lực trên phiên thực thi hoặc dữ liệu phục hồi thỏa điều kiện.</p>
+    <ul>${[...review.findings, ...review.requires].map(item => `<li>${code(item)}</li>`).join('')}</ul>
+    <div class="backup-selection-table"><table><thead><tr><th>Bảng / CHECK</th><th>Định nghĩa</th><th>ENFORCED</th><th>Quan sát</th></tr></thead><tbody>${review.rows.slice(0, 100).map(row => `<tr><td>${esc(row.table)} · ${esc(row.name)}</td><td>${row.clauseObserved ? 'Đã quan sát; không hiển thị biểu thức' : 'Chưa xác định'}</td><td>${esc(enforcement[row.declaredEnforcement] || enforcement.unknown)}</td><td>${code(row.reason)}</td></tr>`).join('') || '<tr><td colspan="4">Chưa thấy trong metadata đọc được.</td></tr>'}</tbody></table></div>
+    ${review.truncated || review.rows.length > 100 ? '<p>Chỉ hiện tối đa 100 CHECK; báo cáo có giới hạn.</p>' : ''}</details>`;
+}
+
 function backupSelectionTargetHtml(review) {
   if (!review) return '';
   const labels = { ACCOUNT_VISIBLE_METADATA_ONLY: 'Chỉ thấy metadata trong quyền tài khoản; kết quả trống không chứng minh đối tượng không tồn tại',
@@ -4233,6 +4254,7 @@ function backupSelectionTargetHtml(review) {
     TARGET_VIEW_CONFLICT: 'Tên bảng được chọn trùng view ở đích', TARGET_STRUCTURE_CONFLICT: 'Cấu trúc được chọn trùng bảng đã có ở đích',
     TARGET_DATA_TABLE_NOT_VISIBLE: 'Chọn dữ liệu nhưng chưa thấy bảng đích', TARGET_DATA_SCHEMA_NOT_VALIDATED: 'Chưa xác nhận đầy đủ khả năng ghi giá trị vào cấu trúc đích',
     TARGET_TRIGGERS_PRESENT: 'Bảng đích có trigger, ghi dữ liệu có thể tác động gián tiếp', TARGET_FOREIGN_KEYS_PRESENT: 'Có khóa ngoại liên quan ở đích',
+    TARGET_CHECKS_PRESENT: 'Bảng đích có CHECK; cần kiểm chứng dữ liệu trước phục hồi', TARGET_CHECKS_REQUIRE_REVIEW: 'Chưa đủ metadata CHECK đích', TARGET_CHECK_REPORT_LIMIT: 'Báo cáo CHECK bị giới hạn',
     TARGET_INBOUND_FK_FROM_UNSELECTED_TABLE: 'Có bảng ngoài lựa chọn tham chiếu vào bảng đích', SOURCE_DROP_REQUIRES_EXPLICIT_POLICY: 'Tệp nguồn có DROP, chưa có chính sách chấp thuận thay/xóa đối tượng',
     SOURCE_SCHEMA_MAPPING_NOT_VALIDATED: 'Database nguồn và đích khác nhau; chưa kiểm chứng ánh xạ schema ghi rõ trong SQL' };
   return `<section class="backup-target-review"><h3>Đối chiếu đích: ${esc(review.database)}</h3>
@@ -4241,7 +4263,7 @@ function backupSelectionTargetHtml(review) {
     <ul>${review.findings.map(item => `<li>${esc(labels[item.code] || item.code)}${item.table ? ` · ${esc(item.table)}` : ''}${item.detail ? ` · ${esc(item.detail)}` : ''}</li>`).join('')}</ul>
     ${review.findingsTruncated ? '<p>Còn cảnh báo ngoài giới hạn 100 mục; hãy giảm phạm vi để đối chiếu.</p>' : ''}
     <div class="backup-selection-table"><table><thead><tr><th>Bảng chọn</th><th>Đối tượng thấy ở đích</th><th>Trigger thấy ở đích</th></tr></thead><tbody>${review.rows.map(row => `<tr><td>${esc(row.name)}</td><td>${row.objects.map(object => `${esc(object.type)}: ${esc(object.name)}`).join(', ') || 'Chưa thấy'}${row.objectCount > row.objects.length ? ` · Chỉ hiện ${row.objects.length}/${Number(row.objectCount)}` : ''}</td><td>${row.triggers.map(trigger => `${esc(trigger.name)} (${esc(trigger.event)})`).join(', ') || 'Chưa thấy'}${row.triggerCount > row.triggers.length ? ` · Chỉ hiện ${row.triggers.length}/${Number(row.triggerCount)}` : ''}</td></tr>`).join('')}</tbody></table></div>
-    ${backupSelectionTargetForeignKeysHtml(review.targetForeignKeyReview)}${review.rows.map(row => backupSelectionColumnsHtml(row) + backupSelectionTargetIndexesHtml(row)).join('')}</section>`;
+    ${backupSelectionTargetChecksHtml(review.targetCheckReview)}${backupSelectionTargetForeignKeysHtml(review.targetForeignKeyReview)}${review.rows.map(row => backupSelectionColumnsHtml(row) + backupSelectionTargetIndexesHtml(row)).join('')}</section>`;
 }
 
 async function showBackupSelectionPreview() {

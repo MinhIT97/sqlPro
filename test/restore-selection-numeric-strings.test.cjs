@@ -90,7 +90,7 @@ test('numeric-string projection rejects overlap, invalid counts/masks/missing pr
 
 test('older evidence cannot certify quoted numbers; checked numeric strings keep all write gates and immutable bindings', () => {
   const input = fixture('DECIMAL(5,2)', ["'999.99'"]);
-  const initial = input.build(); assert.equal(initial.version, 22); assert.equal(initial.valueReview.version, 8);
+  const initial = input.build(); assert.equal(initial.version, 23); assert.equal(initial.valueReview.version, 8);
   assert.equal(initial.valueReview.rows[0].status, 'basic-checked'); assert.equal(initial.canExecute, false);
   assert.ok(initial.blockers.some(item => item.code === 'VALUE_FULL_VALIDATION_REQUIRED'));
   assert.equal(Object.isFrozen(initial.valueReview.rows[0].fields[0].counts), true);

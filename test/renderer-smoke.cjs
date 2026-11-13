@@ -197,27 +197,62 @@ handle('db:trial-backup',payload=>new Promise(resolve=>{pendingTrial={payload,re
 handle('db:inspect-backup',()=>new Promise(resolve=>{pendingInspection=resolve;}));
 const selectionColumns = new (require('../electron/restore-selection.cjs').RestoreSelectionInventory)('test');
 for (const [index, sql] of [
-  'CREATE TABLE users (id bigint unsigned NOT NULL, email varchar(100)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin',
-  'CREATE TABLE `<img src=x>` (id int, FOREIGN KEY (id) REFERENCES users(id))',
-  "INSERT INTO users VALUES (1,'one')", 'INSERT INTO users VALUES (2,NOW())', 'INSERT INTO `<img src=x>` VALUES (1)', 'DROP TABLE users'
+  'SET NAMES utf8mb4', 'SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0',
+  "SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO'",
+  'CREATE TABLE `users` (`id` bigint unsigned NOT NULL, `email` varchar(100), PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin',
+  'CREATE TABLE `<img src=x>` (`id` bigint unsigned, CONSTRAINT `fk_source` FOREIGN KEY (`id`) REFERENCES `users`(`id`) ON DELETE SET NULL ON UPDATE CASCADE) ENGINE=InnoDB',
+  "INSERT INTO users VALUES (1,'one')", 'INSERT INTO users VALUES (2,NOW())', 'INSERT INTO `<img src=x>` VALUES (1)', 'DROP TABLE users',
+  'SET SQL_MODE=@OLD_SQL_MODE', 'SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS'
 ].entries()) selectionColumns.add(sql, require('../electron/sql-script.cjs').assertStatementScope(sql, 'test', index + 1), index + 1);
 const selectionInventory = selectionColumns.finish();
+const decimalCollector = new (require('../electron/restore-selection.cjs').RestoreSelectionInventory)('test');
+for (const [index, sql] of [
+  'CREATE TABLE `users` (`amount` DECIMAL(10,4)) ENGINE=InnoDB',
+  'CREATE TABLE `<img src=x>` (`id` INT) ENGINE=InnoDB',
+  "INSERT INTO users VALUES(1.234),(-0.01),(1000),('1.234'),('-0.01'),('1000')"
+].entries()) decimalCollector.add(sql, require('../electron/sql-script.cjs').assertStatementScope(sql, 'test', index + 1), index + 1);
+const decimalInventory = decimalCollector.finish();
+const textCollector = new (require('../electron/restore-selection.cjs').RestoreSelectionInventory)('test');
+for (const [index, sql] of [
+  'CREATE TABLE `users` (`title` VARCHAR(100), `code` VARCHAR(10)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4',
+  'CREATE TABLE `<img src=x>` (`id` INT) ENGINE=InnoDB',
+  "INSERT INTO users VALUES('Việt😀','abc ')"
+].entries()) textCollector.add(sql, require('../electron/sql-script.cjs').assertStatementScope(sql, 'test', index + 1), index + 1);
+const textInventory = textCollector.finish();
 handle('db:preview-backup-selection', payload => ok({
   ...require('../electron/restore-selection.cjs').previewRestoreSelection(selectionInventory, payload), checksum: 'a'.repeat(64), cached: true
 }));
 let holdSelectionTarget = false, pendingSelectionTarget;
 handle('db:preview-backup-selection-target', payload => {
   if (holdSelectionTarget) return new Promise(resolve => { pendingSelectionTarget = { payload, resolve }; });
-  const source = require('../electron/restore-selection.cjs').previewRestoreSelection(selectionInventory, payload);
+  const currentInventory = payload.targetDatabase === 'text_destination' ? textInventory : payload.targetDatabase === 'decimal_destination' ? decimalInventory : selectionInventory;
+  const source = require('../electron/restore-selection.cjs').previewRestoreSelection(currentInventory, payload);
   const checksum = 'a'.repeat(64);
-  const facts = { database: payload.targetDatabase, checkedAt: '2026-11-12T12:00:00Z', version: '8.4', lowerCaseTableNames: 0, databaseVisible: true,
+  const facts = { sessionSettings: require('../electron/restore-selection-session-policy.cjs').normalizeSessionSettings({ foreignKeyChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION', charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4' }), indexVisibility: { version: 1, status: 'observed', kind: 'mysql-visible' }, indexes: [{ table: 'users', name: 'PRIMARY', nonUnique: false, ordinal: 1, column: 'id', prefixLength: null, direction: 'A', type: 'BTREE', visibility: 'visible' }, { table: 'users', name: '<img src=index>', nonUnique: true, ordinal: 1, column: 'email', prefixLength: 10, direction: 'A', type: 'BTREE', visibility: 'invisible' }], database: payload.targetDatabase, checkedAt: '2026-11-12T12:00:00Z', version: '8.4', lowerCaseTableNames: 0, databaseVisible: true,
     objects: [{ name: 'users', type: 'table' }, { name: '<img src=x>', type: 'view' }], triggers: [{ name: '<img src=trigger>', table: 'users', event: 'INSERT' }],
-    foreignKeys: [{ name: 'fk_outside', tableSchema: 'other', table: 'external_child', column: 'user_id', referencedSchema: payload.targetDatabase, referencedTable: 'users', referencedColumn: 'id' }],
+    foreignKeyMetadataVersion: 2, foreignKeys: [{ ordinal: 1, onDelete: 'SET NULL', onUpdate: 'CASCADE', match: 'NONE', name: 'fk_outside', tableSchema: 'other', table: 'external_child', column: 'user_id', referencedSchema: payload.targetDatabase, referencedTable: 'users', referencedColumn: 'id' },
+      { ordinal: 2, onDelete: 'SET NULL', onUpdate: 'CASCADE', match: 'NONE', name: 'fk_outside', tableSchema: 'other', table: 'external_child', column: 'owner_email', referencedSchema: payload.targetDatabase, referencedTable: 'users', referencedColumn: 'email' },
+      { ordinal: 1, onDelete: 'CASCADE', onUpdate: 'CASCADE', match: 'NONE', name: 'fk_live', tableSchema: payload.targetDatabase, table: '<img src=x>', column: 'id', referencedSchema: payload.targetDatabase, referencedTable: 'users', referencedColumn: 'id' }],
     columns: [...selectionInventory.tables[0].columnSchema.columns].reverse().map((column, i) => ({ ...column, table: 'users', ordinal: i + 1,
       ...(column.name === 'id' ? require('../electron/restore-selection-columns.cjs').normalizeColumnType('int') : {}) })), errors: [], truncated: [] };
+  if (payload.targetDatabase === 'comparison_destination') facts.objects[1].type = 'table';
+  if (payload.targetDatabase === 'decimal_destination') {
+    facts.objects = [{ name: 'users', type: 'table' }]; facts.triggers = []; facts.foreignKeys = []; facts.indexes = [];
+    facts.columns = decimalInventory.tables[0].columnSchema.columns.map(column => ({ ...column, table: 'users',
+      ...require('../electron/restore-selection-columns.cjs').normalizeColumnType('decimal(5,2) unsigned') }));
+  }
+  if (payload.targetDatabase === 'text_destination') {
+    facts.objects = [{ name: 'users', type: 'table' }]; facts.triggers = []; facts.foreignKeys = []; facts.indexes = [];
+    facts.columns = textInventory.tables[0].columnSchema.columns.map(column => ({ ...column, table: 'users',
+      ...require('../electron/restore-selection-columns.cjs').normalizeColumnType(column.name === 'title' ? 'varchar(2)' : 'char(5)'),
+      charset: column.name === 'title' ? 'ascii' : 'utf8mb4' }));
+  }
+  if (payload.targetDatabase === 'empty_destination') {
+    facts.objects = []; facts.triggers = []; facts.foreignKeys = []; facts.columns = []; facts.indexes = [];
+  }
   const targetIdentity = 'b'.repeat(64);
   const targetReview = require('../electron/restore-selection-target.cjs').buildSelectionTargetPreview({ source, checksum, targetIdentity, facts });
-  const draftPlan = require('../electron/restore-selection-plan.cjs').buildSelectionDraft({ inventory: selectionInventory, source, checksum, targetIdentity, targetReview });
+  const draftPlan = require('../electron/restore-selection-plan.cjs').buildSelectionDraft({ inventory: currentInventory, source, checksum, targetIdentity, targetReview, conflictPolicy: payload.conflictPolicy });
   return ok({ ...source, checksum, cached: false, targetReview, draftPlan });
 });
 handle('db:inspect-backup-status',()=>ok({running:true,cancelling:false,bytes:50,totalBytes:100,statements:3}));
@@ -871,11 +906,43 @@ app.whenReady().then(async () => {
     assert.match(await evaluate("$('#backupSelectionResult .backup-selection-draft').textContent"), /1 chưa hỗ trợ/);
     assert.match(await evaluate("$('#backupSelectionResult .backup-selection-draft').textContent"), /biểu thức hoặc cú pháp chưa hỗ trợ/);
     assert.match(await evaluate("$('#backupSelectionResult .backup-selection-draft').textContent"), /1 bộ VALUES × 2 giá trị/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-draft').textContent"), /CREATE trong lựa chọn: 2 khớp cú pháp cơ bản/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-draft').textContent"), /CREATE TABLE cơ bản · 2 cột · 1 chỉ mục · InnoDB/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-draft').textContent"), /Khóa ngoại nguồn · 1 định nghĩa/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-draft').textContent"), /Thiết lập session toàn tệp: 5 khớp mẫu dump/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-draft').textContent"), /Trình tự lưu\/khôi phục: khớp mẫu/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-draft').textContent"), /Lưu và tạm tắt kiểm tra FK/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-draft').textContent"), /không xác nhận dữ liệu đã hợp lệ/);
     assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-draft').querySelectorAll('button,img').length"), 0);
     await evaluate("$('#backupSelectionResult .backup-selection-draft').scrollIntoView({block:'start'})");
     await captureReview('backup-selection-draft');
     await evaluate("[...$('#backupSelectionResult .backup-selection-draft').querySelectorAll('tbody tr')].find(row=>row.textContent.includes('INSERT literal')).scrollIntoView({block:'center'})");
     await captureReview('backup-selection-insert-syntax');
+    await evaluate("[...$('#backupSelectionResult .backup-selection-draft').querySelectorAll('tbody tr')].find(row=>row.textContent.includes('CREATE TABLE cơ bản')).scrollIntoView({block:'center'})");
+    await captureReview('backup-selection-create-syntax');
+    await evaluate("[...$('#backupSelectionResult .backup-selection-draft').querySelectorAll('tbody tr')].find(row=>row.textContent.includes('SET dump')).scrollIntoView({block:'center'})");
+    await captureReview('backup-selection-session-context');
+    await evaluate("$('#backupSelectionResult .backup-selection-session-policy summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-session-policy').open");
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-session-policy').textContent"), /Giữ kiểm tra FK bật/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-session-policy').textContent"), /NO_AUTO_VALUE_ON_ZERO, NO_ENGINE_SUBSTITUTION, STRICT_TRANS_TABLES/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-session-policy').textContent"), /không cam kết rollback toàn bộ DDL/);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-session-policy').querySelectorAll('button,img').length"), 0);
+    await evaluate("$('#backupSelectionResult .backup-selection-session-policy').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-session-policy');
+    await evaluate("$('#backupSelectionResult .backup-selection-values summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-values').open");
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-values').textContent"), /Chưa kiểm chứng chuyển đổi kiểu/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-values').textContent"), /Chưa ánh xạ được vị trí vào cột/);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-values').querySelectorAll('button,img').length"), 0);
+    await evaluate("$('#backupSelectionResult .backup-selection-values').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-values');
     win.setContentSize(900, 650);
     await until("innerWidth === 900 && innerHeight === 650");
     assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
@@ -883,6 +950,14 @@ app.whenReady().then(async () => {
     await captureReview('backup-selection-draft-small');
     await evaluate("[...$('#backupSelectionResult .backup-selection-draft').querySelectorAll('tbody tr')].find(row=>row.textContent.includes('INSERT literal')).scrollIntoView({block:'center'})");
     await captureReview('backup-selection-insert-syntax-small');
+    await evaluate("[...$('#backupSelectionResult .backup-selection-draft').querySelectorAll('tbody tr')].find(row=>row.textContent.includes('CREATE TABLE cơ bản')).scrollIntoView({block:'center'})");
+    await captureReview('backup-selection-create-syntax-small');
+    await evaluate("[...$('#backupSelectionResult .backup-selection-draft').querySelectorAll('tbody tr')].find(row=>row.textContent.includes('SET dump')).scrollIntoView({block:'center'})");
+    await captureReview('backup-selection-session-context-small');
+    await evaluate("$('#backupSelectionResult .backup-selection-session-policy').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-session-policy-small');
+    await evaluate("$('#backupSelectionResult .backup-selection-values').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-values-small');
     win.setContentSize(1344, 835);
     await until("innerWidth === 1344 && innerHeight === 835");
     await evaluate("$('#backupSelectionResult .backup-selection-draft').open=false");
@@ -902,6 +977,158 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
     assert.equal(await evaluate("$('#backupSelectionEditor [data-click=close-modal]').getBoundingClientRect().bottom <= innerHeight"), true);
     await captureReview('backup-selection-columns-small');
+    win.setContentSize(1344, 835);
+    await until("innerWidth === 1344 && innerHeight === 835");
+    const stopPlanId = await evaluate("$('#backupSelectionResult .backup-selection-draft code').textContent");
+    await evaluate("$('#selectionConflictPolicy').value='skip-existing';$('#selectionConflictPolicy').dispatchEvent(new Event('change',{bubbles:true}))");
+    assert.equal(await evaluate("$('#backupSelectionResult').textContent"), '');
+    await evaluate("$('#reviewBackupSelectionTarget').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("Boolean($('#backupSelectionResult .backup-selection-policy'))");
+    assert.equal(calls.filter(call => call.name === 'db:preview-backup-selection-target').at(-1).args[0].conflictPolicy, 'skip-existing');
+    assert.notEqual(await evaluate("$('#backupSelectionResult .backup-selection-draft code').textContent"), stopPlanId);
+    await evaluate("$('#backupSelectionResult .backup-selection-draft').open=true;$('#backupSelectionResult .backup-selection-policy summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-policy').open");
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-policy').textContent"), /1 bảng dự kiến bỏ qua/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-policy').textContent"), /không thay hoặc tự bỏ qua view/);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-policy').querySelectorAll('button,img').length"), 0);
+    await evaluate("$('#backupSelectionResult .backup-selection-policy').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-conflict-policy');
+    await evaluate("$('#backupSelectionResult .backup-selection-source-fk summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-source-fk').open");
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-source-fk').textContent"), /DELETE: SET NULL/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-source-fk').textContent"), /UPDATE: CASCADE/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-source-fk').textContent"), /Bảng được tham chiếu bị bỏ qua/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-source-fk').textContent"), /Thấy PRIMARY\/UNIQUE KEY đích khớp metadata cột/);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-source-fk').querySelectorAll('button,img').length"), 0);
+    await evaluate("$('#backupSelectionResult .backup-selection-source-fk').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-source-foreign-keys');
+    await evaluate("$('#backupSelectionResult .backup-target-foreign-keys summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-target-foreign-keys').open");
+    assert.match(await evaluate("$('#backupSelectionResult .backup-target-foreign-keys').textContent"), /2 định nghĩa · 3 cặp cột/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-target-foreign-keys').textContent"), /1: user_id → id/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-target-foreign-keys').textContent"), /2: owner_email → email/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-target-foreign-keys').textContent"), /DELETE: SET NULL/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-target-foreign-keys').textContent"), /UPDATE: CASCADE/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-target-foreign-keys').textContent"), /Bảng ngoài lựa chọn tham chiếu vào/);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-target-foreign-keys').querySelectorAll('button,img').length"), 0);
+    await evaluate("$('#backupSelectionResult .backup-target-foreign-keys').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-target-foreign-keys');
+    await evaluate("$('#backupSelectionResult .backup-target-indexes summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-target-indexes').open");
+    assert.match(await evaluate("$('#backupSelectionResult .backup-target-indexes').textContent"), /PRIMARY KEY/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-target-indexes').textContent"), /email \(10\) ASC/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-target-indexes').textContent"), /invisible\/ignored/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-target-indexes').textContent"), /Visible \(optimizer\)/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-target-indexes').textContent"), /Invisible \(optimizer\)/);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-target-indexes').querySelectorAll('button,img').length"), 0);
+    await evaluate("$('#backupSelectionResult .backup-target-indexes').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-target-indexes');
+    win.setContentSize(900, 650);
+    await until("innerWidth === 900 && innerHeight === 650");
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    assert.equal(await evaluate("$('#backupSelectionEditor [data-click=close-modal]').getBoundingClientRect().bottom <= innerHeight"), true);
+    await captureReview('backup-selection-conflict-policy-small');
+    await evaluate("$('#backupSelectionResult .backup-target-indexes').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-target-indexes-small');
+    await evaluate("$('#backupSelectionResult .backup-target-foreign-keys').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-target-foreign-keys-small');
+    await evaluate("$('#selectionTargetDatabase').value='comparison_destination';$('#selectionTargetDatabase').dispatchEvent(new Event('input',{bubbles:true}));$('#reviewBackupSelectionTarget').click()");
+    await until("Boolean($('#backupSelectionResult .backup-fk-comparison'))");
+    await evaluate("$('#backupSelectionResult .backup-selection-draft').open=true;$('#backupSelectionResult .backup-fk-comparison summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-fk-comparison').open");
+    assert.match(await evaluate("$('#backupSelectionResult .backup-fk-comparison').textContent"), /Khác ON DELETE/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-fk-comparison').textContent"), /Tên FK khác nhau/);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-fk-comparison').querySelectorAll('button,img').length"), 0);
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    await evaluate("$('#backupSelectionResult .backup-fk-comparison').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-fk-comparison-small');
+    win.setContentSize(1344, 835);
+    await until("innerWidth === 1344 && innerHeight === 835");
+    await evaluate("$('#backupSelectionResult .backup-fk-comparison').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-fk-comparison');
+    win.setContentSize(900, 650);
+    await until("innerWidth === 900 && innerHeight === 650");
+    await evaluate("$('#backupSelectionResult .backup-selection-source-fk').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-source-foreign-keys-small');
+    await evaluate("$('#selectionTargetDatabase').value='empty_destination';$('#selectionTargetDatabase').dispatchEvent(new Event('input',{bubbles:true}));$('#reviewBackupSelectionTarget').click()");
+    await until("Boolean($('#backupSelectionResult .backup-selection-source-fk'))");
+    await evaluate("$('#backupSelectionResult .backup-selection-draft').open=true;$('#backupSelectionResult .backup-selection-source-fk summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-source-fk').open");
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-source-fk').textContent"), /Khóa nguồn: PRIMARY KEY \(id\)/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-source-fk').textContent"), /Chưa kiểm tra dòng mồ côi/);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-source-fk').querySelectorAll('button,img').length"), 0);
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    await evaluate("$('#backupSelectionResult .backup-selection-source-fk').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-referenced-key-small');
+    win.setContentSize(1344, 835);
+    await until("innerWidth === 1344 && innerHeight === 835");
+    await evaluate("$('#backupSelectionResult .backup-selection-source-fk').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-referenced-key');
+    await evaluate("$('#selectionConflictPolicy').value='stop-on-conflict';$('#selectionConflictPolicy').dispatchEvent(new Event('change',{bubbles:true}));$('#selectionStructure').click();$('#selectionTargetDatabase').value='decimal_destination';$('#selectionTargetDatabase').dispatchEvent(new Event('input',{bubbles:true}));$('#reviewBackupSelectionTarget').click()");
+    await until("Boolean($('#backupSelectionResult .backup-selection-values'))");
+    await evaluate("$('#backupSelectionResult .backup-selection-draft').open=true;$('#backupSelectionResult .backup-selection-values summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-values').open");
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-values').textContent"), /không thể lưu nguyên vẹn/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-values').textContent"), /Có số âm ở cột DECIMAL UNSIGNED/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-values').textContent"), /Có số vượt phần nguyên của DECIMAL/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-values').textContent"), /2 DECIMAL cố định/);
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-values').textContent"), /Chuỗi số đúng mẫu: 3/);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-values').querySelectorAll('button,img').length"), 0);
+    assert.equal((await evaluate("$('#backupSelectionResult .backup-selection-values').textContent")).includes('1.234'), false);
+    await evaluate("$('#backupSelectionResult .backup-selection-values').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-decimal');
+    await captureReview('backup-selection-numeric-strings');
+    win.setContentSize(900, 650);
+    await until("innerWidth === 900 && innerHeight === 650");
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    await evaluate("$('#backupSelectionResult .backup-selection-values').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-decimal-small');
+    await captureReview('backup-selection-numeric-strings-small');
+    win.setContentSize(1344, 835);
+    await until("innerWidth === 1344 && innerHeight === 835");
+    await evaluate("$('#selectionTargetDatabase').value='text_destination';$('#selectionTargetDatabase').dispatchEvent(new Event('input',{bubbles:true}));$('#reviewBackupSelectionTarget').click()");
+    await until("Boolean($('#backupSelectionResult .backup-selection-values'))");
+    await evaluate("$('#backupSelectionResult .backup-selection-draft').open=true;$('#backupSelectionResult .backup-selection-values summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-values').open");
+    const textReview = await evaluate("$('#backupSelectionResult .backup-selection-values').textContent");
+    assert.match(textReview, /Có chuỗi vượt độ dài/); assert.match(textReview, /Có ký tự không biểu diễn được/);
+    assert.match(textReview, /Có khoảng trắng cuối chuỗi/); assert.match(textReview, /Literal chuỗi: 1/);
+    assert.equal(textReview.includes('Việt😀'), false); assert.equal(textReview.includes('abc '), false);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-values').querySelectorAll('button,img').length"), 0);
+    await evaluate("$('#backupSelectionResult .backup-selection-values').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-text');
+    win.setContentSize(900, 650);
+    await until("innerWidth === 900 && innerHeight === 650");
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    await evaluate("$('#backupSelectionResult .backup-selection-values').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-text-small');
     win.setContentSize(1344, 835);
     await until("innerWidth === 1344 && innerHeight === 835");
     holdSelectionTarget = true;
@@ -1315,6 +1542,18 @@ app.whenReady().then(async () => {
     assert.deepEqual(payload.values, { recorded_at: '2026-11-04 23:00:56.123456' });
     assert.deepEqual(payload.keys, { id: 1 });
     rowEditorColumns = columns;
+  });
+
+  await check('a queued close from a reused modal does not cancel the next confirmation', async () => {
+    await evaluate(`modal('<p>Previous form</p>');
+      window.__previousModalClosed=new Promise(resolve=>$('#modal').addEventListener('close',resolve,{once:true}));
+      closeModal(); window.__reopenedSettled=false;
+      window.__reopenedConfirmation=confirmAction('New confirmation','Keep this choice open').then(value=>{window.__reopenedSettled=true;return value;});void 0`);
+    await evaluate('window.__previousModalClosed.then(()=>undefined)');
+    assert.equal(await evaluate("$('#modal').open && !window.__reopenedSettled"), true);
+    await evaluate("$('#confirmOk').click()");
+    assert.equal(await evaluate('window.__reopenedConfirmation'), true);
+    await until("!$('#modal').open");
   });
 
   await check('query result context menu exposes copy formats and safe record actions', async () => {

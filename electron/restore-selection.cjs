@@ -6,6 +6,8 @@
 const VERSION = 1;
 const { analyzeTableColumns } = require('./restore-selection-columns.cjs');
 const { reviewLiteralInsert } = require('./restore-selection-syntax.cjs');
+const { reviewBasicCreate } = require('./restore-selection-create.cjs');
+const { reviewDumpContext } = require('./restore-selection-context.cjs');
 const MAX_TABLES = 1000;
 const MAX_DEPENDENCIES = 10000;
 const MAX_FINDINGS = 50;
@@ -77,7 +79,12 @@ class RestoreSelectionInventory {
     this.statements = [];
     this.statementCount = 0;
     this.statementsTruncated = false;
-    this.literalValidationBytes = 0;
+    this.syntaxValidationBytes = 0;
+    this.indexEvidenceCount = 0;
+    this.indexEvidenceParts = 0;
+    this.foreignKeyEvidenceCount = 0;
+    this.foreignKeyEvidencePairs = 0;
+    this.valueEvidenceFields = 0;
   }
 
   recordStatement(statement) {
@@ -112,16 +119,38 @@ class RestoreSelectionInventory {
     const statement = { number: statementNumber, command: analysis.command, kind: 'unclassified', table: null, schema: null };
     this.recordStatement(statement);
     this.analyze(sql, analysis, statementNumber, statement);
-    if (analysis.command === 'INSERT' && this.statementCount <= 10000) {
-      const bytes = sql.length > 2 * 1024 * 1024 ? Infinity : Buffer.byteLength(sql);
-      if (bytes > 2 * 1024 * 1024 || this.literalValidationBytes + bytes > 32 * 1024 * 1024) {
-        statement.syntaxReview = { version: 1, status: 'unsupported', code: 'INSERT_VALIDATION_LIMIT' };
+    if ((['INSERT', 'CREATE'].includes(analysis.command) || statement.kind === 'context') && this.statementCount <= 10000) {
+      const create = analysis.command === 'CREATE', context = statement.kind === 'context';
+      const prefix = context ? 'CONTEXT' : create ? 'CREATE' : 'INSERT';
+      const field = context ? 'contextReview' : 'syntaxReview', maximum = context ? 16384 : 2 * 1024 * 1024;
+      const bytes = sql.length > maximum ? Infinity : Buffer.byteLength(sql);
+      if (bytes > maximum || this.syntaxValidationBytes + bytes > 32 * 1024 * 1024) {
+        statement[field] = { version: create ? 3 : 1, status: 'unsupported', code: `${prefix}_VALIDATION_LIMIT` };
       } else {
-        this.literalValidationBytes += bytes;
-        statement.syntaxReview = reviewLiteralInsert(sql);
-        if (statement.syntaxReview.status === 'matched' && (statement.kind !== 'data'
+        this.syntaxValidationBytes += bytes;
+        statement[field] = context ? reviewDumpContext(sql) : create ? reviewBasicCreate(sql) : reviewLiteralInsert(sql, { collectValues: true });
+        if (!context && !create && statement.syntaxReview.status === 'matched') {
+          const fields = statement.syntaxReview.valueReview.fields.length;
+          if (this.valueEvidenceFields + fields > 10000) delete statement.syntaxReview.valueReview;
+          else this.valueEvidenceFields += fields;
+        }
+        if (create && statement.syntaxReview.status === 'matched') {
+          const indexes = statement.syntaxReview.indexDefinitions.length;
+          const parts = statement.syntaxReview.indexDefinitions.reduce((sum, index) => sum + index.columns.length, 0);
+          const definitions = statement.syntaxReview.foreignKeys.length;
+          const pairs = statement.syntaxReview.foreignKeys.reduce((sum, fk) => sum + fk.columns.length, 0);
+          if (this.indexEvidenceCount + indexes > 5000 || this.indexEvidenceParts + parts > 20000) {
+            statement.syntaxReview = { version: 3, status: 'unsupported', code: 'CREATE_INDEX_EVIDENCE_LIMIT' };
+          } else if (this.foreignKeyEvidenceCount + definitions > 2000 || this.foreignKeyEvidencePairs + pairs > 10000) {
+            statement.syntaxReview = { version: 3, status: 'unsupported', code: 'CREATE_FOREIGN_KEY_EVIDENCE_LIMIT' };
+          } else {
+            this.indexEvidenceCount += indexes; this.indexEvidenceParts += parts;
+            this.foreignKeyEvidenceCount += definitions; this.foreignKeyEvidencePairs += pairs;
+          }
+        }
+        if (!context && statement.syntaxReview.status === 'matched' && (statement.kind !== (create ? 'structure' : 'data')
             || statement.table !== statement.syntaxReview.table || statement.schema !== statement.syntaxReview.schema)) {
-          statement.syntaxReview = { version: 1, status: 'unsupported', code: 'INSERT_TARGET_MISMATCH' };
+          statement.syntaxReview = { version: create ? 3 : 1, status: 'unsupported', code: `${prefix}_TARGET_MISMATCH` };
         }
       }
     }

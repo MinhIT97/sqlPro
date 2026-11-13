@@ -21,6 +21,8 @@ const { assertStatementScope } = require('../electron/sql-script.cjs');
 const { collectSelectionTargetFacts, buildSelectionTargetPreview } = require('../electron/restore-selection-target.cjs');
 const { buildSelectionDraft } = require('../electron/restore-selection-plan.cjs');
 const { reviewLiteralInsert } = require('../electron/restore-selection-syntax.cjs');
+const { reviewBasicCreate } = require('../electron/restore-selection-create.cjs');
+const { reviewDumpContext } = require('../electron/restore-selection-context.cjs');
 
 test('MySQL integration: snapshots, precise import, typed keys, full export and cancellation', {
   skip: !process.env.SQLPRO_TEST_MYSQL_PORT,
@@ -38,6 +40,67 @@ test('MySQL integration: snapshots, precise import, typed keys, full export and 
     await admin.query('CREATE TABLE children (id INT PRIMARY KEY, value VARCHAR(50)) ENGINE=InnoDB');
     await admin.query("INSERT INTO parents VALUES (1,'before-parent')");
     await admin.query("INSERT INTO children VALUES (1,'before-child')");
+
+    await t.test('native dump context restores only its worker settings; reenabling FK does not validate prior rows', async () => {
+      await admin.query('CREATE TABLE context_review_parent (id INT PRIMARY KEY) ENGINE=InnoDB');
+      await admin.query('CREATE TABLE context_review_child (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES context_review_parent(id)) ENGINE=InnoDB');
+      const worker = await session(), editor = await session();
+      const settings = async current => (await current.raw('SELECT @@SESSION.foreign_key_checks AS fk, @@SESSION.sql_mode AS mode, @@SESSION.character_set_client AS charset')).rows[0];
+      const before = await settings(worker), editorBefore = await settings(editor);
+      const header = ['SET NAMES utf8mb4', 'SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0', "SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO'"];
+      const footer = ['SET SQL_MODE=@OLD_SQL_MODE', 'SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS'];
+      try {
+        await editor.runQuery('START TRANSACTION');
+        assert.equal(Number(before.fk), 1);
+        for (const sql of header) { assert.equal(reviewDumpContext(sql).status, 'matched'); await worker.raw(sql); }
+        const active = await settings(worker);
+        assert.equal(Number(active.fk), 0); assert.equal(active.mode, 'NO_AUTO_VALUE_ON_ZERO'); assert.equal(active.charset, 'utf8mb4');
+        await worker.raw('INSERT INTO context_review_child VALUES (1,999)');
+        for (const sql of footer) { assert.equal(reviewDumpContext(sql).status, 'matched'); await worker.raw(sql); }
+        const after = await settings(worker);
+        assert.equal(after.fk, before.fk); assert.equal(after.mode, before.mode);
+        const orphaned = (await worker.raw('SELECT COUNT(*) AS n FROM context_review_child c LEFT JOIN context_review_parent p ON p.id=c.parent_id WHERE p.id IS NULL')).rows[0].n;
+        assert.equal(Number(orphaned), 1);
+        assert.equal(editor.inTransaction, true); assert.deepEqual(await settings(editor), editorBefore);
+      } finally {
+        await editor.runQuery('ROLLBACK');
+        await admin.query('DROP TABLE context_review_child'); await admin.query('DROP TABLE context_review_parent');
+      }
+    });
+
+    await t.test('basic CREATE matches real DDL and SHOW CREATE, refusing mode-dependent double-quoted output', async () => {
+      const originalMode = (await admin.query('SELECT @@SESSION.sql_mode AS value'))[0][0].value;
+      const definitions = [
+        "`id` bigint unsigned NOT NULL AUTO_INCREMENT, `name` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'private-default', PRIMARY KEY (`id`), UNIQUE KEY `name_idx` (`name`(20))",
+        '`id` int, `precise` decimal(65,30) DEFAULT -123.456, `tiny` tinyint(1) unsigned, `amount` double DEFAULT 1e-10, `created` datetime(6), `time` time(3), `stamp` timestamp(6) NULL DEFAULT NULL, `year` year',
+        '`id` int, `bytes` varbinary(40), `fixed` binary(16), `bits` bit(64), `data` json DEFAULT NULL, `blob` longblob, `text` mediumtext, `flag` boolean, KEY `ix` (`id`)'
+      ];
+      try {
+        for (const sqlMode of [originalMode, 'ANSI_QUOTES,NO_BACKSLASH_ESCAPES,STRICT_TRANS_TABLES']) {
+          await admin.query('SET SESSION sql_mode = ?', [sqlMode]);
+          for (const [index, definition] of definitions.entries()) {
+            const table = `create_syntax_${index}`;
+            const sql = `CREATE TABLE \`${table}\` (${definition}) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='private-comment'`;
+            assert.equal(reviewBasicCreate(sql).status, 'matched');
+            await admin.query(sql);
+            try {
+              const ddl = (await admin.query(`SHOW CREATE TABLE \`${table}\``))[0][0]['Create Table'];
+              const review = reviewBasicCreate(ddl);
+              // ANSI_QUOTES changes SHOW CREATE's identifier delimiters. The
+              // mode-independent reviewer deliberately refuses double quotes.
+              if (sqlMode.split(',').includes('ANSI_QUOTES')) {
+                assert.equal(review.status, 'unsupported'); assert.equal(review.code, 'CREATE_QUOTING_UNSUPPORTED');
+              } else {
+                assert.equal(review.status, 'matched', `${review.code}: ${table}`);
+                assert.equal(review.table, table); assert.equal(review.engine, 'InnoDB');
+              }
+              assert.equal(JSON.stringify(review).includes('private-'), false);
+            } finally { await admin.query(`DROP TABLE \`${table}\``); }
+          }
+        }
+      } finally { await admin.query('SET SESSION sql_mode = ?', [originalMode]); }
+      assert.equal((await admin.query('SELECT value FROM parents WHERE id=1'))[0][0].value, 'before-parent');
+    });
 
     await t.test('guarded deletion refuses MyISAM before deleting any rows', async () => {
       await admin.query('CREATE TABLE guarded_myisam (id INT PRIMARY KEY, label VARCHAR(30)) ENGINE=MyISAM');
@@ -116,6 +179,84 @@ test('MySQL integration: snapshots, precise import, typed keys, full export and 
       }
     });
 
+    await t.test('composite FK syntax and source report preserve SHOW CREATE pairs/actions without writing an empty target', async () => {
+      const targetDatabase = `${database}_fk_target`;
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-real-fk-'));
+      const filePath = path.join(root, 'backup.sql');
+      await admin.query(`CREATE DATABASE \`${targetDatabase}\``);
+      await admin.query('CREATE TABLE fk_review_parent (`a` INT, `b` INT, PRIMARY KEY (`a`,`b`)) ENGINE=InnoDB');
+      await admin.query('CREATE TABLE fk_review_child (`id` INT PRIMARY KEY, `pa` INT, `pb` INT, CONSTRAINT `fk_review_pair` FOREIGN KEY (`pa`,`pb`) REFERENCES fk_review_parent(`a`,`b`) ON DELETE SET NULL ON UPDATE CASCADE) ENGINE=InnoDB');
+      await admin.query('INSERT INTO fk_review_parent VALUES (10,20)'); await admin.query('INSERT INTO fk_review_child VALUES (1,10,20)');
+      try {
+        const ddl = (await admin.query('SHOW CREATE TABLE fk_review_child'))[0][0]['Create Table'];
+        const syntax = reviewBasicCreate(ddl);
+        assert.equal(syntax.status, 'matched'); assert.equal(syntax.version, 3);
+        assert.deepEqual(syntax.foreignKeys[0], { name: 'fk_review_pair', columns: ['pa', 'pb'], referencedSchema: null,
+          referencedTable: 'fk_review_parent', referencedColumns: ['a', 'b'], onDelete: 'SET NULL', onUpdate: 'CASCADE' });
+        const writer = await session();
+        const saved = await saveBackupFile(filePath, write => writer.backupDatabase({ database, tables: ['fk_review_parent', 'fk_review_child'], includeStructure: true, includeData: true }, write, () => {}));
+        const scanner = new DatabaseSession({});
+        const scanned = await scanner.scanRestoreInventoryInWorker({ filePath, database, selectionPreview: true, totalBytes: saved.bytes });
+        const valueEvidence = scanned.inventory.selectionPreview.statementLedger.entries.filter(entry => entry.command === 'INSERT');
+        assert.ok(valueEvidence.length > 0);
+        assert.ok(valueEvidence.every(entry => entry.syntaxReview.valueReview?.version === 4));
+        const source = previewRestoreSelection(scanned.inventory.selectionPreview, { tables: ['fk_review_parent', 'fk_review_child'] });
+        const reader = await session();
+        const facts = await collectSelectionTargetFacts(reader, targetDatabase);
+        assert.deepEqual(facts.errors, []); assert.deepEqual(facts.objects, []);
+        const targetReview = buildSelectionTargetPreview({ source, checksum: saved.checksum, targetIdentity: 'b'.repeat(64), facts });
+        const plan = buildSelectionDraft({ inventory: scanned.inventory.selectionPreview, source, checksum: saved.checksum, targetIdentity: 'b'.repeat(64), targetReview });
+        assert.equal(plan.foreignKeyReview.rows.length, 1); assert.equal(plan.foreignKeyReview.rows[0].status, 'review');
+        assert.ok(plan.valueReview.rows.length > 0); assert.equal(plan.valueReview.canExecute, false);
+        assert.ok(plan.valueReview.rows.every(row => row.fields.every(field => field.target.status === 'unknown')));
+        assert.deepEqual(plan.foreignKeyReview.rows[0].pairs, [{ column: 'pa', referencedColumn: 'a' }, { column: 'pb', referencedColumn: 'b' }]);
+        assert.equal(plan.foreignKeyReview.rows[0].onDelete, 'SET NULL'); assert.equal(plan.canExecute, false);
+        assert.deepEqual(plan.foreignKeyReview.rows[0].referencedIndexReview, { status: 'matched', code: 'FK_REFERENCED_UNIQUE_KEY_MATCHED', name: 'PRIMARY', kind: 'primary', columns: ['a', 'b'] });
+        assert.ok(plan.blockers.some(item => item.code === 'FK_DATA_NOT_CHECKED'));
+        assert.equal(plan.blockers.some(item => item.code === 'FK_REFERENCED_INDEX_NOT_REVIEWED'), false);
+        const [indexes] = await admin.query("SELECT COLUMN_NAME, NON_UNIQUE FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=? AND TABLE_NAME='fk_review_parent' AND INDEX_NAME='PRIMARY' ORDER BY SEQ_IN_INDEX", [database]);
+        assert.deepEqual(indexes.map(row => [row.COLUMN_NAME, row.NON_UNIQUE]), [['a', 0], ['b', 0]]);
+        assert.deepEqual((await collectSelectionTargetFacts(reader, targetDatabase)).objects, []);
+        assert.equal((await admin.query('SELECT pa,pb FROM fk_review_child WHERE id=1'))[0][0].pa, 10);
+        assert.equal((await admin.query('SELECT pa,pb FROM fk_review_child WHERE id=1'))[0][0].pb, 20);
+      } finally {
+        await admin.query('DROP TABLE fk_review_child'); await admin.query('DROP TABLE fk_review_parent');
+        await admin.query(`DROP DATABASE \`${targetDatabase}\``); await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+
+    await t.test('target index observations preserve ordered unique keys, detect ALTER drift and keep unsupported definitions unknown', async () => {
+      const { reviewTargetReferencedIndex } = require('../electron/restore-selection-target-indexes.cjs');
+      await admin.query('CREATE TABLE target_index_review (`id` INT PRIMARY KEY, `a` VARCHAR(40), `b` INT, UNIQUE KEY `pair_unique` (`a`,`b`)) ENGINE=InnoDB');
+      await admin.query("INSERT INTO target_index_review VALUES (1,'sample-value',20)");
+      try {
+        const collector = new RestoreSelectionInventory(database);
+        const ddl = (await admin.query('SHOW CREATE TABLE target_index_review'))[0][0]['Create Table'];
+        collector.add(ddl, assertStatementScope(ddl, database), 1);
+        const source = previewRestoreSelection(collector.finish(), { tables: ['target_index_review'], includeData: false });
+        const reader = await session();
+        const build = facts => buildSelectionTargetPreview({ source, checksum: 'a'.repeat(64), targetIdentity: 'b'.repeat(64), facts });
+        const before = await collectSelectionTargetFacts(reader, database, () => {}, source.selectedTables);
+        assert.deepEqual(before.errors, []);
+        const initial = build(before), indexes = initial.rows[0].indexReview;
+        assert.equal(indexes.complete, true); assert.equal(initial.canExecute, false);
+        assert.deepEqual(reviewTargetReferencedIndex(indexes, ['a', 'b']), { status: 'observed-match', code: 'FK_TARGET_UNIQUE_KEY_OBSERVED', name: 'pair_unique', kind: 'unique', columns: ['a', 'b'] });
+        assert.equal(reviewTargetReferencedIndex(indexes, ['b', 'a']).status, 'not-observed');
+        await admin.query('ALTER TABLE target_index_review ADD KEY `prefix_key` (`a`(8)), ADD KEY `descending_key` (`b` DESC), ADD KEY `functional_key` ((`b` + 1))');
+        const after = await collectSelectionTargetFacts(reader, database, () => {}, source.selectedTables);
+        assert.deepEqual(after.errors, []);
+        assert.ok(after.indexes.some(part => part.name === 'prefix_key' && part.prefixLength === 8));
+        assert.ok(after.indexes.some(part => part.name === 'descending_key' && part.direction === 'D'));
+        assert.ok(after.indexes.some(part => part.name === 'functional_key' && part.column === null));
+        const changed = build(after);
+        assert.notEqual(initial.snapshotId, changed.snapshotId); assert.equal(changed.rows[0].indexReview.complete, false);
+        assert.equal(reviewTargetReferencedIndex(changed.rows[0].indexReview, ['a', 'b']).status, 'unknown');
+        assert.ok(changed.findings.some(item => item.code === 'TARGET_INDEXES_REQUIRE_REVIEW'));
+        assert.equal(JSON.stringify(changed).includes('`b` + 1'), false);
+        assert.deepEqual((await admin.query('SELECT * FROM target_index_review'))[0].map(row => [row.id, row.a, row.b]), [[1, 'sample-value', 20]]);
+      } finally { await admin.query('DROP TABLE target_index_review'); }
+    });
+
     await t.test('selected-table source preview reads a real backup, identifies FK and never writes the target', async () => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-real-selection-'));
       const filePath = path.join(root, 'backup.sql');
@@ -136,6 +277,9 @@ test('MySQL integration: snapshots, precise import, typed keys, full export and 
         assert.equal(partial.totals.createStatements, 1); assert.equal(partial.totals.dataStatements, 1);
         const both = previewRestoreSelection(scanned.inventory.selectionPreview, { tables: ['selection_child', 'selection_parent'] });
         assert.deepEqual(both.order, ['selection_parent', 'selection_child']);
+        const childCreate = scanned.inventory.selectionPreview.statementLedger.entries.find(entry => entry.command === 'CREATE' && entry.table === 'selection_child');
+        assert.equal(childCreate.syntaxReview.version, 3); assert.equal(childCreate.syntaxReview.status, 'matched');
+        assert.equal(childCreate.syntaxReview.foreignKeys[0].referencedTable, 'selection_parent');
         await admin.query('CREATE TRIGGER selection_before BEFORE INSERT ON selection_parent FOR EACH ROW SET NEW.id = NEW.id');
         const editor = await session(); await editor.runQuery('START TRANSACTION');
         try {
@@ -154,9 +298,21 @@ test('MySQL integration: snapshots, precise import, typed keys, full export and 
           assert.equal(plan.statementCount, scanned.inventory.statements);
           assert.equal(plan.stepsTruncated, false);
           assert.equal(plan.blockers.some(item => item.code === 'STATEMENT_LEDGER_INCOMPLETE'), false);
-          assert.ok(plan.steps.some(step => step.command === 'INSERT' && step.table === 'selection_parent' && step.decision === 'candidate'));
+          assert.ok(plan.steps.some(step => step.command === 'INSERT' && step.table === 'selection_parent' && step.reason === 'POLICY_TABLE_EXISTS'));
+          const skipPlan = buildSelectionDraft({ inventory: scanned.inventory.selectionPreview, source: parentOnly, checksum: scanned.checksum, targetIdentity: 'b'.repeat(64), targetReview: review, conflictPolicy: 'skip-existing' });
+          assert.equal(skipPlan.conflictPolicyReview.totals.skip, 1); assert.notEqual(skipPlan.planId, plan.planId);
+          assert.ok(skipPlan.steps.filter(step => step.table === 'selection_parent' && ['CREATE', 'DROP', 'INSERT'].includes(step.command)).every(step => step.decision === 'excluded'));
+          assert.equal(skipPlan.canExecute, false);
+          const bothReview = buildSelectionTargetPreview({ source: both, checksum: scanned.checksum, targetIdentity: 'b'.repeat(64), facts: metadata });
+          const bothSkip = buildSelectionDraft({ inventory: scanned.inventory.selectionPreview, source: both, checksum: scanned.checksum, targetIdentity: 'b'.repeat(64), targetReview: bothReview, conflictPolicy: 'skip-existing' });
+          assert.equal(bothSkip.foreignKeyReview.rows[0].status, 'excluded'); // Both tables skipped; no FK is proposed for writing.
+          assert.equal(bothReview.rows.find(row => row.name === 'selection_parent').indexReview.complete, true);
           assert.equal(plan.syntaxTotals.matched, 1); assert.equal(plan.syntaxTotals.unsupported, 0);
           assert.equal(plan.steps.find(step => step.command === 'INSERT' && step.table === 'selection_parent').syntaxReview.status, 'matched');
+          assert.equal(plan.createSyntaxTotals.matched, 1);
+          assert.equal(plan.sessionContextReview.matched, 5); assert.equal(plan.sessionContextReview.sequenceMatched, true);
+          assert.equal(plan.sessionContextReview.foreignKeyRecheckRequired, true); assert.equal(plan.canExecute, false);
+          assert.equal(plan.steps.find(step => step.command === 'CREATE' && step.table === 'selection_parent').syntaxReview.status, 'matched');
           assert.ok(plan.steps.some(step => step.table === 'selection_child' && step.decision === 'excluded'));
           assert.equal(plan.steps.some(step => step.command === 'DROP' && step.decision === 'candidate'), false);
           const childOnly = previewRestoreSelection(scanned.inventory.selectionPreview, { tables: ['selection_child'], includeStructure: false });

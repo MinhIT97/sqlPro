@@ -16,6 +16,14 @@ function row(sql, flags = {}) {
 }
 const ddl = "CREATE TABLE items (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `name` varchar(40) NOT NULL DEFAULT 'private-default', amount decimal(20,6) DEFAULT NULL, `calc` int GENERATED ALWAYS AS ((id + 1)) STORED, PRIMARY KEY (`id`), KEY idx (`name`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;";
 
+test('type normalization preserves UNSIGNED/ZEROFILL separators after display width or precision', () => {
+  for (const [raw, expected] of [['TINYINT(3) UNSIGNED', 'tinyint(3) unsigned'], ['int ( 11 ) unsigned zerofill', 'int(11) unsigned zerofill'],
+    ['decimal ( 20 , 6 ) unsigned', 'decimal(20,6) unsigned'], ['BIGINT(20)', 'bigint(20)']]) {
+    const result = normalizeColumnType(raw); assert.equal(result.typeKnown, true); assert.equal(result.type, expected);
+  }
+  assert.equal(normalizeColumnType('int(11) unsigned; SELECT 1').typeKnown, false);
+});
+
 test('source inventory splits nested definitions and extracts PK/null/type/generated/default/charset without literals', () => {
   const source = row(ddl);
   const schema = source.columnSchema;

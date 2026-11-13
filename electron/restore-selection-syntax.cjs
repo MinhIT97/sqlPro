@@ -3,13 +3,17 @@
 const MAX_BYTES = 2 * 1024 * 1024;
 const NUMBER = /(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?/y;
 const WORD = /[A-Za-z_$][A-Za-z0-9_$]*/y;
+const { integerRangeMask } = require('./restore-selection-integer.cjs');
+const { fixedPointShape, emptyFixedPoint, addFixedPoint } = require('./restore-selection-decimal.cjs');
+const { reviewNumericString, emptyNumericStrings, addNumericString } = require('./restore-selection-numeric-strings.cjs');
+const { reviewTextLiteral, emptyText, addText } = require('./restore-selection-text.cjs');
 
 class UnsupportedInsert extends Error {}
 
 // Recognize only a bounded INSERT ... VALUES literal grammar. This never
 // validates conversion, privileges, constraints, triggers or server effects.
 // Tokens discard literal contents; no SQL text or values leave this function.
-function reviewLiteralInsert(sql) {
+function reviewLiteralInsert(sql, { collectValues = false } = {}) {
   const reject = code => { throw new UnsupportedInsert(code); };
   try {
     if (typeof sql !== 'string') reject('INSERT_FORM_UNSUPPORTED');
@@ -18,17 +22,21 @@ function reviewLiteralInsert(sql) {
     let index = 0, tokenCount = 0;
     const quoted = (quote, keepName = false, alphabet = null) => {
       index++;
-      let name = '', count = 0;
+      const start = index;
+      let name = '', count = 0, doubledQuote = false;
       while (index < sql.length) {
         const character = sql[index++];
         if (character === '\\') reject('INSERT_QUOTING_UNSUPPORTED');
         if (character === quote) {
           if (!alphabet && sql[index] === quote) {
             index++; count++;
+            doubledQuote = true;
             if (keepName) name += quote;
           } else {
             if (alphabet === 'hex' && count % 2 || alphabet === 'bit' && !count) reject('INSERT_LITERAL_UNSUPPORTED');
-            return keepName ? { kind: 'identifier', value: name } : { kind: 'literal' };
+            return keepName ? { kind: 'identifier', value: name } : { kind: 'literal',
+              ...(collectValues && !alphabet ? { text: reviewTextLiteral(sql, start, index - 1) } : {}),
+              ...(collectValues && !alphabet && !doubledQuote && count <= 256 ? { numericString: reviewNumericString(sql.slice(start, index - 1)) } : {}) };
           }
         } else {
           if (alphabet === 'hex' && !/[0-9a-f]/i.test(character) || alphabet === 'bit' && !/[01]/.test(character)) reject('INSERT_LITERAL_UNSUPPORTED');
@@ -58,7 +66,7 @@ function reviewLiteralInsert(sql) {
       }
       NUMBER.lastIndex = index;
       const number = NUMBER.exec(sql);
-      if (number) { index = NUMBER.lastIndex; return { kind: 'number' }; }
+      if (number) { index = NUMBER.lastIndex; return { kind: 'number', ...(collectValues ? { numericText: number[0] } : {}) }; }
       WORD.lastIndex = index;
       const word = WORD.exec(sql);
       if (word) { index = WORD.lastIndex; return { kind: 'word', value: word[0] }; }
@@ -77,12 +85,14 @@ function reviewLiteralInsert(sql) {
     const first = name(); let schema = null, table = first;
     if (isSymbol('.')) { token = next(); schema = first; table = name(); }
     let columnCount = null;
+    const columnNames = [], valueFields = [];
     if (isSymbol('(')) {
       token = next(); const names = new Set();
       for (;;) {
-        const column = name().toLowerCase();
+        const exact = name(), column = exact.toLowerCase();
         if (names.has(column) || names.size >= 256) reject('INSERT_COLUMN_LIST_INVALID');
         names.add(column);
+        columnNames.push(exact);
         if (!isSymbol(',')) break;
         token = next();
       }
@@ -95,8 +105,22 @@ function reviewLiteralInsert(sql) {
       if (!isSymbol('(')) reject('INSERT_FORM_UNSUPPORTED');
       token = next(); let count = 0;
       for (;;) {
+        const negative = isSymbol('-');
         if (isSymbol('+') || isSymbol('-')) { token = next(); if (token.kind !== 'number') reject('INSERT_VALUE_EXPRESSION'); }
         if (token.kind !== 'number' && token.kind !== 'literal' && !['NULL', 'TRUE', 'FALSE'].some(isWord)) reject('INSERT_VALUE_EXPRESSION');
+        if (collectValues && count < 256) {
+          const field = valueFields[count] || { nulls: 0, integers: 0, other: 0, fitMask: 1023, fixedPoint: emptyFixedPoint(), numericStrings: emptyNumericStrings(), text: emptyText() };
+          if (isWord('NULL')) field.nulls++;
+          else if (isWord('TRUE') || isWord('FALSE') || token.kind === 'number' && /^\d+$/.test(token.numericText)) {
+            field.integers++;
+            field.fitMask &= integerRangeMask(token.kind === 'number' ? token.numericText : isWord('TRUE') ? '1' : '0', negative);
+          } else field.other++;
+          if (token.kind === 'number') addFixedPoint(field.fixedPoint, fixedPointShape(token.numericText, negative));
+          else if (isWord('TRUE') || isWord('FALSE')) addFixedPoint(field.fixedPoint, fixedPointShape(isWord('TRUE') ? '1' : '0'));
+          addNumericString(field.numericStrings, token.numericString);
+          addText(field.text, token.text);
+          valueFields[count] = field;
+        }
         count++; valueCount++;
         if (count > 256 || valueCount > 100000) reject('INSERT_VALIDATION_LIMIT');
         token = next();
@@ -114,7 +138,8 @@ function reviewLiteralInsert(sql) {
     if (isSymbol(';')) token = next();
     if (token.kind !== 'end') reject('INSERT_TRAILING_SQL');
     return { version: 1, status: 'matched', code: 'LITERAL_INSERT_MATCHED', table, schema, rows, valuesPerRow,
-      columnMode: columnCount === null ? 'positional' : 'explicit' };
+      columnMode: columnCount === null ? 'positional' : 'explicit',
+      ...(collectValues ? { valueReview: { version: 4, rows, columns: columnCount === null ? null : columnNames, fields: valueFields } } : {}) };
   } catch (error) {
     if (!(error instanceof UnsupportedInsert)) throw error;
     return { version: 1, status: 'unsupported', code: error.message };

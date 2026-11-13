@@ -3901,12 +3901,176 @@ function backupSelectionColumnsHtml(row) {
     <div class="backup-selection-table"><table><thead><tr><th>Cột</th><th>Kiểu nguồn</th><th>Kiểu đích</th><th>Quan sát</th></tr></thead><tbody>${review.fields.map(field => `<tr><td>${esc(field.name)}</td><td>${esc(field.sourceType)}</td><td>${esc(field.targetType || 'Chưa thấy')}</td><td>${field.differences.map(code => esc(labels[code] || code)).join('; ') || (field.targetType ? 'Chưa thấy khác biệt trong thuộc tính đã so' : 'Chưa đủ metadata để so')}</td></tr>`).join('')}</tbody></table></div></details>`;
 }
 
+const BACKUP_SELECTION_INDEX_VISIBILITY_LABELS = Object.freeze({
+  visible: 'Visible (optimizer)', invisible: 'Invisible (optimizer)', 'not-ignored': 'NOT IGNORED (optimizer)', ignored: 'IGNORED (optimizer)', unknown: 'Chưa xác định'
+});
+
+const BACKUP_SELECTION_TARGET_INDEX_LABELS = Object.freeze({
+  TARGET_INDEX_METADATA_INCOMPLETE: 'Chưa đọc đủ metadata chỉ mục đích', TARGET_INDEX_TABLE_NOT_OBSERVED: 'Chưa xác định đúng một bảng đích thấy được',
+  TARGET_INDEX_METADATA_INVALID: 'Metadata chỉ mục không nhất quán', TARGET_INDEX_DEFINITION_UNSUPPORTED: 'Có chỉ mục, thứ tự hoặc dạng cột chưa hỗ trợ đối chiếu',
+  TARGET_INDEX_REVIEW_LIMIT: 'Chỉ mục vượt giới hạn phân tích/hiển thị', TARGET_INDEX_VISIBILITY_NOT_REVIEWED: 'Chưa xác định trạng thái invisible/ignored của chỉ mục'
+});
+
+function backupSelectionTargetIndexesHtml(row) {
+  const review = row.indexReview;
+  if (!review) return '';
+  const kinds = { primary: 'PRIMARY KEY', unique: 'UNIQUE KEY', index: 'INDEX' };
+  return `<details class="backup-target-indexes"><summary>Chỉ mục đích: ${esc(row.name)} · ${review.indexes.length}/${Number(review.definitionCount)} định nghĩa thấy được</summary>
+    <p>Chỉ quan sát metadata trong quyền tài khoản, chưa chứng minh tương thích phục hồi. Trạng thái invisible/ignored chỉ mô tả optimizer; chưa xác nhận FK, dữ liệu hoặc quy tắc server. Không thấy chỉ mục không chứng minh chỉ mục không tồn tại.</p>
+    <ul>${review.findings.map(code => `<li>${esc(BACKUP_SELECTION_TARGET_INDEX_LABELS[code] || code)}</li>`).join('')}</ul>
+    <div class="backup-selection-table"><table><thead><tr><th>Tên / loại khóa</th><th>Cột theo thứ tự</th><th>Loại chỉ mục</th><th>Trạng thái optimizer</th><th>Quan sát</th></tr></thead><tbody>${review.indexes.map(index => `<tr><td>${esc(index.name)} · ${esc(kinds[index.kind] || index.kind)}</td><td>${index.columns.map(part => `${esc(part.name || 'Cột/biểu thức chưa nhận diện')}${part.prefixLength !== null ? ` (${Number(part.prefixLength)})` : ''} ${esc(part.direction === 'A' ? 'ASC' : part.direction === 'D' ? 'DESC' : 'Chưa rõ chiều')}`).join('<br>')}</td><td>${esc(index.type || 'Chưa rõ')}</td><td>${esc(BACKUP_SELECTION_INDEX_VISIBILITY_LABELS[index.visibility] || BACKUP_SELECTION_INDEX_VISIBILITY_LABELS.unknown)}</td><td>${index.supported ? 'Đã nhận diện định nghĩa cơ bản; chưa xác nhận quy tắc server' : 'Chưa đủ bằng chứng đối chiếu'}</td></tr>`).join('') || '<tr><td colspan="5">Chưa thấy trong metadata đọc được.</td></tr>'}</tbody></table></div>
+    ${review.truncated ? '<p>Còn chỉ mục/cột ngoài giới hạn; cần giảm phạm vi chọn và kiểm tra lại.</p>' : ''}</details>`;
+}
+
+const BACKUP_SELECTION_POLICY_LABELS = Object.freeze({
+  POLICY_METADATA_INCOMPLETE: 'Metadata đích thiếu/không đầy đủ; chưa áp dụng được chính sách',
+  POLICY_SOURCE_NAME_AMBIGUOUS: 'Tên nguồn bị trùng theo chính sách hoa/thường của đích', POLICY_TARGET_NAME_AMBIGUOUS: 'Tên đích chưa xác định duy nhất',
+  POLICY_VIEW_CONFLICT: 'Trùng view; chính sách không thay hoặc tự bỏ qua view', POLICY_TABLE_EXISTS: 'Bảng đã có; chính sách chặn tạo trùng cấu trúc',
+  POLICY_SKIP_EXISTING_TABLE: 'Bỏ qua toàn bộ bảng đã thấy theo chính sách', POLICY_DATA_TABLE_NOT_SEEN: 'Chỉ chọn dữ liệu nhưng chưa thấy bảng đích',
+  POLICY_APPEND_REQUIRES_REVIEW: 'Dự kiến thêm dữ liệu vào bảng đã có; cần kiểm tra thêm', POLICY_CREATE_REQUIRES_REVIEW: 'Dự kiến tạo bảng chưa thấy; phải xác minh lại',
+  POLICY_ABSENCE_NOT_PROVEN: 'Metadata không thấy đối tượng chưa chứng minh đối tượng không tồn tại',
+  POLICY_TARGET_RECHECK_REQUIRED: 'Phải kiểm tra lại đích sát lúc ghi', POLICY_APPEND_VALUES_NOT_VALIDATED: 'Chưa kiểm tra khóa trùng, giá trị, constraints và trigger khi thêm dữ liệu',
+  POLICY_DEPENDENCIES_UNKNOWN: 'Chưa đủ dependency để bỏ qua bảng liên quan', POLICY_DEPENDENCY_SKIPPED: 'Phụ thuộc bảng được bỏ qua; cần đối chiếu cấu trúc/dữ liệu của bảng đó'
+});
+
+function backupSelectionConflictPolicyHtml(review) {
+  if (!review) return '';
+  const policies = { 'stop-on-conflict': 'Chặn khi trùng cấu trúc', 'skip-existing': 'Bỏ qua bảng đã thấy ở đích' };
+  const observations = { table: 'Bảng', view: 'View', 'not-seen': 'Chưa thấy trong metadata', unknown: 'Chưa xác định' };
+  const proposals = { 'create-table': 'Xem xét tạo bảng', 'append-data': 'Xem xét thêm dữ liệu', 'skip-table': 'Bỏ qua cả cấu trúc/dữ liệu' };
+  return `<details class="backup-selection-policy"><summary>Chính sách xung đột · ${esc(policies[review.policy] || review.policy)} · Chỉ xem trước</summary>
+    <p>${Number(review.totals.review)} cần review · ${Number(review.totals.skip)} bảng dự kiến bỏ qua · ${Number(review.totals.blocked)} bảng bị chặn. Chưa cấp quyền chạy; chính sách không cho phép DROP hoặc ghi đè. Bảng chưa thấy có thể do thiếu quyền; chỉ chọn dữ liệu vẫn cần kiểm tra khóa trùng và tác động ghi.</p>
+    <div class="backup-selection-table"><table><thead><tr><th>Bảng chọn</th><th>Thấy ở đích</th><th>Dự kiến</th><th>Điều kiện còn thiếu</th></tr></thead><tbody>${review.rows.slice(0, 100).map(row => `<tr><td>${esc(row.name)}</td><td>${esc(observations[row.observed] || row.observed)}</td><td>${esc(proposals[row.proposal] || 'Chưa xử lý')}</td><td>${esc(BACKUP_SELECTION_POLICY_LABELS[row.reason] || row.reason)}${row.disposition === 'review' ? row.requires.map(code => ` · ${esc(BACKUP_SELECTION_POLICY_LABELS[code] || code)}`).join('') : ''}</td></tr>`).join('')}</tbody></table></div>
+    ${review.rows.length > 100 ? '<p>Chỉ hiện 100 bảng đầu; tổng thống kê tính toàn bộ lựa chọn.</p>' : ''}</details>`;
+}
+
+const BACKUP_SELECTION_FK_LABELS = Object.freeze({
+  FK_CREATE_NOT_REVIEWED: 'Chưa có đúng một CREATE với bằng chứng FK đầy đủ', FK_REVIEW_LIMIT: 'Bằng chứng hoặc báo cáo FK vượt giới hạn',
+  FK_OWNER_POLICY_BLOCKED: 'Bảng chứa FK đang bị chính sách đích chặn', FK_OWNER_SKIPPED: 'Bảng chứa FK được bỏ qua theo chính sách',
+  FK_CASE_POLICY_UNKNOWN: 'Chưa xác định chính sách hoa/thường của đích', FK_SCHEMA_MAPPING_REQUIRED: 'Schema ghi rõ trong FK/CREATE cần ánh xạ và kiểm chứng',
+  FK_PARENT_NOT_SELECTED: 'Bảng được tham chiếu chưa nằm trong lựa chọn', FK_PARENT_NAME_AMBIGUOUS: 'Tên bảng được tham chiếu chưa xác định duy nhất',
+  FK_PARENT_SKIPPED: 'Bảng được tham chiếu bị bỏ qua; chưa xác nhận cấu trúc và dữ liệu ở đích', FK_PARENT_POLICY_BLOCKED: 'Bảng được tham chiếu đang bị chính sách đích chặn',
+  FK_PARENT_CREATE_NOT_REVIEWED: 'Chưa có đúng một CREATE được nhận diện cho bảng được tham chiếu', FK_COLUMN_METADATA_UNKNOWN: 'Chưa đủ metadata cột để đối chiếu FK',
+  FK_COLUMN_NOT_FOUND: 'Không thấy một cột FK trong định nghĩa nguồn', FK_COLUMN_TYPE_REQUIRES_REVIEW: 'Kiểu cột FK khác nhau; cần kiểm tra khả năng tương thích',
+  FK_COLLATION_REQUIRES_REVIEW: 'Charset/collation của cột FK khác nhau', FK_SET_NULL_REQUIRES_NULLABLE: 'FK dùng SET NULL nhưng cột nguồn không cho NULL',
+  FK_DEFINITION_REQUIRES_REVIEW: 'Đã đối chiếu thuộc tính nguồn cơ bản; vẫn cần kiểm tra thêm', FK_REFERENCED_INDEX_NOT_REVIEWED: 'Chưa xác nhận chỉ mục/unique key được tham chiếu',
+  FK_REFERENCED_UNIQUE_KEY_NOT_FOUND: 'Chưa tìm thấy PRIMARY/UNIQUE KEY nguồn khớp đủ cột, đúng thứ tự và không dùng prefix',
+  FK_REFERENCED_UNIQUE_KEY_MATCHED: 'Khớp PRIMARY/UNIQUE KEY trong bản backup',
+  FK_TARGET_INDEX_NOT_REVIEWED: 'Chưa đủ metadata chỉ mục đích để đối chiếu',
+  FK_TARGET_UNIQUE_KEY_NOT_OBSERVED: 'Chưa thấy full PRIMARY/UNIQUE KEY đích khớp cột, đúng thứ tự và không prefix',
+  FK_TARGET_UNIQUE_KEY_OBSERVED: 'Thấy PRIMARY/UNIQUE KEY đích khớp metadata cột và đã đọc cờ optimizer; chưa xác nhận dữ liệu hoặc quy tắc server',
+  FK_TARGET_KEY_INVISIBLE_OR_IGNORED: 'Khóa đích khớp cột nhưng đang Invisible/IGNORED; cần review theo server, chưa xác nhận FK',
+  FK_DATA_NOT_CHECKED: 'Chưa kiểm tra dòng mồ côi hoặc tác động ghi/xóa theo FK', FK_SERVER_RULES_NOT_VALIDATED: 'Chưa xác nhận quy tắc FK theo phiên bản server'
+});
+
+function backupSelectionForeignKeysHtml(review) {
+  if (!review || !review.rows.length && !review.tablesNotReviewed && !review.truncated) return '';
+  const statuses = { review: 'Cần kiểm tra thêm', blocked: 'Bị chặn', excluded: 'Ngoài phạm vi theo chính sách' };
+  return `<details class="backup-selection-source-fk"><summary>Khóa ngoại nguồn · ${review.rows.length} định nghĩa · Chỉ xem trước</summary>
+    <p>${Number(review.totals.review)} cần review · ${Number(review.totals.blocked)} bị chặn · ${Number(review.totals.excluded)} ngoài phạm vi · ${Number(review.tablesNotReviewed)} bảng chưa đủ bằng chứng CREATE. Chỉ đối chiếu FK trong CREATE đã nhận diện, chưa phải kế hoạch thực thi. Chỉ đối chiếu PRIMARY/UNIQUE KEY trong nguồn; chưa xác nhận chỉ mục ở đích, dữ liệu hoặc quy tắc server. Vòng FK và thứ tự phục hồi vẫn cần xử lý riêng.</p>
+    <ul>${review.findings.map(item => `<li>${esc(BACKUP_SELECTION_FK_LABELS[item.code] || item.code)}${item.table ? ` · ${esc(item.table)}` : ''}</li>`).join('')}</ul>
+    <div class="backup-selection-table"><table><thead><tr><th>Bảng / FK</th><th>Tham chiếu</th><th>Hành vi</th><th>Quan sát</th></tr></thead><tbody>${review.rows.slice(0, 100).map(row => `<tr><td>${esc(row.table)} · ${esc(row.name || 'Không ghi tên')}</td><td>${esc(`${row.referencedSchema ? `${row.referencedSchema}.` : ''}${row.referencedTable}`)}<br>${row.pairs.map(pair => `${esc(pair.column)} → ${esc(pair.referencedColumn)}`).join('<br>')}</td><td>DELETE: ${esc(row.onDelete || 'Không ghi rõ')}<br>UPDATE: ${esc(row.onUpdate || 'Không ghi rõ')}</td><td>${esc(statuses[row.status] || row.status)} · ${esc(BACKUP_SELECTION_FK_LABELS[row.reason] || row.reason)}${row.referencedIndexReview?.status === 'matched' ? `<br>Khóa nguồn: ${esc(row.referencedIndexReview.kind === 'primary' ? 'PRIMARY KEY' : `UNIQUE KEY ${row.referencedIndexReview.name}`)} (${row.referencedIndexReview.columns.map(esc).join(', ')})` : ''}${row.targetReferencedIndexReview ? `<br>Khóa đích: ${esc(BACKUP_SELECTION_FK_LABELS[row.targetReferencedIndexReview.code] || row.targetReferencedIndexReview.code)}${['observed-match', 'requires-review'].includes(row.targetReferencedIndexReview.status) ? ` · ${esc(row.targetReferencedIndexReview.name)} (${row.targetReferencedIndexReview.columns.map(esc).join(', ')})${row.targetReferencedIndexReview.visibility ? ` · ${esc(BACKUP_SELECTION_INDEX_VISIBILITY_LABELS[row.targetReferencedIndexReview.visibility] || BACKUP_SELECTION_INDEX_VISIBILITY_LABELS.unknown)}` : ''}` : ''}` : ''}${row.requires.map(code => ` · ${esc(BACKUP_SELECTION_FK_LABELS[code] || code)}`).join('')}</td></tr>`).join('')}</tbody></table></div>
+    ${review.rows.length > 100 || review.truncated ? '<p>Báo cáo có giới hạn: chỉ hiện 100 định nghĩa đầu; quota hoặc bằng chứng bị cắt không đủ căn cứ phục hồi.</p>' : ''}</details>`;
+}
+
+const BACKUP_SELECTION_FK_COMPARISON_LABELS = Object.freeze({
+  FK_COMPARE_TARGET_INCOMPLETE: 'Chưa đủ metadata FK đích', FK_COMPARE_SOURCE_INCOMPLETE: 'Chưa có đúng một CREATE nguồn đã nhận diện',
+  FK_COMPARE_SCHEMA_OR_CASE_UNKNOWN: 'Schema hoặc chính sách hoa/thường cần kiểm tra', FK_COMPARE_OWNER_UNKNOWN: 'Bảng đích chưa xác định duy nhất',
+  FK_COMPARE_OWNER_NOT_OBSERVED: 'Chưa thấy bảng đích để so constraints', FK_COMPARE_NOT_OBSERVED: 'Chưa thấy FK đích tương ứng; không chứng minh không tồn tại',
+  FK_COMPARE_AMBIGUOUS: 'Nhiều FK đích có thể tương ứng', FK_COMPARE_SOURCE_ACTION_UNSPECIFIED: 'Nguồn không ghi rõ đủ action; chưa tự suy giá trị mặc định',
+  FK_COMPARE_METADATA_MATCHED: 'Khớp metadata đã so; chưa xác nhận dữ liệu hoặc khả năng phục hồi', FK_COMPARE_DEFINITION_DIFFERS: 'Metadata nguồn và đích khác nhau',
+  FK_COMPARE_LOCAL_COLUMNS_DIFFER: 'Khác cột local hoặc thứ tự', FK_COMPARE_REFERENCE_DIFFERS: 'Khác bảng/schema tham chiếu',
+  FK_COMPARE_REMOTE_COLUMNS_DIFFER: 'Khác cột được tham chiếu hoặc thứ tự', FK_COMPARE_DELETE_DIFFERS: 'Khác ON DELETE', FK_COMPARE_UPDATE_DIFFERS: 'Khác ON UPDATE',
+  FK_COMPARE_TARGET_ONLY: 'Có FK đích chưa ghép với định nghĩa nguồn đã nhận diện', FK_COMPARE_LIMIT: 'Báo cáo đối chiếu vượt giới hạn'
+});
+
+function backupSelectionForeignKeyComparisonHtml(review) {
+  if (review?.version !== 1) return '';
+  const definition = value => value ? `${esc(value.table)} · ${esc(value.name || 'Không ghi tên')}<br>→ ${esc(`${value.referencedSchema}.${value.referencedTable}`)}<br>${value.pairs.map(pair => `${esc(pair.column)} → ${esc(pair.referencedColumn)}`).join('<br>')}<br>DELETE: ${esc(value.onDelete || 'Không ghi rõ')} · UPDATE: ${esc(value.onUpdate || 'Không ghi rõ')}` : 'Chưa có đối chiếu';
+  return `<details class="backup-fk-comparison"><summary>Đối chiếu FK nguồn / đích · Chỉ xem trước</summary>
+    <p>${Number(review.totals.matched)} khớp metadata · ${Number(review.totals.differs)} khác · ${Number(review.totals.unknown)} chưa xác định · ${Number(review.totals.notObserved)} chưa thấy FK đích · ${Number(review.totals.targetOnly)} FK chỉ thấy ở đích · ${Number(review.totals.notApplicable)} chưa thấy bảng đích. Tên khác vẫn có thể khớp cặp cột; không suy action mặc định khi nguồn không ghi rõ. Chưa kiểm tra dữ liệu, index, cascade hoặc quy tắc server. Kết quả không gỡ các chặn của chính sách xung đột và chưa cho phép thực thi.</p>
+    <ul>${review.findings.map(item => `<li>${esc(BACKUP_SELECTION_FK_COMPARISON_LABELS[item.code] || item.code)}</li>`).join('')}</ul>
+    <div class="backup-selection-table"><table><thead><tr><th>Nguồn</th><th>Đích</th><th>Quan sát</th></tr></thead><tbody>${review.rows.slice(0, 100).map(row => `<tr><td>${definition(row.source)}</td><td>${definition(row.target)}</td><td>${esc(BACKUP_SELECTION_FK_COMPARISON_LABELS[row.reason] || row.reason)}${row.nameDiffers ? '<br>Tên FK khác nhau' : ''}${row.differences.map(code => `<br>${esc(BACKUP_SELECTION_FK_COMPARISON_LABELS[code] || code)}`).join('')}</td></tr>`).join('') || '<tr><td colspan="3">Chưa có cặp định nghĩa để đối chiếu.</td></tr>'}</tbody></table></div>
+    ${review.truncated || review.rows.length > 100 ? '<p>Chỉ hiện tối đa 100 mục; còn định nghĩa/cặp cột ngoài giới hạn. Hãy giảm phạm vi và kiểm tra lại.</p>' : ''}</details>`;
+}
+
+const BACKUP_SELECTION_VALUE_LABELS = Object.freeze({
+  VALUE_TEXT_TOO_LONG: 'Có chuỗi vượt độ dài ký tự hoặc số byte cho phép', VALUE_TEXT_CHARSET_LOSS: 'Có ký tự không biểu diễn được trong charset cột',
+  VALUE_TEXT_EVIDENCE_NOT_REVIEWED: 'Thiếu thống kê chuỗi, cần quét lại nguồn', VALUE_TEXT_TYPE_NOT_REVIEWED: 'Kiểu hoặc độ dài chuỗi ngoài phạm vi đã kiểm chứng',
+  VALUE_TEXT_CHARSET_NOT_REVIEWED: 'Charset cột chưa đủ căn cứ để kiểm chứng chuỗi', VALUE_TEXT_ENCODING_NOT_REVIEWED: 'Có chuỗi Unicode chưa hợp lệ',
+  VALUE_CHAR_PADDING_NOT_REVIEWED: 'Chưa kiểm chứng padding và cách đọc lại CHAR theo SQL mode', VALUE_CHAR_TRAILING_SPACES: 'Có khoảng trắng cuối chuỗi có nguy cơ bị CHAR loại bỏ',
+  VALUE_DECIMAL_OUT_OF_RANGE: 'Có số vượt phần nguyên của DECIMAL', VALUE_DECIMAL_UNSIGNED_NEGATIVE: 'Có số âm ở cột DECIMAL UNSIGNED',
+  VALUE_DECIMAL_SCALE_LOSS: 'Có phần thập phân không thể lưu nguyên vẹn, cần xử lý trước khi phục hồi',
+  VALUE_DECIMAL_TYPE_NOT_REVIEWED: 'Precision/scale DECIMAL ngoài phạm vi đã kiểm chứng',
+  VALUE_DECIMAL_EVIDENCE_NOT_REVIEWED: 'Thiếu thống kê DECIMAL, cần quét lại nguồn',
+  VALUE_NUMERIC_LITERAL_PRECISION_NOT_REVIEWED: 'Literal số vượt 65 chữ số, cần kiểm chứng theo server',
+  VALUE_NULL_NOT_ALLOWED: 'Có NULL ở cột không cho phép NULL', VALUE_INTEGER_OUT_OF_RANGE: 'Có số nguyên vượt phạm vi kiểu cột',
+  VALUE_CONVERSION_NOT_REVIEWED: 'Chưa kiểm chứng chuyển đổi kiểu của literal', VALUE_NULL_SPECIAL_SEMANTICS: 'NULL cần xem xét cơ chế tự sinh giá trị',
+  VALUE_AUTO_INCREMENT_NOT_REVIEWED: 'Chưa kiểm chứng tác động AUTO_INCREMENT', VALUE_COLUMN_SEMANTICS_NOT_REVIEWED: 'Kiểu hoặc thuộc tính cột chưa đủ căn cứ',
+  VALUE_COLUMN_MAPPING_UNKNOWN: 'Chưa ánh xạ được vị trí vào cột', VALUE_SOURCE_COLUMNS_NOT_REVIEWED: 'Chưa có đầy đủ định nghĩa cột nguồn được nhận diện',
+  VALUE_TARGET_COLUMNS_NOT_REVIEWED: 'Chưa đọc đủ cột của bảng đích đã thấy', VALUE_SCHEMA_REQUIRES_MAPPING: 'Cần đối chiếu schema ghi rõ trong INSERT',
+  VALUE_EVIDENCE_NOT_REVIEWED: 'Thiếu thống kê giá trị, cần quét lại hoặc vượt giới hạn', VALUE_LEDGER_INCOMPLETE: 'Danh sách câu lệnh chưa đầy đủ',
+  VALUE_SESSION_NOT_REVIEWED: 'Chính sách SQL mode/session chưa đủ căn cứ', VALUE_BASIC_ISSUES: 'Phát hiện vấn đề NULL, kiểu số hoặc chuỗi',
+  VALUE_REVIEW_INCOMPLETE: 'Một phần giá trị chưa được kiểm chứng', VALUE_EVIDENCE_LIMIT: 'Vượt giới hạn 10.000 vị trí giá trị được kiểm tra',
+  VALUE_REPORT_LIMIT: 'Báo cáo giá trị bị giới hạn', VALUE_FULL_VALIDATION_REQUIRED: 'Vẫn cần kiểm chứng đầy đủ kiểu và giá trị',
+  VALUE_CONSTRAINTS_NOT_REVIEWED: 'Chưa kiểm chứng khóa trùng, FK, CHECK và trigger theo dữ liệu', VALUE_TARGET_RECHECK_REQUIRED: 'Phải đọc lại cột và trạng thái đích trước khi ghi'
+});
+
+function backupSelectionValuesHtml(review) {
+  if (![1, 2, 3, 4].includes(review?.version)) return '';
+  const status = { 'basic-checked': 'Qua kiểm tra cơ bản', issues: 'Có vấn đề', unknown: 'Chưa đủ căn cứ' };
+  const codes = values => values.map(code => esc(BACKUP_SELECTION_VALUE_LABELS[code] || code)).join('; ');
+  const side = value => `${esc(status[value.status] || value.status)}${value.findings.length ? `<br>${codes(value.findings)}` : ''}`;
+  let visibleFields = 0;
+  const items = review.rows.slice(0, 20).map(row => {
+    const fields = row.fields.slice(0, Math.max(0, 100 - visibleFields)); visibleFields += fields.length;
+    return `<p><strong>#${Number(row.number)} · ${esc(row.table)} · ${esc(status[row.status] || row.status)}</strong>${row.reasons.length ? `<br>${codes(row.reasons)}` : ''}</p>
+      ${fields.length ? `<div class="backup-selection-table"><table><thead><tr><th>Vị trí / cột</th><th>Định nghĩa nguồn</th><th>Cột đích đã thấy</th></tr></thead><tbody>${fields.map(field => `<tr><td>${Number(field.position)} · ${esc(field.column || '?')}<br>NULL: ${Number(field.counts.nulls)} · Số nguyên: ${Number(field.counts.integers)} · Khác: ${Number(field.counts.other)}${field.counts.fixedDecimals > 0 ? `<br>Trong literal khác: ${Number(field.counts.fixedDecimals)} DECIMAL cố định` : ''}${field.counts.numericStrings > 0 ? `<br>Chuỗi số đúng mẫu: ${Number(field.counts.numericStrings)}` : ''}${field.counts.text > 0 ? `<br>Literal chuỗi: ${Number(field.counts.text)}` : ''}</td><td>${esc(field.sourceColumn || '?')}<br>${side(field.source)}</td><td>${esc(field.targetColumn || '?')}<br>${side(field.target)}</td></tr>`).join('')}</tbody></table></div>` : ''}`;
+  }).join('');
+  return `<details class="backup-selection-values"><summary>Kiểm tra giá trị cơ bản · Chỉ đọc</summary>
+    <p>Kiểm tra NULL, số nguyên, DECIMAL cố định và độ dài chuỗi theo cột nguồn/đích. Chuỗi số ASCII đúng mẫu, tối đa 256 ký tự, được đối chiếu theo kiểu số. VARCHAR đếm ký tự Unicode; TEXT đếm byte, kiểm tra charset utf8mb4/utf8mb3/ASCII. CHAR cần xem xét padding và khoảng trắng cuối. Không tự làm tròn, cắt chuỗi hoặc bỏ khoảng trắng. Chưa kiểm chứng escape, ngày giờ, chuyển đổi kiểu khác hoặc ràng buộc dữ liệu. Qua kiểm tra cơ bản chưa đủ điều kiện phục hồi; không hiển thị giá trị gốc.</p>
+    <p>${Number(review.totals.statements)} INSERT · ${Number(review.totals.basicChecked)} qua cơ bản · ${Number(review.totals.issues)} có vấn đề · ${Number(review.totals.unknown)} chưa đủ căn cứ · ${Number(review.totals.excluded)} loại khỏi lựa chọn.</p>
+    <ul>${[...review.findings, ...review.requires].map(code => `<li>${codes([code])}</li>`).join('')}</ul>
+    ${items || '<p>Không có INSERT đang được xem xét.</p>'}
+    ${review.truncated || review.rows.length > 20 || review.rows.reduce((sum, row) => sum + row.fields.length, 0) > visibleFields ? '<p>Đang hiển thị tối đa 20 câu / 100 vị trí; báo cáo có giới hạn.</p>' : ''}</details>`;
+}
+
+const BACKUP_SELECTION_SESSION_LABELS = Object.freeze({
+  SESSION_SETTINGS_NOT_REVIEWED: 'Chưa đọc đủ thiết lập phiên đích', SESSION_FK_CHECKS_DISABLED: 'Phiên kiểm tra đích đang tắt kiểm tra FK',
+  SESSION_AUTOCOMMIT_DISABLED: 'Phiên kiểm tra đích đang tắt autocommit', SESSION_CHARSET_REQUIRES_REVIEW: 'Charset của phiên chưa đồng nhất utf8mb4',
+  SESSION_SQL_MODE_FLAGS_NOT_REVIEWED: 'Có SQL mode chưa nhận diện', SESSION_STRICT_MODE_NOT_ENABLED: 'Phiên đích chưa bật strict mode',
+  SESSION_CONTEXT_REQUIRES_REVIEW: 'Trình tự thiết lập trong tệp chưa đủ căn cứ', SESSION_ACTION_LIMIT: 'Danh sách thiết lập vượt giới hạn 50 bước',
+  SESSION_DEPENDENCY_ORDER_NOT_PROVEN: 'Thứ tự dependency/FK chưa được chứng minh khi giữ kiểm tra FK bật',
+  SESSION_DEDICATED_CONNECTION_REQUIRED: 'Phải dùng kết nối phục hồi riêng', SESSION_RECHECK_REQUIRED: 'Phải đọc lại thiết lập trên đúng phiên thực thi',
+  SESSION_VALUES_NOT_VALIDATED: 'Chưa xác minh giá trị theo SQL mode đề xuất', SESSION_FK_DATA_RECHECK_REQUIRED: 'Cần kiểm tra kết quả và dữ liệu FK sau ghi',
+  SESSION_CLEANUP_NOT_IMPLEMENTED: 'Chưa có luồng khôi phục thiết lập sau khi chạy', SESSION_EXECUTION_NOT_IMPLEMENTED: 'Chưa có luồng thực thi chính sách phiên'
+});
+
+function backupSelectionSessionPolicyHtml(review) {
+  if (review?.version !== 1) return '';
+  const lifecycle = { 'open-dedicated-connection': 'Mở kết nối riêng', 'capture-and-recheck-settings': 'Chụp và kiểm tra lại thiết lập',
+    'validate-selection-and-values': 'Kiểm tra lựa chọn và giá trị', 'apply-reviewed-mode': 'Áp dụng mode đã kiểm chứng',
+    'execute-reviewed-statements-with-fk-enabled': 'Chạy câu đã duyệt với kiểm tra FK bật', 'check-result-and-foreign-keys': 'Đối chiếu kết quả và FK',
+    'restore-captured-settings-in-finally': 'Khôi phục thiết lập khi kết thúc', 'close-dedicated-connection': 'Đóng kết nối riêng' };
+  const proposals = { 'require-utf8mb4-connection': 'Yêu cầu phiên sẵn có utf8mb4', 'keep-foreign-key-checks-enabled': 'Giữ kiểm tra FK bật',
+    'preserve-mode-add-zero-flag': 'Giữ SQL mode đích, chỉ bổ sung NO_AUTO_VALUE_ON_ZERO', 'restore-captured-mode': 'Khôi phục SQL mode đã chụp',
+    'verify-foreign-key-checks-enabled': 'Xác nhận kiểm tra FK vẫn bật' };
+  const observed = review.observations;
+  return `<details class="backup-selection-session-policy"><summary>Chính sách phiên phục hồi · Đề xuất, chưa thực thi</summary>
+    <p>Giữ kiểm tra FK bật, yêu cầu utf8mb4 và giữ SQL mode đích; chỉ đề xuất thêm NO_AUTO_VALUE_ON_ZERO khi dump yêu cầu. Không chạy trực tiếp các SET nguồn từ bản nháp. Dừng khi lỗi/hủy, báo phần đã ghi, không tự retry; không cam kết rollback toàn bộ DDL.</p>
+    <p>Phiên kiểm tra hiện tại: FK ${observed ? observed.foreignKeyChecks ? 'bật' : 'tắt' : 'chưa xác định'} · autocommit ${observed ? observed.autocommit ? 'bật' : 'tắt' : 'chưa xác định'}. Đây chưa phải trạng thái được bảo đảm cho phiên thực thi tương lai.</p>
+    <p>SQL mode hiện tại: ${observed ? esc(observed.sqlMode.flags.join(', ') || 'Không có cờ đã nhận diện') : 'Chưa xác định'}${observed?.sqlMode.unreviewedCount ? ` · ${Number(observed.sqlMode.unreviewedCount)} cờ chưa nhận diện` : ''}<br>SQL mode đề xuất: ${review.proposedMode ? esc(review.proposedMode.flags.join(', ') || 'Không có cờ') : 'Chưa đủ metadata để đề xuất'}</p>
+    <ul>${[...review.findings.map(item => item.code), ...review.requires].map(code => `<li>${esc(BACKUP_SELECTION_SESSION_LABELS[code] || code)}</li>`).join('')}</ul>
+    <div class="backup-selection-table"><table><thead><tr><th># câu nguồn</th><th>Xử lý được đề xuất</th></tr></thead><tbody>${review.actions.map(action => `<tr><td>${Number.isInteger(action.number) ? action.number : '?'}</td><td>${esc(proposals[action.proposal] || action.proposal)}</td></tr>`).join('') || '<tr><td colspan="2">Không có SET được nhận diện để ánh xạ.</td></tr>'}</tbody></table></div>
+    <p>Các bước cần triển khai: ${review.lifecycle.map(step => esc(lifecycle[step] || step)).join(' → ')}.</p></details>`;
+}
+
 function backupSelectionDraftHtml(plan) {
   if (!plan) return '';
-  const labels = { EXECUTION_NOT_IMPLEMENTED: 'Chưa có luồng thực thi chọn bảng', SOURCE_SUBSET_NOT_VALIDATED: 'Chưa kiểm chứng cú pháp được hỗ trợ và tác động SQL',
+  const labels = { ...BACKUP_SELECTION_VALUE_LABELS, ...BACKUP_SELECTION_SESSION_LABELS, ...BACKUP_SELECTION_POLICY_LABELS, ...BACKUP_SELECTION_FK_LABELS, EXECUTION_NOT_IMPLEMENTED: 'Chưa có luồng thực thi chọn bảng', SOURCE_SUBSET_NOT_VALIDATED: 'Chưa kiểm chứng cú pháp được hỗ trợ và tác động SQL',
     TARGET_RECHECK_REQUIRED: 'Phải kiểm tra lại đích sát lúc ghi', WRITE_PRIVILEGES_NOT_REVIEWED: 'Chưa kiểm tra quyền ghi', STATEMENT_LEDGER_INCOMPLETE: 'Danh sách câu lệnh chưa đầy đủ',
     SOURCE_REVIEW_INCOMPLETE: 'Phân tích nguồn chưa đầy đủ', SOURCE_REVIEW_FINDING: 'Cảnh báo nguồn cần xử lý', TARGET_REVIEW_FINDING: 'Cảnh báo đích cần xử lý',
-    TARGET_REVIEW_INCOMPLETE: 'Đối chiếu đích chưa đầy đủ', COLUMNS_REQUIRE_REVIEW: 'Cột cần đối chiếu thêm', STATEMENT_NOT_CLASSIFIED: 'Chưa phân loại được phạm vi câu lệnh',
+    TARGET_REVIEW_INCOMPLETE: 'Đối chiếu đích chưa đầy đủ', TARGET_INDEXES_REQUIRE_REVIEW: 'Chưa đủ bằng chứng chỉ mục đích; cần đối chiếu thêm', TARGET_FOREIGN_KEYS_REQUIRE_REVIEW: 'Chưa đủ metadata FK đích; cần kiểm tra lại', COLUMNS_REQUIRE_REVIEW: 'Cột cần đối chiếu thêm', STATEMENT_NOT_CLASSIFIED: 'Chưa phân loại được phạm vi câu lệnh',
     TABLE_NOT_SELECTED: 'Bảng ngoài lựa chọn', PART_NOT_SELECTED: 'Phần cấu trúc/dữ liệu ngoài lựa chọn', SCHEMA_MAPPING_REQUIRED: 'Schema ghi rõ chưa được ánh xạ sang đích',
     DESTRUCTIVE_POLICY_REQUIRED: 'DROP cần chính sách thay/xóa đối tượng', SOURCE_SQL_REQUIRES_VALIDATION: 'Thuộc lựa chọn; SQL chưa được kiểm chứng để chạy',
     SESSION_CONTEXT_NOT_PLANNED: 'Chưa lập phạm vi thiết lập session/transaction', DIRECTIVE_SKIPPED_BY_CURRENT_RESTORE: 'Luồng restore hiện có bỏ qua chỉ thị USE/DATABASE',
@@ -3928,17 +4092,73 @@ function backupSelectionDraftHtml(plan) {
     INSERT_QUOTING_UNSUPPORTED: 'Có kiểu quote/escape chưa hỗ trợ', INSERT_COMMENT_UNSUPPORTED: 'Có comment cần phân tích thêm',
     INSERT_LITERAL_UNSUPPORTED: 'Literal chưa hỗ trợ hoặc chưa đúng định dạng', INSERT_IDENTIFIER_UNSUPPORTED: 'Tên đối tượng chưa hỗ trợ',
     INSERT_COLUMN_LIST_INVALID: 'Danh sách cột chưa hợp lệ hoặc vượt giới hạn', INSERT_ARITY_MISMATCH: 'Số giá trị giữa các bộ VALUES hoặc danh sách cột không khớp',
-    INSERT_VALIDATION_LIMIT: 'Kiểm tra cú pháp INSERT vượt giới hạn', INSERT_TARGET_MISMATCH: 'Các bước phân tích chưa thống nhất bảng/schema của INSERT' };
+    INSERT_VALIDATION_LIMIT: 'Kiểm tra cú pháp INSERT vượt giới hạn', INSERT_TARGET_MISMATCH: 'Các bước phân tích chưa thống nhất bảng/schema của INSERT',
+    BASIC_CREATE_MATCHED: 'Khớp cú pháp CREATE TABLE cơ bản; chưa xác nhận khả năng tạo bảng ở đích', CREATE_SYNTAX_NOT_REVIEWED: 'Chưa kiểm tra cú pháp CREATE TABLE',
+    CREATE_FORM_UNSUPPORTED: 'Dạng CREATE TABLE chưa hỗ trợ', CREATE_IDENTIFIER_UNSUPPORTED: 'CREATE cần tên được quote bằng backtick, trong giới hạn hỗ trợ',
+    CREATE_QUOTING_UNSUPPORTED: 'CREATE có kiểu quote/escape chưa hỗ trợ', CREATE_COMMENT_UNSUPPORTED: 'CREATE có comment cần phân tích thêm',
+    CREATE_TYPE_OR_LENGTH_UNSUPPORTED: 'CREATE có kiểu dữ liệu hoặc tham số kiểu chưa hỗ trợ', CREATE_COLUMN_ATTRIBUTE_UNSUPPORTED: 'CREATE có thuộc tính cột chưa hỗ trợ',
+    CREATE_DEFAULT_UNSUPPORTED: 'DEFAULT có biểu thức hoặc cú pháp chưa hỗ trợ', CREATE_INDEX_UNSUPPORTED: 'CREATE có chỉ mục chưa hỗ trợ hoặc tham chiếu cột không hợp lệ',
+    CREATE_DUPLICATE_NAME: 'CREATE có tên cột hoặc chỉ mục trùng', CREATE_DEFINITION_UNSUPPORTED: 'CREATE có định nghĩa/FK/constraint chưa hỗ trợ',
+    CREATE_OPTION_UNSUPPORTED: 'CREATE có tùy chọn bảng chưa hỗ trợ hoặc trùng', CREATE_ENGINE_REQUIRED: 'CREATE chưa ghi rõ ENGINE=InnoDB',
+    CREATE_ENGINE_UNSUPPORTED: 'Kiểm tra CREATE cơ bản hiện chỉ hỗ trợ ENGINE=InnoDB', CREATE_TRAILING_SQL: 'Có SQL nối sau CREATE chưa hỗ trợ',
+    CREATE_VALIDATION_LIMIT: 'Kiểm tra cú pháp CREATE vượt giới hạn', CREATE_TARGET_MISMATCH: 'Các bước phân tích chưa thống nhất bảng/schema của CREATE',
+    CREATE_FOREIGN_KEY_COLUMNS_INVALID: 'Danh sách cột FK trùng, rỗng hoặc vượt giới hạn', CREATE_FOREIGN_KEY_ARITY_MISMATCH: 'Số cột hai phía FK không khớp',
+    CREATE_FOREIGN_KEY_ACTION_UNSUPPORTED: 'Action FK chưa hỗ trợ hoặc bị lặp', CREATE_FOREIGN_KEY_FORM_UNSUPPORTED: 'FK có cú pháp chưa hỗ trợ',
+    CREATE_FOREIGN_KEY_COLUMN_UNKNOWN: 'FK nêu cột không thấy trong bảng nguồn', CREATE_FOREIGN_KEY_LIMIT: 'Quá 64 FK trong một CREATE',
+    CREATE_INDEX_EVIDENCE_LIMIT: 'Bằng chứng chỉ mục toàn inventory vượt giới hạn',
+    CREATE_FOREIGN_KEY_EVIDENCE_LIMIT: 'Bằng chứng FK toàn inventory vượt giới hạn',
+    DUMP_CONTEXT_REQUIRES_POLICY: 'Thiết lập session cần chính sách phiên riêng trước khi chạy', CONTEXT_NOT_REVIEWED: 'Chưa nhận diện thiết lập session',
+    CONTEXT_FOREIGN_KEYS_RECHECK_REQUIRED: 'Bật lại kiểm tra FK không xác nhận dữ liệu đã hợp lệ; cần kiểm tra riêng',
+    CONTEXT_SQL_MODE_REVIEW_REQUIRED: 'SQL_MODE bị thay tạm thời; cần kiểm tra chuyển đổi giá trị và chế độ đích',
+    CONTEXT_VALIDATION_LIMIT: 'Thiết lập session vượt giới hạn kiểm tra', CONTEXT_SET_UNSUPPORTED: 'Dạng SET ngoài mẫu dump được hỗ trợ',
+    CONTEXT_TRANSACTION_UNSUPPORTED: 'Chưa lập chính sách transaction/UNLOCK của tệp nguồn', CONTEXT_QUOTING_UNSUPPORTED: 'SET có quote/escape chưa hỗ trợ',
+    CONTEXT_COMMENT_UNSUPPORTED: 'SET có comment cần phân tích thêm', CONTEXT_LEDGER_INCOMPLETE: 'Thiếu danh sách đầy đủ để đối chiếu trình tự session',
+    CONTEXT_BODY_AFTER_RESTORE: 'Có câu lệnh sau bước khôi phục thiết lập session', CONTEXT_HEADER_AFTER_BODY: 'Có thiết lập đầu tệp sau khi phần SQL đã bắt đầu',
+    CONTEXT_RESTORE_WITHOUT_SAVE: 'Khôi phục thiết lập nhưng chưa thấy bước lưu gốc', CONTEXT_RESTORE_ORDER: 'Thứ tự khôi phục khác mẫu đảo thứ tự lưu',
+    CONTEXT_DUPLICATE_ACTION: 'Lặp bước thiết lập/lưu/khôi phục session', CONTEXT_SETTINGS_NOT_RESTORED: 'Thiếu bước khôi phục thiết lập đã lưu' };
   const decisions = { candidate: 'Thuộc lựa chọn', excluded: 'Ngoài lựa chọn', blocked: 'Chưa xử lý', skipped: 'Chỉ thị được bỏ qua' };
+  const contextActions = { 'set-names-utf8mb4': 'Chọn charset utf8mb4', 'save-disable-foreign-keys': 'Lưu và tạm tắt kiểm tra FK',
+    'save-set-sql-mode': 'Lưu và tạm thay SQL_MODE', 'restore-sql-mode': 'Khôi phục SQL_MODE đã lưu', 'restore-foreign-keys': 'Khôi phục thiết lập kiểm tra FK đã lưu' };
+  const syntaxHtml = step => {
+    if (step.contextReview?.status === 'matched') return `SET dump · ${esc(contextActions[step.contextReview.action] || 'Chưa nhận diện')}`;
+    if (step.contextReview) return esc(labels[step.contextReview.code] || step.contextReview.code);
+    const review = step.syntaxReview;
+    if (review?.status === 'matched' && step.command === 'CREATE') return `CREATE TABLE cơ bản · ${Number(review.columns)} cột · ${Number(review.indexes)} chỉ mục · InnoDB${review.foreignKeys ? ` · ${review.foreignKeys.length} FK` : ''}`;
+    if (review?.status === 'matched' && step.command === 'INSERT') return `INSERT literal · ${Number(review.rows)} bộ VALUES × ${Number(review.valuesPerRow)} giá trị`;
+    return review ? esc(labels[review.code] || review.code) : 'Chưa kiểm tra';
+  };
   return `<details class="backup-selection-draft"><summary>Bản nháp kế hoạch · ${Number(plan.statementCount)} câu lệnh nguồn · Chưa thể thực thi</summary>
     <p>Đích: ${esc(plan.targetDatabase)}. Chỉ để review; chưa cấp quyền chạy. Thứ tự bên dưới giữ theo tệp nguồn, chưa phải thứ tự phục hồi được xác nhận. Không tự bỏ qua câu chưa xử lý hoặc tự chấp thuận DROP.</p>
     <p>Mã bản nháp: <code>${esc(plan.planId)}</code></p>
+    ${backupSelectionConflictPolicyHtml(plan.conflictPolicyReview)}${backupSelectionSessionPolicyHtml(plan.sessionPolicyReview)}${backupSelectionValuesHtml(plan.valueReview)}
+    ${backupSelectionForeignKeysHtml(plan.foreignKeyReview)}${backupSelectionForeignKeyComparisonHtml(plan.foreignKeyComparison)}
     ${plan.syntaxTotals ? `<p>INSERT trong lựa chọn: ${Number(plan.syntaxTotals.matched)} khớp cú pháp literal · ${Number(plan.syntaxTotals.unsupported)} chưa hỗ trợ · ${Number(plan.syntaxTotals.notReviewed)} chưa kiểm tra. Chỉ kiểm tra cú pháp, chưa xác nhận chuyển đổi giá trị hoặc tác động trigger/FK. Số bộ VALUES không phải số dòng đã ghi.</p>` : ''}
+    ${plan.createSyntaxTotals ? `<p>CREATE trong lựa chọn: ${Number(plan.createSyntaxTotals.matched)} khớp cú pháp cơ bản · ${Number(plan.createSyntaxTotals.unsupported)} chưa hỗ trợ · ${Number(plan.createSyntaxTotals.notReviewed)} chưa kiểm tra. Chưa xác nhận quyền, tính hợp lệ theo server, charset/collation, xung đột hoặc tác động tạo bảng. Nhận diện cú pháp FK chưa xác nhận chỉ mục đích/dữ liệu; generated, CHECK và chính sách context SQL chưa được kiểm chứng.</p>` : ''}
+    ${plan.sessionContextReview?.total ? `<p>Thiết lập session toàn tệp: ${Number(plan.sessionContextReview.matched)} khớp mẫu dump · ${Number(plan.sessionContextReview.unsupported)} chưa hỗ trợ · ${Number(plan.sessionContextReview.notReviewed)} chưa kiểm tra. Trình tự lưu/khôi phục: ${plan.sessionContextReview.sequenceMatched ? 'khớp mẫu' : 'cần kiểm tra'}. Phải dùng phiên riêng; nhận diện mẫu chưa cấp quyền thực thi hoặc chứng minh tác động SQL.</p>` : ''}
     <p>${Number(plan.totals.candidate)} thuộc lựa chọn · ${Number(plan.totals.excluded)} ngoài lựa chọn · ${Number(plan.totals.blocked)} chưa xử lý · ${Number(plan.totals.skipped)} chỉ thị được luồng hiện có bỏ qua${plan.stepsTruncated ? ' (danh sách có giới hạn)' : ''}.</p>
     <h4>Các phần còn chặn thực thi</h4><ul>${plan.blockers.map(item => `<li>${esc(labels[item.code] || item.code)}${item.table ? ` · ${esc(item.table)}` : ''}${item.detail ? ` · ${esc(labels[item.detail] || item.detail)}` : ''}</li>`).join('')}</ul>
     ${plan.blockersTruncated ? '<p>Còn lý do ngoài giới hạn 100 mục.</p>' : ''}
-    <div class="backup-selection-table"><table><thead><tr><th># nguồn</th><th>Lệnh / bảng</th><th>Phạm vi</th><th>Kiểm tra cú pháp</th><th>Lý do</th></tr></thead><tbody>${plan.steps.map(step => `<tr><td>${Number(step.number)}</td><td>${esc(step.command)}${step.table ? ` · ${esc(`${step.schema ? `${step.schema}.` : ''}${step.table}`)}` : ''}</td><td>${esc(decisions[step.decision] || step.decision)}</td><td>${step.syntaxReview?.status === 'matched' ? `INSERT literal · ${Number(step.syntaxReview.rows)} bộ VALUES × ${Number(step.syntaxReview.valuesPerRow)} giá trị` : step.syntaxReview ? esc(labels[step.syntaxReview.code] || step.syntaxReview.code) : 'Chưa kiểm tra'}</td><td>${esc(labels[step.reason] || step.reason)}</td></tr>`).join('')}</tbody></table></div>
+    <div class="backup-selection-table"><table><thead><tr><th># nguồn</th><th>Lệnh / bảng</th><th>Phạm vi</th><th>Kiểm tra cú pháp</th><th>Lý do</th></tr></thead><tbody>${plan.steps.map(step => `<tr><td>${Number(step.number)}</td><td>${esc(step.command)}${step.table ? ` · ${esc(`${step.schema ? `${step.schema}.` : ''}${step.table}`)}` : ''}</td><td>${esc(decisions[step.decision] || step.decision)}</td><td>${syntaxHtml(step)}</td><td>${esc(labels[step.reason] || step.reason)}</td></tr>`).join('')}</tbody></table></div>
     ${plan.stepsTruncated ? '<p>Chỉ hiện tối đa 200 câu lệnh; inventory giữ tối đa 10.000. Danh sách bị cắt không đủ căn cứ thực thi.</p>' : ''}</details>`;
+}
+
+const BACKUP_SELECTION_TARGET_FK_LABELS = Object.freeze({
+  TARGET_FK_METADATA_INCOMPLETE: 'Chưa đọc đủ metadata FK đích; cần kiểm tra lại', TARGET_FK_SCOPE_UNKNOWN: 'Chưa xác định phạm vi hoặc chính sách hoa/thường',
+  TARGET_FK_METADATA_INVALID: 'Metadata FK không hợp lệ', TARGET_FK_IDENTITY_AMBIGUOUS: 'Tên FK bị mơ hồ theo schema/bảng và chính sách hoa/thường',
+  TARGET_FK_REFERENCE_INCONSISTENT: 'Các cặp cột không thống nhất bảng/schema được tham chiếu', TARGET_FK_PAIR_LIMIT: 'FK vượt giới hạn 16 cặp cột',
+  TARGET_FK_PAIRS_INVALID: 'Thứ tự cặp cột bị gãy/trùng hoặc tên cột lặp', TARGET_FK_ACTIONS_NOT_REVIEWED: 'Chưa đủ metadata action/MATCH hoặc dạng chưa hỗ trợ',
+  TARGET_FK_ACTIONS_INCONSISTENT: 'Metadata ON DELETE/ON UPDATE/MATCH không nhất quán', TARGET_FK_REVIEW_LIMIT: 'Báo cáo FK vượt giới hạn',
+  TARGET_FK_DEFINITION_OBSERVED: 'Đã ghép metadata; chưa xác nhận dữ liệu, chỉ mục và quy tắc server'
+});
+
+function backupSelectionTargetForeignKeysHtml(review) {
+  if (review?.version !== 1) return '<p>Chưa có báo cáo FK đích đầy đủ; cần kiểm tra lại metadata.</p>';
+  const relations = { internal: 'Trong lựa chọn', inbound: 'Bảng ngoài lựa chọn tham chiếu vào', outbound: 'Tham chiếu ra ngoài lựa chọn', inconsistent: 'Quan hệ chưa nhất quán' };
+  return `<details class="backup-target-foreign-keys"><summary>Khóa ngoại đích · ${Number(review.definitionCount)} định nghĩa · ${Number(review.pairCount)} cặp cột thấy được</summary>
+    <p>${Number(review.totals.observed)} đã ghép metadata · ${Number(review.totals.unknown)} chưa đủ bằng chứng. Chỉ đọc metadata trong quyền tài khoản; chưa thấy FK không chứng minh không tồn tại. Chưa kiểm tra dữ liệu mồ côi, chỉ mục, tác động cascade hoặc quy tắc server; phải đọc lại sát lúc ghi. Không thay đổi hay thực thi ràng buộc từ báo cáo này.</p>
+    <ul>${review.findings.map(item => `<li>${esc(BACKUP_SELECTION_TARGET_FK_LABELS[item.code] || item.code)}${item.table ? ` · ${esc(item.table)}` : ''}</li>`).join('')}</ul>
+    <div class="backup-selection-table"><table><thead><tr><th>FK / Bảng → Tham chiếu</th><th>Cặp cột theo thứ tự</th><th>Hành vi</th><th>Phạm vi / Quan sát</th></tr></thead><tbody>${review.rows.slice(0, 100).map(row => `<tr><td>${esc(row.name)}<br>${esc(`${row.tableSchema}.${row.table}`)} → ${esc(row.referencedTable ? `${row.referencedSchema}.${row.referencedTable}` : 'Chưa xác định')}</td><td>${row.pairs.map(pair => `${Number.isInteger(pair.ordinal) ? pair.ordinal : '?'}: ${esc(pair.column)} → ${esc(pair.referencedColumn)}`).join('<br>')}${row.pairCount > row.pairs.length ? '<br>Còn cặp cột chưa hiển thị.' : ''}</td><td>DELETE: ${esc(row.onDelete || 'Chưa xác định')}<br>UPDATE: ${esc(row.onUpdate || 'Chưa xác định')}<br>MATCH: ${esc(row.match || 'Chưa xác định')}</td><td>${esc(relations[row.relation] || row.relation)}<br>${esc(BACKUP_SELECTION_TARGET_FK_LABELS[row.reason] || row.reason)}</td></tr>`).join('') || '<tr><td colspan="4">Chưa thấy trong metadata đọc được.</td></tr>'}</tbody></table></div>
+    ${review.truncated || review.rows.length > 100 ? '<p>Hiện tối đa 100 định nghĩa; báo cáo hoặc cặp cột còn ngoài giới hạn. Hãy giảm phạm vi chọn và kiểm tra lại.</p>' : ''}</details>`;
 }
 
 function backupSelectionTargetHtml(review) {
@@ -3947,7 +4167,7 @@ function backupSelectionTargetHtml(review) {
     TARGET_RECHECK_REQUIRED: 'Phải đọc lại đích sát lúc chạy; đây chưa phải xác nhận thực thi', TARGET_METADATA_NOT_ATOMIC: 'Metadata được đọc qua nhiều truy vấn, có thể thay đổi giữa các lần đọc',
     SOURCE_SQL_EFFECTS_NOT_VALIDATED: 'Chưa chứng minh tác động của toàn bộ SQL nguồn', TARGET_CASE_POLICY_UNKNOWN: 'Chưa đọc được chính sách hoa/thường của máy chủ',
     TARGET_DATABASE_NOT_VISIBLE: 'Không thấy database đích; có thể chưa có hoặc thiếu quyền', TARGET_METADATA_ERROR: 'Có phần metadata chưa đọc được',
-    TARGET_METADATA_TRUNCATED: 'Metadata vượt giới hạn đọc', TARGET_AMBIGUOUS_OBJECT: 'Tên đối tượng đích chưa phân biệt được chắc chắn',
+    TARGET_METADATA_TRUNCATED: 'Metadata vượt giới hạn đọc', TARGET_INDEXES_REQUIRE_REVIEW: 'Chưa đủ bằng chứng chỉ mục đích; cần đối chiếu thêm', TARGET_FOREIGN_KEYS_REQUIRE_REVIEW: 'Chưa đủ metadata FK đích; cần kiểm tra lại', TARGET_AMBIGUOUS_OBJECT: 'Tên đối tượng đích chưa phân biệt được chắc chắn',
     TARGET_VIEW_CONFLICT: 'Tên bảng được chọn trùng view ở đích', TARGET_STRUCTURE_CONFLICT: 'Cấu trúc được chọn trùng bảng đã có ở đích',
     TARGET_DATA_TABLE_NOT_VISIBLE: 'Chọn dữ liệu nhưng chưa thấy bảng đích', TARGET_DATA_SCHEMA_NOT_VALIDATED: 'Chưa xác nhận đầy đủ khả năng ghi giá trị vào cấu trúc đích',
     TARGET_TRIGGERS_PRESENT: 'Bảng đích có trigger, ghi dữ liệu có thể tác động gián tiếp', TARGET_FOREIGN_KEYS_PRESENT: 'Có khóa ngoại liên quan ở đích',
@@ -3959,8 +4179,7 @@ function backupSelectionTargetHtml(review) {
     <ul>${review.findings.map(item => `<li>${esc(labels[item.code] || item.code)}${item.table ? ` · ${esc(item.table)}` : ''}${item.detail ? ` · ${esc(item.detail)}` : ''}</li>`).join('')}</ul>
     ${review.findingsTruncated ? '<p>Còn cảnh báo ngoài giới hạn 100 mục; hãy giảm phạm vi để đối chiếu.</p>' : ''}
     <div class="backup-selection-table"><table><thead><tr><th>Bảng chọn</th><th>Đối tượng thấy ở đích</th><th>Trigger thấy ở đích</th></tr></thead><tbody>${review.rows.map(row => `<tr><td>${esc(row.name)}</td><td>${row.objects.map(object => `${esc(object.type)}: ${esc(object.name)}`).join(', ') || 'Chưa thấy'}${row.objectCount > row.objects.length ? ` · Chỉ hiện ${row.objects.length}/${Number(row.objectCount)}` : ''}</td><td>${row.triggers.map(trigger => `${esc(trigger.name)} (${esc(trigger.event)})`).join(', ') || 'Chưa thấy'}${row.triggerCount > row.triggers.length ? ` · Chỉ hiện ${row.triggers.length}/${Number(row.triggerCount)}` : ''}</td></tr>`).join('')}</tbody></table></div>
-    <h4>Khóa ngoại liên quan (${review.foreignKeys.length} cặp cột thấy được)</h4><ul>${review.foreignKeys.slice(0, 100).map(fk => `<li>${esc(fk.name)} · ${esc(`${fk.tableSchema}.${fk.table}.${fk.column}`)} → ${esc(`${fk.referencedSchema}.${fk.referencedTable}.${fk.referencedColumn}`)}</li>`).join('') || '<li>Chưa thấy trong metadata đọc được.</li>'}</ul>
-    ${review.foreignKeys.length > 100 ? '<p>Chỉ hiển thị 100 cặp cột đầu tiên.</p>' : ''}${review.rows.map(backupSelectionColumnsHtml).join('')}</section>`;
+    ${backupSelectionTargetForeignKeysHtml(review.targetForeignKeyReview)}${review.rows.map(row => backupSelectionColumnsHtml(row) + backupSelectionTargetIndexesHtml(row)).join('')}</section>`;
 }
 
 async function showBackupSelectionPreview() {
@@ -3979,6 +4198,7 @@ async function showBackupSelectionPreview() {
       <label class="checkline"><input id="selectionData" type="checkbox" checked> Xem phần ghi dữ liệu (số câu INSERT, không phải số dòng)</label>
       <button id="previewBackupSelection" class="primary">Xem phạm vi (Ctrl+Enter)</button>
       <label for="selectionTargetDatabase">Database đích trên cùng kết nối</label><input id="selectionTargetDatabase" value="${esc(database)}" maxlength="64" autocomplete="off">
+      <label for="selectionConflictPolicy">Chính sách xung đột (chỉ xem trước)</label><select id="selectionConflictPolicy"><option value="stop-on-conflict">Chặn khi trùng cấu trúc</option><option value="skip-existing">Bỏ qua toàn bộ bảng đã thấy ở đích</option></select>
       <button id="reviewBackupSelectionTarget">Kiểm tra đích (chỉ đọc)</button>
     </div>
     <div id="backupSelectionResult" role="status" aria-live="polite"></div>
@@ -3991,6 +4211,7 @@ async function showBackupSelectionPreview() {
   const button = $('#previewBackupSelection');
   const targetButton = $('#reviewBackupSelectionTarget');
   const targetInput = $('#selectionTargetDatabase');
+  const policyInput = $('#selectionConflictPolicy');
   const cancel = $('#cancelSelectionScan');
   const structure = $('#selectionStructure');
   const data = $('#selectionData');
@@ -4031,7 +4252,7 @@ async function showBackupSelectionPreview() {
     try {
       const api = withTarget ? 'previewBackupSelectionTarget' : 'previewBackupSelection';
       const result = await call(desktop.db[api]({ profileId, database, id, taskId, tables,
-        includeStructure: structure.checked, includeData: data.checked, ...(withTarget ? { targetDatabase } : {}) }));
+        includeStructure: structure.checked, includeData: data.checked, ...(withTarget ? { targetDatabase, conflictPolicy: policyInput.value } : {}) }));
       if (!matches() || request !== generation) return;
       status.textContent = withTarget ? 'Đã đối chiếu metadata đích một phần. Chưa ghi vào database.' : 'Đã xem phạm vi từ tệp nguồn. Chưa ghi vào database.';
       output.innerHTML = `${backupSelectionDraftHtml(result.draftPlan)}${backupSelectionTargetHtml(result.targetReview)}<p>${result.rows.length} bảng đã chọn · ${Number(result.totals.createStatements)} CREATE · ${Number(result.totals.dropStatements)} DROP trong tệp · ${Number(result.totals.dataStatements)} INSERT. Bỏ ngoài lựa chọn ${Number(result.excludedTables)} bảng; ${Number(result.excludedDefinitions)} định nghĩa ngoài bảng chưa được phân tích đầy đủ.</p>
@@ -7587,8 +7808,11 @@ function confirmAction(title, message, confirmLabel = 'Xác nhận', { separate 
     } else modal(html);
     let settled = false;
     const onClose = () => {
-      if (settled) return;
+      // Native close is queued. A previous use of the shared modal can finish
+      // closing after a new confirmation has already reopened it.
+      if (settled || dialog.open) return;
       settled = true;
+      dialog.removeEventListener('close', onClose);
       if (separate) dialog.remove();
       resolve(false);
     };

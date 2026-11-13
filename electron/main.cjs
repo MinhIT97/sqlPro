@@ -30,6 +30,7 @@ const { createScheduleStore, BackupScheduler, scheduleId, validateSchedule } = r
 const { previewRestoreSelection } = require('./restore-selection.cjs');
 const { collectSelectionTargetFacts, buildSelectionTargetPreview } = require('./restore-selection-target.cjs');
 const { buildSelectionDraft } = require('./restore-selection-plan.cjs');
+const { normalizeConflictPolicy } = require('./restore-selection-policy.cjs');
 let scheduleServices;
 let schedulerReady = false;
 let backupContextGeneration = 0;
@@ -1806,6 +1807,7 @@ handle('db:preview-backup-selection', async payload => {
 
 handle('db:preview-backup-selection-target', async payload => {
   const { profileId, database, id, taskId, selection } = backupSelectionRequest(payload);
+  const conflictPolicy = normalizeConflictPolicy(payload.conflictPolicy);
   const targetDatabase = payload.targetDatabase;
   if (typeof targetDatabase !== 'string' || !targetDatabase || targetDatabase.length > 64 || targetDatabase.includes('\0')) throw new Error('Chọn database đích hợp lệ (1–64 ký tự).');
   const profile = store.getWithSecrets(profileId);
@@ -1841,7 +1843,7 @@ handle('db:preview-backup-selection-target', async payload => {
       check();
       const identityDigest = targetIdentity(profile);
       const targetReview = buildSelectionTargetPreview({ source, checksum: scanned.checksum, targetIdentity: identityDigest, facts });
-      const draftPlan = buildSelectionDraft({ inventory: scanned.selectionPreview, source, checksum: scanned.checksum, targetIdentity: identityDigest, targetReview });
+      const draftPlan = buildSelectionDraft({ inventory: scanned.selectionPreview, source, checksum: scanned.checksum, targetIdentity: identityDigest, targetReview, conflictPolicy });
       return { ...source, checksum: scanned.checksum, cached: false, targetReview, draftPlan };
     });
   } catch (error) {

@@ -11,7 +11,7 @@ const symbol = (token, value) => token?.kind === 'symbol' && token.value === val
 const identifier = token => ['word', 'identifier'].includes(token?.kind);
 
 function normalizeColumnType(raw) {
-  const text = typeof raw === 'string' ? raw.trim().toLowerCase().replace(/\s+/g, ' ').replace(/\s*([(),])\s*/g, '$1') : '';
+  const text = typeof raw === 'string' ? raw.trim().toLowerCase().replace(/\s+/g, ' ').replace(/\s*([(),])/g, '$1').replace(/([,(])\s*/g, '$1') : '';
   const base = /^([a-z]+)/.exec(text)?.[1] || 'unknown';
   const known = text.length <= 160 && TYPES.has(base) && /^[a-z]+(?:\(\d+(?:,\d+)?\))?(?: unsigned)?(?: zerofill)?$/.test(text);
   return { type: known ? text : `${base.slice(0, 30)}${text.includes('(') ? '(…)' : ''}`, typeKnown: known,

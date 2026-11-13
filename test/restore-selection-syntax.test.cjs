@@ -64,7 +64,7 @@ test('collector validates original SQL, attaches no values and stops at the per-
   for (const [index, sql] of ["INSERT INTO items VALUES('secret-row')", 'INSERT INTO items VALUES(NOW())'].entries()) collector.add(sql, assertStatementScope(sql, 'demo'), index + 1);
   assert.equal(collector.finish().statementLedger.entries[0].syntaxReview.status, 'matched');
   assert.equal(collector.finish().statementLedger.entries[1].syntaxReview.status, 'unsupported');
-  collector.literalValidationBytes = 32 * 1024 * 1024;
+  collector.syntaxValidationBytes = 32 * 1024 * 1024;
   collector.add('INSERT INTO items VALUES(1)', assertStatementScope('INSERT INTO items VALUES(1)', 'demo'), 3);
   assert.equal(collector.finish().statementLedger.entries[2].syntaxReview.code, 'INSERT_VALIDATION_LIMIT');
   assert.equal(JSON.stringify(collector.finish()).includes('secret-row'), false);

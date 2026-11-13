@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { collectSelectionTargetFacts, buildSelectionTargetPreview } = require('../electron/restore-selection-target.cjs');
 const { previewRestoreSelection } = require('../electron/restore-selection.cjs');
+const { normalizeSessionSettings } = require('../electron/restore-selection-session-policy.cjs');
 
 function source(tables = ['parent'], flags = {}) {
   return previewRestoreSelection({ version: 1, database: 'source_db', findings: [], truncated: false, opaqueObjects: [],
@@ -12,9 +13,65 @@ function source(tables = ['parent'], flags = {}) {
 function facts(overrides = {}) {
   return { database: 'target_db', checkedAt: '2026-11-12T00:00:00Z', version: '8.4', lowerCaseTableNames: 0, databaseVisible: true,
     objects: [{ name: 'parent', type: 'table' }], triggers: [{ name: 'after_parent', table: 'parent', event: 'INSERT' }],
-    foreignKeys: [{ name: 'fk_outside', tableSchema: 'another_db', table: 'child', column: 'parent_id', referencedSchema: 'target_db', referencedTable: 'parent', referencedColumn: 'id' }], errors: [], truncated: [], ...overrides };
+    foreignKeyMetadataVersion: 2, foreignKeys: [{ ordinal: 1, onDelete: 'RESTRICT', onUpdate: 'CASCADE', match: 'NONE', name: 'fk_outside', tableSchema: 'another_db', table: 'child', column: 'parent_id', referencedSchema: 'target_db', referencedTable: 'parent', referencedColumn: 'id' }], indexes: [], indexVisibility: { version: 1, status: 'observed', kind: 'mysql-visible' }, errors: [], truncated: [], ...overrides };
 }
 const report = (metadata = facts(), selected = source(), checksum = 'a'.repeat(64), targetIdentity = 'b'.repeat(64)) => buildSelectionTargetPreview({ source: selected, checksum, targetIdentity, facts: metadata });
+
+test('session metadata is read-only, bounded, projected and bound to snapshot including unknown-mode drift', async () => {
+  const raw = { foreignKeyChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES,PRIVATE_MODE',
+    charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4', privateValue: 'secret' };
+  const queries = [];
+  const result = await collectSelectionTargetFacts({ raw: async (sql, params) => {
+    queries.push(sql); assert.match(sql, /^SELECT /);
+    if (sql.includes('AS foreignKeyChecks')) { assert.deepEqual(params, []); return { rows: [raw] }; }
+    return { rows: [] };
+  } }, 'target_db');
+  assert.deepEqual(result.sessionSettings, normalizeSessionSettings(raw));
+  assert.equal(queries.filter(sql => sql.includes('AS foreignKeyChecks')).length, 1);
+  assert.equal(JSON.stringify(result).includes('PRIVATE_MODE'), false); assert.equal(JSON.stringify(result).includes('secret'), false);
+  const initial = report(facts({ sessionSettings: result.sessionSettings }));
+  assert.notEqual(initial.snapshotId, report(facts()).snapshotId);
+  for (const changes of [{ foreignKeyChecks: 0 }, { autocommit: 0 }, { sqlMode: 'STRICT_TRANS_TABLES,OTHER_MODE' }, { charsetResults: 'latin1' }]) {
+    assert.notEqual(initial.snapshotId, report(facts({ sessionSettings: normalizeSessionSettings({ ...raw, ...changes }) })).snapshotId);
+  }
+  for (const rows of [[], [raw, raw], [{ ...raw, autocommit: null }]]) {
+    const invalid = await collectSelectionTargetFacts({ raw: async sql => ({ rows: sql.includes('AS foreignKeyChecks') ? rows : [] }) }, 'target_db');
+    assert.equal(invalid.sessionSettings, null);
+    assert.ok(invalid.errors.some(error => error.section === 'sessionSettings') || invalid.truncated.includes('sessionSettings'));
+  }
+  const denied = await collectSelectionTargetFacts({ raw: async sql => {
+    if (sql.includes('AS foreignKeyChecks')) throw Object.assign(new Error('private-settings-error'), { code: 'ER_SPECIFIC_ACCESS_DENIED_ERROR' });
+    return { rows: [] };
+  } }, 'target_db');
+  assert.equal(denied.sessionSettings, null); assert.ok(denied.errors.some(error => error.section === 'sessionSettings'));
+  assert.equal(JSON.stringify(denied).includes('private-settings-error'), false);
+  let canceled = false, calls = 0;
+  await assert.rejects(() => collectSelectionTargetFacts({ raw: async sql => {
+    calls++; if (sql.includes('AS foreignKeyChecks')) canceled = true; return { rows: [] };
+  } }, 'target_db', () => { if (canceled) throw new Error('canceled-settings'); }), /canceled-settings/);
+  assert.equal(calls, 2);
+});
+
+test('target value-column metadata requires an observed table and complete ordered bounded columns', () => {
+  const column = { table: 'parent', name: 'id', ordinal: 1, type: 'int', typeKnown: true, nullable: false, autoIncrement: false,
+    generated: false, invisible: false, attributesKnown: true, privateValue: 'private-default' };
+  const initial = report(facts({ columns: [column] }));
+  assert.equal(initial.rows[0].valueColumns.complete, true);
+  assert.equal(JSON.stringify(initial.rows[0].valueColumns).includes('private-default'), false);
+  for (const changes of [{ objects: [] }, { objects: [{ name: 'parent', type: 'view' }] }, { lowerCaseTableNames: null },
+    { errors: [{ section: 'columns', code: 'METADATA_RESULT_INVALID' }] }, { truncated: ['columns'] },
+    { columns: [{ ...column, ordinal: 2 }] }, { columns: [column, { ...column, ordinal: 2 }] }]) {
+    assert.equal(report(facts({ columns: [column], ...changes })).rows[0].valueColumns.complete, false);
+  }
+  assert.notEqual(initial.snapshotId, report(facts({ columns: [{ ...column, nullable: true }] })).snapshotId);
+  const names = Array.from({ length: 21 }, (_, index) => `t${index}`);
+  const selected = { canExecute: false, selectedTables: names, rows: names.map(name => ({ name })), sourceDatabase: 'source_db', includeStructure: false, includeData: true, totals: {} };
+  const metadata = facts({ objects: names.map(name => ({ name, type: 'table' })), triggers: [], foreignKeys: [],
+    columns: names.flatMap(table => Array.from({ length: 100 }, (_, index) => ({ ...column, table, name: `c${index}`, ordinal: index + 1 }))) });
+  const bounded = report(metadata, selected);
+  assert.equal(bounded.rows.reduce((sum, row) => sum + row.valueColumns.columns.length, 0), 2000);
+  assert.equal(bounded.rows.at(-1).valueColumns.complete, false); assert.deepEqual(bounded.rows.at(-1).valueColumns.columns, []);
+});
 
 test('target preview identifies table/view conflicts, triggers and inbound FK from outside selection', () => {
   const input = facts(); const before = structuredClone(input);
@@ -64,7 +121,7 @@ test('collector sends only fixed metadata SELECT statements with bound schema va
   } };
   const result = await collectSelectionTargetFacts(session, database);
   assert.equal(result.databaseVisible, true); assert.deepEqual(result.objects, [{ name: '__proto__', type: 'table' }]);
-  assert.equal(queries.length, 6); assert.deepEqual(queries.find(query => query.sql.includes('KEY_COLUMN_USAGE')).params, [database, database]);
+  assert.equal(queries.length, 9); assert.deepEqual(queries.find(query => query.sql.includes('KEY_COLUMN_USAGE')).params, [database, database]);
   await assert.rejects(() => collectSelectionTargetFacts(session, 'invalid\0database'));
 });
 
@@ -78,7 +135,7 @@ test('collector bounds metadata, masks raw errors and treats malformed results a
   } }, 'target_db');
   assert.equal(result.objects.length, 5000); assert.deepEqual(result.truncated, ['objects']);
   assert.equal(result.lowerCaseTableNames, null); assert.equal(result.databaseVisible, false);
-  assert.equal(JSON.stringify(result).includes('password'), false); assert.equal(result.errors.length, 4);
+  assert.equal(JSON.stringify(result).includes('password'), false); assert.equal(result.errors.length, 7);
   const many = facts({ triggers: Array.from({ length: 30 }, (_, i) => ({ name: `trigger${i}`, table: 'parent', event: 'INSERT' })) });
   assert.equal(report(many).rows[0].triggers.length, 10); assert.equal(report(many).rows[0].triggerCount, 30);
 });
@@ -95,7 +152,7 @@ test('column collector binds selected table names, redacts enum labels/default v
   let query;
   const result = await collectSelectionTargetFacts({ raw: async (sql, params) => {
     if (sql.includes('VERSION()')) return { rows: [{ version: '8.4', lowerCaseTableNames: 0 }] };
-    if (!sql.includes('information_schema.COLUMNS')) return { rows: [] };
+    if (!sql.includes('COLUMN_TYPE AS columnType')) return { rows: [] };
     query = { sql, params };
     return { rows: [
       { tableName: 'parent', name: 'kind', ordinal: 1, columnType: "enum('private-label')", nullable: 'YES', extra: 'DEFAULT_GENERATED', charset: 'utf8mb4', collation: 'utf8mb4_bin', hasDefault: 1, defaultValue: 'private-default' },
@@ -129,7 +186,7 @@ test('unhandled EXTRA attributes stay unknown and their complete fingerprint bin
   const session = { raw: async sql => {
     if (sql.includes('VERSION()')) return { rows: [{ version: '8.4', lowerCaseTableNames: 0 }] };
     if (sql.includes('SCHEMATA')) return { rows: [{ name: 'target_db' }] };
-    if (sql.includes('information_schema.COLUMNS')) return { rows: [{ tableName: 'parent', name: 'updated_at', ordinal: 1, columnType: 'datetime',
+    if (sql.includes('COLUMN_TYPE AS columnType')) return { rows: [{ tableName: 'parent', name: 'updated_at', ordinal: 1, columnType: 'datetime',
       nullable: 'YES', extra, charset: null, collation: null, hasDefault: 0 }] };
     return { rows: [] };
   } };
@@ -140,4 +197,158 @@ test('unhandled EXTRA attributes stay unknown and their complete fingerprint bin
   const second = await collectSelectionTargetFacts(session, 'target_db');
   assert.notEqual(first.columns[0].extraFingerprint, second.columns[0].extraFingerprint);
   assert.notEqual(report(first).snapshotId, report(second).snapshotId);
+});
+
+const statistic = (overrides = {}) => ({ tableName: 'parent', name: 'PRIMARY', nonUnique: 0, ordinal: 1,
+  columnName: 'id', prefixLength: null, direction: 'A', type: 'BTREE', indexVisibility: 'YES', ...overrides });
+
+test('index collector binds schema/table filters and projects only bounded structural metadata', async () => {
+  let query;
+  const result = await collectSelectionTargetFacts({ raw: async (sql, params) => {
+    if (sql.includes('VERSION()')) return { rows: [{ version: '8.4', lowerCaseTableNames: 0 }] };
+    if (sql.includes('COLUMN_NAME AS name FROM information_schema.COLUMNS')) return { rows: [{ name: 'IS_VISIBLE' }] };
+    if (!sql.includes('information_schema.STATISTICS')) return { rows: [] };
+    query = { sql, params };
+    return { rows: [statistic({ ordinal: '1', expression: 'private-expression', cardinality: 1234567 }),
+      statistic({ name: 'functional', columnName: null }), statistic({ name: 'prefix', nonUnique: '1', prefixLength: '10', direction: 'D' })] };
+  } }, "db'quoted", () => {}, ['parent', "odd'name"]);
+  assert.deepEqual(query.params, ["db'quoted", 'parent', "odd'name"]);
+  assert.match(query.sql, /TABLE_NAME IN \(\?,\?\)/); assert.match(query.sql, /LIMIT 20001$/);
+  assert.equal(query.sql.includes("odd'name"), false); assert.equal(query.sql.includes('EXPRESSION'), false); assert.equal(query.sql.includes('CARDINALITY'), false);
+  assert.deepEqual(result.indexes[0], { table: 'parent', name: 'PRIMARY', nonUnique: false, ordinal: 1, column: 'id', prefixLength: null, direction: 'A', type: 'BTREE', visibility: 'visible' });
+  assert.equal(result.indexes[1].column, null); assert.equal(result.indexes[2].prefixLength, 10);
+  assert.equal(JSON.stringify(result).includes('private-'), false);
+});
+
+test('index metadata errors, malformed rows and quotas remain unknown and cancel propagates at the new query', async () => {
+  for (const changes of [{ ordinal: true }, { ordinal: 0 }, { prefixLength: true }, { prefixLength: 0 }, { nonUnique: 2 }, { direction: 'wrong' }, { columnName: undefined }]) {
+    const result = await collectSelectionTargetFacts({ raw: async sql => ({ rows: sql.includes('STATISTICS') ? [statistic(changes)] : [] }) }, 'target_db');
+    assert.deepEqual(result.indexes, []);
+    assert.ok(result.errors.some(error => error.section === 'indexes' && error.code === 'METADATA_RESULT_INVALID'));
+  }
+  const denied = await collectSelectionTargetFacts({ raw: async sql => {
+    if (sql.includes('STATISTICS')) throw Object.assign(new Error('private-error'), { code: 'ER_TABLEACCESS_DENIED_ERROR' });
+    return { rows: [] };
+  } }, 'target_db');
+  assert.equal(report(denied).metadataStatus.complete, false); assert.equal(JSON.stringify(denied).includes('private-'), false);
+  const limited = await collectSelectionTargetFacts({ raw: async sql => ({ rows: sql.includes('STATISTICS') ? Array(20001).fill(statistic()) : [] }) }, 'target_db');
+  assert.equal(limited.indexes.length, 20000); assert.ok(limited.truncated.includes('indexes'));
+  assert.equal(report(limited).rows[0].indexReview.complete, false);
+  let canceled = false;
+  await assert.rejects(() => collectSelectionTargetFacts({ raw: async sql => { if (sql.includes('STATISTICS')) canceled = true; return { rows: [] }; } },
+    'target_db', () => { if (canceled) throw new Error('canceled-index-read'); }), /canceled-index-read/);
+});
+
+test('target index snapshot binds order, prefix, uniqueness and type drift; missing legacy evidence stays unknown', () => {
+  const index = { table: 'parent', name: 'pair', nonUnique: false, ordinal: 1, column: 'id', prefixLength: null, direction: 'A', type: 'BTREE', visibility: 'visible' };
+  const first = report(facts({ indexes: [index] }));
+  assert.equal(first.version, 7); assert.equal(first.rows[0].indexReview.complete, true);
+  for (const changes of [{ nonUnique: true }, { ordinal: 2 }, { prefixLength: 8 }, { direction: 'D' }, { type: 'HASH' }, { column: null }, { visibility: 'invisible' }]) {
+    assert.notEqual(report(facts({ indexes: [{ ...index, ...changes }] })).snapshotId, first.snapshotId);
+  }
+  const legacy = facts(); delete legacy.indexes;
+  assert.equal(report(legacy).metadataStatus.complete, false); assert.equal(report(legacy).rows[0].indexReview.complete, false);
+  assert.ok(report(legacy).findings.some(item => item.code === 'TARGET_INDEXES_REQUIRE_REVIEW'));
+  assert.equal(report(facts({ indexes: [index], lowerCaseTableNames: null })).rows[0].indexReview.complete, false);
+  assert.equal(report(facts({ indexes: [index], objects: [{ name: 'parent', type: 'view' }] })).rows[0].indexReview.complete, false);
+  assert.equal(report(facts({ indexes: [index], objects: [{ name: 'parent', type: 'table' }, { name: 'parent', type: 'table' }] })).rows[0].indexReview.complete, false);
+});
+
+test('aggregate target index response budgets stay bounded and exhausted tables retain unknown status', () => {
+  const names = Array.from({ length: 250 }, (_, i) => `t${i}`);
+  const selected = { canExecute: false, selectedTables: names, rows: names.map(name => ({ name })), sourceDatabase: 'source_db', includeStructure: false, includeData: true, totals: {} };
+  const indexes = names.flatMap(table => Array.from({ length: 5 }, (_, key) => Array.from({ length: 5 }, (_, col) => ({ table, name: `key${key}`, nonUnique: false,
+    ordinal: col + 1, column: `c${col}`, prefixLength: null, direction: 'A', type: 'BTREE', visibility: 'visible' }))).flat());
+  const result = report(facts({ indexes, objects: names.map(name => ({ name, type: 'table' })), triggers: [], foreignKeys: [] }), selected);
+  assert.ok(result.rows.reduce((sum, row) => sum + row.indexReview.indexes.length, 0) <= 1000);
+  assert.equal(result.rows.reduce((sum, row) => sum + row.indexReview.parts, 0), 4000);
+  assert.equal(result.rows.at(-1).indexReview.complete, false); assert.equal(result.rows.at(-1).indexReview.truncated, true);
+  assert.equal(result.canExecute, false);
+});
+
+test('capability probe chooses only fixed visibility columns and validates YES/NO values without version guessing', async () => {
+  for (const [name, flag, kind, state] of [['IS_VISIBLE', 'YES', 'mysql-visible', 'visible'], ['IS_VISIBLE', 'NO', 'mysql-visible', 'invisible'],
+    ['IGNORED', 'YES', 'mariadb-ignored', 'ignored'], ['IGNORED', 'NO', 'mariadb-ignored', 'not-ignored']]) {
+    const queries = [];
+    const result = await collectSelectionTargetFacts({ raw: async (sql, params) => {
+      queries.push({ sql, params });
+      if (sql.includes('COLUMN_NAME AS name FROM information_schema.COLUMNS')) return { rows: [{ name }] };
+      if (sql.includes('information_schema.STATISTICS')) return { rows: [statistic({ indexVisibility: flag })] };
+      return { rows: [] };
+    } }, 'target_db', () => {}, ['parent']);
+    assert.deepEqual(result.indexVisibility, { version: 1, status: 'observed', kind });
+    assert.equal(result.indexes[0].visibility, state);
+    assert.deepEqual(queries.find(query => query.sql.includes('LIMIT 3')).params, ['information_schema', 'STATISTICS', 'IS_VISIBLE', 'IGNORED']);
+    assert.match(queries.at(-1).sql, new RegExp(`${name} AS indexVisibility`));
+    assert.deepEqual(queries.at(-1).params, ['target_db', 'parent']);
+  }
+});
+
+test('missing, denied, malformed or ambiguous flag metadata stays unknown and never retries by assuming visible', async () => {
+  for (const names of [[], ['IS_VISIBLE', 'IGNORED'], ['IS_VISIBLE', 'IS_VISIBLE'], ['private-column'], ['IS_VISIBLE', 'IGNORED', 'IS_VISIBLE']]) {
+    let statisticsQuery;
+    const result = await collectSelectionTargetFacts({ raw: async sql => {
+      if (sql.includes('COLUMN_NAME AS name FROM information_schema.COLUMNS')) return { rows: names.map(name => ({ name })) };
+      if (sql.includes('information_schema.STATISTICS')) { statisticsQuery = sql; return { rows: [statistic()] }; }
+      return { rows: [] };
+    } }, 'target_db');
+    assert.equal(result.indexVisibility.kind, null); assert.equal(result.indexes[0].visibility, 'unknown');
+    assert.match(statisticsQuery, /NULL AS indexVisibility/); assert.equal(JSON.stringify(result).includes('private-'), false);
+  }
+  for (const flag of [undefined, null, 0, true, 'yes', 'private-value']) {
+    const result = await collectSelectionTargetFacts({ raw: async sql => {
+      if (sql.includes('COLUMN_NAME AS name FROM information_schema.COLUMNS')) return { rows: [{ name: 'IS_VISIBLE' }] };
+      return { rows: sql.includes('information_schema.STATISTICS') ? [statistic({ indexVisibility: flag })] : [] };
+    } }, 'target_db');
+    assert.equal(result.indexes.length, 0); assert.ok(result.errors.some(error => error.section === 'indexes'));
+    assert.equal(JSON.stringify(result).includes('private-'), false);
+  }
+  let canceled = false;
+  await assert.rejects(() => collectSelectionTargetFacts({ raw: async sql => {
+    if (sql.includes('COLUMN_NAME AS name FROM information_schema.COLUMNS')) canceled = true;
+    return { rows: [] };
+  } }, 'target_db', () => { if (canceled) throw new Error('canceled-flag-probe'); }), /canceled-flag-probe/);
+});
+
+const fkMetadata = (changes = {}) => ({ name: 'fk_pair', tableSchema: 'target_db', tableName: 'child', columnName: 'pa', referencedSchema: 'target_db',
+  referencedTable: 'parent', referencedColumn: 'a', ordinal: 1, onDelete: 'SET NULL', onUpdate: 'CASCADE', matchOption: 'NONE', ...changes });
+
+test('FK collector joins rules by schema/table/name, binds both schema scopes and projects ordered pairs/actions', async () => {
+  let query;
+  const collected = await collectSelectionTargetFacts({ raw: async (sql, params) => {
+    if (!sql.includes('KEY_COLUMN_USAGE')) return { rows: [] };
+    query = { sql, params };
+    return { rows: [fkMetadata({ privateSQL: 'private-sql' }), fkMetadata({ ordinal: '2', columnName: 'pb', referencedColumn: 'b' })] };
+  } }, "db'quoted");
+  assert.equal(collected.foreignKeyMetadataVersion, 2);
+  assert.deepEqual(query.params, ["db'quoted", "db'quoted"]); assert.equal(query.sql.includes("db'quoted"), false);
+  assert.match(query.sql, /LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS/);
+  for (const predicate of ['BINARY r.CONSTRAINT_SCHEMA = BINARY k.CONSTRAINT_SCHEMA', 'BINARY r.TABLE_NAME = BINARY k.TABLE_NAME', 'BINARY r.CONSTRAINT_NAME = BINARY k.CONSTRAINT_NAME', 'BINARY r.UNIQUE_CONSTRAINT_SCHEMA = BINARY k.REFERENCED_TABLE_SCHEMA', 'BINARY r.REFERENCED_TABLE_NAME = BINARY k.REFERENCED_TABLE_NAME']) assert.ok(query.sql.includes(predicate));
+  assert.equal(collected.foreignKeys[1].ordinal, 2); assert.equal(collected.foreignKeys[0].onDelete, 'SET NULL');
+  assert.equal(JSON.stringify(collected).includes('private-'), false);
+  const first = report(facts({ foreignKeys: collected.foreignKeys }));
+  assert.equal(first.targetForeignKeyReview.rows[0].pairs.length, 2);
+  assert.equal(first.targetForeignKeyReview.rows[0].relation, 'inbound');
+  assert.equal(first.findings.filter(item => item.code === 'TARGET_INBOUND_FK_FROM_UNSELECTED_TABLE').length, 1);
+  const changed = report(facts({ foreignKeys: collected.foreignKeys.map(row => ({ ...row, onDelete: 'RESTRICT' })) }));
+  assert.notEqual(first.snapshotId, changed.snapshotId);
+  const legacy = facts(); delete legacy.foreignKeyMetadataVersion;
+  assert.equal(report(legacy).metadataStatus.complete, false); assert.equal(report(legacy).targetForeignKeyReview.complete, false);
+});
+
+test('missing rule joins, malformed FK rows, metadata truncation and cancellation never produce a complete target FK review', async () => {
+  for (const changes of [{ ordinal: 0 }, { ordinal: true }, { onDelete: 'private-rule' }, { matchOption: 'private-match' }]) {
+    const result = await collectSelectionTargetFacts({ raw: async sql => ({ rows: sql.includes('KEY_COLUMN_USAGE') ? [fkMetadata(changes)] : [] }) }, 'target_db');
+    assert.equal(result.foreignKeys.length, 0); assert.ok(result.errors.some(error => error.section === 'foreignKeys'));
+    assert.equal(JSON.stringify(result).includes('private-'), false);
+  }
+  const noRules = await collectSelectionTargetFacts({ raw: async sql => ({ rows: sql.includes('KEY_COLUMN_USAGE') ? [fkMetadata({ onDelete: null, onUpdate: null, matchOption: null })] : [] }) }, 'target_db');
+  const missing = report(facts({ foreignKeys: noRules.foreignKeys }));
+  assert.equal(missing.targetForeignKeyReview.complete, false); assert.equal(missing.metadataStatus.complete, false);
+  assert.equal(missing.targetForeignKeyReview.rows[0].onDelete, null);
+  const cut = report(facts({ truncated: ['foreignKeys'] })); assert.equal(cut.targetForeignKeyReview.complete, false);
+  let canceled = false;
+  await assert.rejects(() => collectSelectionTargetFacts({ raw: async sql => {
+    if (sql.includes('KEY_COLUMN_USAGE')) canceled = true; return { rows: [] };
+  } }, 'target_db', () => { if (canceled) throw new Error('canceled-fk-read'); }), /canceled-fk-read/);
 });

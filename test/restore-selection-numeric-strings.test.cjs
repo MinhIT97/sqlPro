@@ -34,7 +34,7 @@ test('strict numeric strings recognize complete ASCII values, signs and zeroes w
 test('lexer profiles only unescaped single-quoted numeric strings, keeps ordinary strings and nonstrings separate', () => {
   const sql = "INSERT INTO items VALUES('123'),('-0.2500'),(''),('private-value'),('1''2'),(X'1234'),(B'101'),(0x12),(1.23),(1e2),(NULL)";
   const syntax = reviewLiteralInsert(sql, { collectValues: true }), field = syntax.valueReview.fields[0];
-  assert.equal(syntax.valueReview.version, 4); assert.equal(field.numericStrings.count, 2); assert.equal(field.numericStrings.integers, 1);
+  assert.equal(syntax.valueReview.version, 7); assert.equal(field.numericStrings.count, 2); assert.equal(field.numericStrings.integers, 1);
   assert.equal(field.fixedPoint.count, 1); assert.equal(field.numericStrings.fixedPoint.count, 2);
   assert.equal(field.numericStrings.fixedPoint.scale, 2); assert.equal(field.numericStrings.fixedPoint.negativeCount, 1);
   assert.equal(JSON.stringify(syntax).includes('private-value'), false); assert.equal(JSON.stringify(syntax).includes('-0.2500'), false);
@@ -84,13 +84,13 @@ test('numeric-string projection rejects overlap, invalid counts/masks/missing pr
   assert.equal(projectValueEvidence(invalid, syntax), null);
   const privateProfile = { ...profile, raw: 'private-value' };
   assert.deepEqual(projectNumericStrings(privateProfile, field, field.fixedPoint), profile);
-  const v2 = structuredClone(syntax.valueReview); v2.version = 2; delete v2.fields[0].numericStrings; delete v2.fields[0].text;
+  const v2 = structuredClone(syntax.valueReview); v2.version = 2; delete v2.fields[0].numericStrings; delete v2.fields[0].text; delete v2.fields[0].temporal; delete v2.fields[0].year;
   assert.deepEqual(projectValueEvidence(v2, syntax), v2);
 });
 
 test('older evidence cannot certify quoted numbers; checked numeric strings keep all write gates and immutable bindings', () => {
   const input = fixture('DECIMAL(5,2)', ["'999.99'"]);
-  const initial = input.build(); assert.equal(initial.version, 16); assert.equal(initial.valueReview.version, 4);
+  const initial = input.build(); assert.equal(initial.version, 22); assert.equal(initial.valueReview.version, 8);
   assert.equal(initial.valueReview.rows[0].status, 'basic-checked'); assert.equal(initial.canExecute, false);
   assert.ok(initial.blockers.some(item => item.code === 'VALUE_FULL_VALIDATION_REQUIRED'));
   assert.equal(Object.isFrozen(initial.valueReview.rows[0].fields[0].counts), true);

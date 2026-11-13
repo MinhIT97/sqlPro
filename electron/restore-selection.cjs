@@ -8,6 +8,7 @@ const { analyzeTableColumns } = require('./restore-selection-columns.cjs');
 const { reviewLiteralInsert } = require('./restore-selection-syntax.cjs');
 const { reviewBasicCreate } = require('./restore-selection-create.cjs');
 const { reviewDumpContext } = require('./restore-selection-context.cjs');
+const { statementSizeReview } = require('./restore-selection-packets.cjs');
 const MAX_TABLES = 1000;
 const MAX_DEPENDENCIES = 10000;
 const MAX_FINDINGS = 50;
@@ -118,6 +119,7 @@ class RestoreSelectionInventory {
   add(sql, analysis, statementNumber) {
     const statement = { number: statementNumber, command: analysis.command, kind: 'unclassified', table: null, schema: null };
     this.recordStatement(statement);
+    if (this.statementCount <= 10000) statement.sizeReview = statementSizeReview(sql);
     this.analyze(sql, analysis, statementNumber, statement);
     if ((['INSERT', 'CREATE'].includes(analysis.command) || statement.kind === 'context') && this.statementCount <= 10000) {
       const create = analysis.command === 'CREATE', context = statement.kind === 'context';

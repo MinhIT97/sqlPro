@@ -3995,6 +3995,13 @@ function backupSelectionForeignKeyComparisonHtml(review) {
 }
 
 const BACKUP_SELECTION_VALUE_LABELS = Object.freeze({
+  VALUE_YEAR_OUT_OF_RANGE: 'Có năm ngoài phạm vi YEAR 1901–2155 hoặc số 0', VALUE_YEAR_CONVERSION_NOT_REVIEWED: 'YEAR có giá trị rút gọn, chuỗi zero hoặc chuyển đổi chưa kiểm chứng',
+  VALUE_YEAR_EVIDENCE_NOT_REVIEWED: 'Thiếu thống kê YEAR, cần quét lại nguồn', VALUE_YEAR_TYPE_NOT_REVIEWED: 'Dạng YEAR hoặc độ rộng hiển thị chưa được kiểm chứng',
+  VALUE_TEMPORAL_ZERO_REQUIRES_POLICY: 'Có thành phần ngày bằng 0 cần chính sách riêng', VALUE_TEMPORAL_INVALID_CALENDAR: 'Có ngày không hợp lệ theo lịch Gregorian',
+  VALUE_TEMPORAL_INVALID_TIME: 'Có giờ, phút hoặc giây ngoài phạm vi kiểu ngày giờ', VALUE_TEMPORAL_PRECISION_LOSS: 'Có phần lẻ giây không thể lưu nguyên vẹn',
+  VALUE_TEMPORAL_YEAR_NOT_REVIEWED: 'Năm ngoài phạm vi ngày đã kiểm chứng', VALUE_TEMPORAL_UPPER_BOUNDARY_NOT_REVIEWED: 'Phần lẻ giây tại biên TIME/DATETIME cần kiểm chứng riêng',
+  VALUE_TEMPORAL_TYPE_NOT_REVIEWED: 'Kiểu hoặc độ chính xác ngày giờ chưa hỗ trợ', VALUE_TEMPORAL_EVIDENCE_NOT_REVIEWED: 'Thiếu thống kê ngày giờ, cần quét lại nguồn',
+  VALUE_TIMESTAMP_ZONE_RANGE_NOT_REVIEWED: 'TIMESTAMP cần kiểm chứng múi giờ nguồn/đích, DST và phạm vi lưu của server',
   VALUE_TEXT_TOO_LONG: 'Có chuỗi vượt độ dài ký tự hoặc số byte cho phép', VALUE_TEXT_CHARSET_LOSS: 'Có ký tự không biểu diễn được trong charset cột',
   VALUE_TEXT_EVIDENCE_NOT_REVIEWED: 'Thiếu thống kê chuỗi, cần quét lại nguồn', VALUE_TEXT_TYPE_NOT_REVIEWED: 'Kiểu hoặc độ dài chuỗi ngoài phạm vi đã kiểm chứng',
   VALUE_TEXT_CHARSET_NOT_REVIEWED: 'Charset cột chưa đủ căn cứ để kiểm chứng chuỗi', VALUE_TEXT_ENCODING_NOT_REVIEWED: 'Có chuỗi Unicode chưa hợp lệ',
@@ -4010,14 +4017,14 @@ const BACKUP_SELECTION_VALUE_LABELS = Object.freeze({
   VALUE_COLUMN_MAPPING_UNKNOWN: 'Chưa ánh xạ được vị trí vào cột', VALUE_SOURCE_COLUMNS_NOT_REVIEWED: 'Chưa có đầy đủ định nghĩa cột nguồn được nhận diện',
   VALUE_TARGET_COLUMNS_NOT_REVIEWED: 'Chưa đọc đủ cột của bảng đích đã thấy', VALUE_SCHEMA_REQUIRES_MAPPING: 'Cần đối chiếu schema ghi rõ trong INSERT',
   VALUE_EVIDENCE_NOT_REVIEWED: 'Thiếu thống kê giá trị, cần quét lại hoặc vượt giới hạn', VALUE_LEDGER_INCOMPLETE: 'Danh sách câu lệnh chưa đầy đủ',
-  VALUE_SESSION_NOT_REVIEWED: 'Chính sách SQL mode/session chưa đủ căn cứ', VALUE_BASIC_ISSUES: 'Phát hiện vấn đề NULL, kiểu số hoặc chuỗi',
+  VALUE_SESSION_NOT_REVIEWED: 'Chính sách SQL mode/session chưa đủ căn cứ', VALUE_BASIC_ISSUES: 'Phát hiện vấn đề NULL, kiểu số, chuỗi hoặc ngày giờ',
   VALUE_REVIEW_INCOMPLETE: 'Một phần giá trị chưa được kiểm chứng', VALUE_EVIDENCE_LIMIT: 'Vượt giới hạn 10.000 vị trí giá trị được kiểm tra',
   VALUE_REPORT_LIMIT: 'Báo cáo giá trị bị giới hạn', VALUE_FULL_VALIDATION_REQUIRED: 'Vẫn cần kiểm chứng đầy đủ kiểu và giá trị',
   VALUE_CONSTRAINTS_NOT_REVIEWED: 'Chưa kiểm chứng khóa trùng, FK, CHECK và trigger theo dữ liệu', VALUE_TARGET_RECHECK_REQUIRED: 'Phải đọc lại cột và trạng thái đích trước khi ghi'
 });
 
 function backupSelectionValuesHtml(review) {
-  if (![1, 2, 3, 4].includes(review?.version)) return '';
+  if (![1, 2, 3, 4, 5, 6, 7, 8].includes(review?.version)) return '';
   const status = { 'basic-checked': 'Qua kiểm tra cơ bản', issues: 'Có vấn đề', unknown: 'Chưa đủ căn cứ' };
   const codes = values => values.map(code => esc(BACKUP_SELECTION_VALUE_LABELS[code] || code)).join('; ');
   const side = value => `${esc(status[value.status] || value.status)}${value.findings.length ? `<br>${codes(value.findings)}` : ''}`;
@@ -4025,14 +4032,69 @@ function backupSelectionValuesHtml(review) {
   const items = review.rows.slice(0, 20).map(row => {
     const fields = row.fields.slice(0, Math.max(0, 100 - visibleFields)); visibleFields += fields.length;
     return `<p><strong>#${Number(row.number)} · ${esc(row.table)} · ${esc(status[row.status] || row.status)}</strong>${row.reasons.length ? `<br>${codes(row.reasons)}` : ''}</p>
-      ${fields.length ? `<div class="backup-selection-table"><table><thead><tr><th>Vị trí / cột</th><th>Định nghĩa nguồn</th><th>Cột đích đã thấy</th></tr></thead><tbody>${fields.map(field => `<tr><td>${Number(field.position)} · ${esc(field.column || '?')}<br>NULL: ${Number(field.counts.nulls)} · Số nguyên: ${Number(field.counts.integers)} · Khác: ${Number(field.counts.other)}${field.counts.fixedDecimals > 0 ? `<br>Trong literal khác: ${Number(field.counts.fixedDecimals)} DECIMAL cố định` : ''}${field.counts.numericStrings > 0 ? `<br>Chuỗi số đúng mẫu: ${Number(field.counts.numericStrings)}` : ''}${field.counts.text > 0 ? `<br>Literal chuỗi: ${Number(field.counts.text)}` : ''}</td><td>${esc(field.sourceColumn || '?')}<br>${side(field.source)}</td><td>${esc(field.targetColumn || '?')}<br>${side(field.target)}</td></tr>`).join('')}</tbody></table></div>` : ''}`;
+      ${fields.length ? `<div class="backup-selection-table"><table><thead><tr><th>Vị trí / cột</th><th>Định nghĩa nguồn</th><th>Cột đích đã thấy</th></tr></thead><tbody>${fields.map(field => `<tr><td>${Number(field.position)} · ${esc(field.column || '?')}<br>NULL: ${Number(field.counts.nulls)} · Số nguyên: ${Number(field.counts.integers)} · Khác: ${Number(field.counts.other)}${field.counts.fixedDecimals > 0 ? `<br>Trong literal khác: ${Number(field.counts.fixedDecimals)} DECIMAL cố định` : ''}${field.counts.numericStrings > 0 ? `<br>Chuỗi số đúng mẫu: ${Number(field.counts.numericStrings)}` : ''}${field.counts.text > 0 ? `<br>Literal chuỗi: ${Number(field.counts.text)}` : ''}${field.counts.temporalStrings > 0 ? `<br>Chuỗi ngày giờ đúng mẫu: ${Number(field.counts.temporalStrings)}` : ''}${field.counts.yearLiterals > 0 ? `<br>Literal YEAR được phân loại: ${Number(field.counts.yearLiterals)}` : ''}</td><td>${esc(field.sourceColumn || '?')}<br>${side(field.source)}</td><td>${esc(field.targetColumn || '?')}<br>${side(field.target)}</td></tr>`).join('')}</tbody></table></div>` : ''}`;
   }).join('');
   return `<details class="backup-selection-values"><summary>Kiểm tra giá trị cơ bản · Chỉ đọc</summary>
-    <p>Kiểm tra NULL, số nguyên, DECIMAL cố định và độ dài chuỗi theo cột nguồn/đích. Chuỗi số ASCII đúng mẫu, tối đa 256 ký tự, được đối chiếu theo kiểu số. VARCHAR đếm ký tự Unicode; TEXT đếm byte, kiểm tra charset utf8mb4/utf8mb3/ASCII. CHAR cần xem xét padding và khoảng trắng cuối. Không tự làm tròn, cắt chuỗi hoặc bỏ khoảng trắng. Chưa kiểm chứng escape, ngày giờ, chuyển đổi kiểu khác hoặc ràng buộc dữ liệu. Qua kiểm tra cơ bản chưa đủ điều kiện phục hồi; không hiển thị giá trị gốc.</p>
+    <p>Kiểm tra NULL, số nguyên, DECIMAL cố định và độ dài chuỗi theo cột nguồn/đích. Chuỗi số ASCII đúng mẫu, tối đa 256 ký tự, được đối chiếu theo kiểu số. VARCHAR đếm ký tự Unicode; TEXT đếm byte, kiểm tra charset utf8mb4/utf8mb3/ASCII. CHAR cần xem xét padding và khoảng trắng cuối. DATE nhận YYYY-MM-DD; DATETIME nhận YYYY-MM-DD hh:mm:ss và tối đa 6 chữ số phần lẻ giây. TIME nhận thời lượng [-]hh:mm:ss hoặc [-]hhh:mm:ss và phần lẻ giây, hỗ trợ giờ trên 23 và dấu âm. Kiểm tra lịch, ngày bằng 0, phạm vi giờ theo kiểu và nguy cơ mất phần lẻ giây. Không tự làm tròn, cắt chuỗi hoặc bỏ khoảng trắng. YEAR kiểm tra số/chuỗi năm 4 chữ số 1901–2155 và số 0; chuỗi zero hoặc năm rút gọn cần kiểm chứng riêng. TIMESTAMP kiểm tra lịch và phần lẻ giây theo cùng mẫu DATETIME, nhưng vẫn cần kiểm chứng múi giờ nguồn/đích, DST và phạm vi lưu của server. Chưa kiểm chứng escape, định dạng ngày giờ khác, chuyển đổi kiểu khác hoặc ràng buộc dữ liệu. Qua kiểm tra cơ bản chưa đủ điều kiện phục hồi; không hiển thị giá trị gốc.</p>
     <p>${Number(review.totals.statements)} INSERT · ${Number(review.totals.basicChecked)} qua cơ bản · ${Number(review.totals.issues)} có vấn đề · ${Number(review.totals.unknown)} chưa đủ căn cứ · ${Number(review.totals.excluded)} loại khỏi lựa chọn.</p>
     <ul>${[...review.findings, ...review.requires].map(code => `<li>${codes([code])}</li>`).join('')}</ul>
     ${items || '<p>Không có INSERT đang được xem xét.</p>'}
     ${review.truncated || review.rows.length > 20 || review.rows.reduce((sum, row) => sum + row.fields.length, 0) > visibleFields ? '<p>Đang hiển thị tối đa 20 câu / 100 vị trí; báo cáo có giới hạn.</p>' : ''}</details>`;
+}
+
+const BACKUP_SELECTION_PACKET_LABELS = Object.freeze({
+  PACKET_LIMIT_NOT_OBSERVED: 'Chưa đọc được max_allowed_packet của phiên đích', PACKET_ENCODING_NOT_REVIEWED: 'Chưa xác nhận charset client utf8mb4 để đối chiếu byte',
+  PACKET_SIZE_NOT_REVIEWED: 'Thiếu thống kê kích thước hoặc vượt quota 16 MiB/câu', PACKET_LEDGER_INCOMPLETE: 'Danh sách câu lệnh chưa đầy đủ',
+  PACKET_SCHEMA_MAPPING_REQUIRED: 'Schema ghi rõ cần đối chiếu trước khi đánh giá câu lệnh đích',
+  PACKET_STATEMENT_TOO_LARGE: 'Câu SQL nguồn vượt max_allowed_packet đã đọc ở đích', PACKET_BOUNDARY_REQUIRES_REVIEW: 'Kích thước sát ngưỡng; cần kiểm chứng overhead giao thức',
+  PACKET_WITHIN_OBSERVED_LIMIT: 'Chưa vượt ngưỡng quan sát; chưa bảo đảm gửi hoặc phục hồi được', PACKET_REPORT_LIMIT: 'Báo cáo kích thước SQL vượt giới hạn',
+  PACKET_CLIENT_PROTOCOL_NOT_VALIDATED: 'Chưa kiểm chứng giới hạn client/giao thức', PACKET_REWRITE_NOT_VALIDATED: 'Phải tính lại kích thước nếu sửa SQL hoặc chia batch',
+  PACKET_STORAGE_ROW_LIMITS_NOT_REVIEWED: 'Chưa kiểm chứng giới hạn hàng lưu trữ, bộ nhớ hoặc dung lượng', PACKET_TARGET_RECHECK_REQUIRED: 'Phải đọc lại giới hạn trên đúng phiên trước khi ghi'
+});
+
+function backupSelectionPacketsHtml(review) {
+  if (review?.version !== 1) return '';
+  const codes = values => values.map(code => esc(BACKUP_SELECTION_PACKET_LABELS[code] || code)).join('; ');
+  return `<details class="backup-selection-packets"><summary>Kích thước SQL và giới hạn packet · Chỉ đọc</summary>
+    <p>max_allowed_packet của phiên đích: ${review.settings ? `${Number(review.settings.maxAllowedPacket).toLocaleString()} byte` : 'Chưa xác định'}.</p>
+    <p>${Number(review.totals.statements)} câu thuộc phạm vi · ${Number(review.totals.withinObserved)} chưa vượt ngưỡng quan sát · ${Number(review.totals.oversized)} vượt giới hạn · ${Number(review.totals.unknown)} chưa đủ căn cứ · ${Number(review.totals.excluded)} loại khỏi lựa chọn.</p>
+    <p>Đếm byte UTF-8 của câu SQL nguồn đã đọc, không phải dung lượng backup hoặc số dòng. Câu vượt giới hạn bị chặn; sát ngưỡng giữ trạng thái cần kiểm chứng giao thức. Chưa vượt ngưỡng không bảo đảm client/server nhận được hoặc phục hồi thành công. Không tự chia INSERT, sửa SQL hoặc đổi cấu hình server.</p>
+    <ul>${[...review.findings, ...review.requires].map(code => `<li>${codes([code])}</li>`).join('')}</ul>
+    <div class="backup-selection-table"><table><thead><tr><th># nguồn / Lệnh / Bảng</th><th>Byte UTF-8</th><th>Quan sát</th></tr></thead><tbody>${review.rows.slice(0, 100).map(row => `<tr><td>${Number(row.number)} · ${esc(row.command)} · ${esc(row.table)}</td><td>${row.utf8Bytes === null ? 'Chưa xác định' : Number(row.utf8Bytes).toLocaleString()}</td><td>${codes([row.reason])}</td></tr>`).join('') || '<tr><td colspan="3">Không có câu SQL đang được xem xét.</td></tr>'}</tbody></table></div>
+    ${review.truncated || review.rows.length > 100 ? '<p>Chỉ hiện 100 câu đầu; báo cáo có giới hạn. Câu thiếu chi tiết vì quota vẫn bị chặn trong bản nháp.</p>' : ''}</details>`;
+}
+
+const BACKUP_SELECTION_OMITTED_LABELS = Object.freeze({
+  OMITTED_REQUIRED_COLUMN: 'Cột bắt buộc bị bỏ khỏi INSERT, chưa thấy DEFAULT hay cơ chế tự sinh',
+  OMITTED_IMPLICIT_NULL: 'Cột nullable không có DEFAULT được quan sát: dự kiến NULL',
+  OMITTED_DEFAULT_NOT_REVIEWED: 'Có DEFAULT nhưng chưa kiểm chứng giá trị hoặc biểu thức',
+  OMITTED_DEFAULT_METADATA_UNKNOWN: 'Thiếu metadata về việc có DEFAULT', OMITTED_GENERATED_NOT_REVIEWED: 'Cột generated cần kiểm chứng biểu thức và tác động',
+  OMITTED_AUTO_INCREMENT_NOT_REVIEWED: 'Bỏ cột tự tăng: chưa kiểm chứng giá trị tự sinh', OMITTED_TIMESTAMP_NOT_REVIEWED: 'Bỏ TIMESTAMP: cần kiểm chứng thiết lập phiên và default',
+  OMITTED_SEMANTICS_NOT_REVIEWED: 'Kiểu hoặc thuộc tính cột chưa đủ căn cứ', OMITTED_COLUMNS_NOT_REVIEWED: 'Chưa có metadata cột đầy đủ cho kiểm tra cột bị bỏ',
+  OMITTED_MAPPING_UNKNOWN: 'Chưa ánh xạ được toàn bộ danh sách cột INSERT', OMITTED_INSERT_NOT_REVIEWED: 'INSERT thiếu bằng chứng cú pháp/giá trị, cần quét lại',
+  OMITTED_SCHEMA_MAPPING_REQUIRED: 'Schema ghi rõ cần được đối chiếu', OMITTED_LEDGER_INCOMPLETE: 'Danh sách câu lệnh chưa đầy đủ',
+  OMITTED_ANALYSIS_LIMIT: 'Vượt giới hạn 10.000 vị trí metadata được kiểm tra', OMITTED_REPORT_LIMIT: 'Báo cáo cột bị bỏ vượt giới hạn; câu thiếu chi tiết bị chặn',
+  OMITTED_REVIEW_INCOMPLETE: 'Một phần cột bị bỏ chưa được kiểm chứng', OMITTED_DEFAULT_VALUES_NOT_VALIDATED: 'Chưa xác minh đầy đủ giá trị DEFAULT và biểu thức tự sinh',
+  OMITTED_SERVER_RULES_NOT_VALIDATED: 'Chưa kiểm chứng đầy đủ SQL mode, constraints và quy tắc server', OMITTED_TARGET_RECHECK_REQUIRED: 'Phải đọc lại metadata đích trước khi ghi'
+});
+
+function backupSelectionOmittedHtml(review) {
+  if (review?.version !== 1) return '';
+  const statuses = { checked: 'Đã kiểm tra phạm vi cột bị bỏ', issues: 'Có vấn đề', unknown: 'Chưa đủ căn cứ' };
+  const codes = values => values.map(code => esc(BACKUP_SELECTION_OMITTED_LABELS[code] || code)).join('; ');
+  let visible = 0;
+  const items = review.rows.slice(0, 20).map(row => {
+    const columns = ['source', 'target'].flatMap(side => row[side].columns.map(column => ({ ...column, side })));
+    const shown = columns.slice(0, Math.max(0, 100 - visible)); visible += shown.length;
+    return `<p><strong>#${Number(row.number)} · ${esc(row.table)} · ${esc(statuses[row.status] || row.status)}</strong>${row.reasons.length ? `<br>${codes(row.reasons)}` : ''}</p>
+      ${['source', 'target'].map(side => `<p>${side === 'source' ? 'Nguồn' : 'Đích'}: ${esc(statuses[row[side].status] || row[side].status)} · ${row[side].omittedCount === null ? 'Chưa xác định số' : Number(row[side].omittedCount)} cột bị bỏ${row[side].findings.length ? `<br>${codes(row[side].findings)}` : ''}.</p>`).join('')}
+      ${shown.length ? `<div class="backup-selection-table"><table><thead><tr><th>Phía / Cột bị bỏ</th><th>Quan sát</th></tr></thead><tbody>${shown.map(column => `<tr><td>${column.side === 'source' ? 'Nguồn' : 'Đích'} · ${esc(column.name)}${column.invisible ? ' · Invisible' : ''}</td><td>${codes([column.code])}</td></tr>`).join('')}</tbody></table></div>` : ''}`;
+  }).join('');
+  return `<details class="backup-selection-omitted"><summary>Cột bị bỏ khỏi INSERT · Chỉ đọc</summary>
+    <p>${Number(review.totals.statements)} INSERT · ${Number(review.totals.checked)} đã kiểm tra phạm vi cột bị bỏ · ${Number(review.totals.issues)} có vấn đề · ${Number(review.totals.unknown)} chưa đủ căn cứ · ${Number(review.totals.excluded)} loại khỏi lựa chọn.</p>
+    <p>Đối chiếu riêng từng câu INSERT với cột nguồn và đích. INSERT theo vị trí bỏ các cột Invisible; số vị trí phải khớp trước khi nhận định cột nào bị bỏ. Không hiển thị hoặc tự áp dụng giá trị DEFAULT. Tự tăng, generated và TIMESTAMP cần kiểm chứng riêng; chưa xác nhận đủ điều kiện phục hồi.</p>
+    <ul>${[...review.findings, ...review.requires].map(code => `<li>${codes([code])}</li>`).join('')}</ul>${items || '<p>Không có INSERT đang được xem xét.</p>'}
+    ${review.truncated || review.rows.length > 20 || review.rows.reduce((sum, row) => sum + row.source.columns.length + row.target.columns.length, 0) > visible ? '<p>Hiện tối đa 20 câu / 100 cột ở hai phía; báo cáo có giới hạn.</p>' : ''}</details>`;
 }
 
 const BACKUP_SELECTION_SESSION_LABELS = Object.freeze({
@@ -4067,7 +4129,7 @@ function backupSelectionSessionPolicyHtml(review) {
 
 function backupSelectionDraftHtml(plan) {
   if (!plan) return '';
-  const labels = { ...BACKUP_SELECTION_VALUE_LABELS, ...BACKUP_SELECTION_SESSION_LABELS, ...BACKUP_SELECTION_POLICY_LABELS, ...BACKUP_SELECTION_FK_LABELS, EXECUTION_NOT_IMPLEMENTED: 'Chưa có luồng thực thi chọn bảng', SOURCE_SUBSET_NOT_VALIDATED: 'Chưa kiểm chứng cú pháp được hỗ trợ và tác động SQL',
+  const labels = { ...BACKUP_SELECTION_PACKET_LABELS, ...BACKUP_SELECTION_OMITTED_LABELS, ...BACKUP_SELECTION_VALUE_LABELS, ...BACKUP_SELECTION_SESSION_LABELS, ...BACKUP_SELECTION_POLICY_LABELS, ...BACKUP_SELECTION_FK_LABELS, EXECUTION_NOT_IMPLEMENTED: 'Chưa có luồng thực thi chọn bảng', SOURCE_SUBSET_NOT_VALIDATED: 'Chưa kiểm chứng cú pháp được hỗ trợ và tác động SQL',
     TARGET_RECHECK_REQUIRED: 'Phải kiểm tra lại đích sát lúc ghi', WRITE_PRIVILEGES_NOT_REVIEWED: 'Chưa kiểm tra quyền ghi', STATEMENT_LEDGER_INCOMPLETE: 'Danh sách câu lệnh chưa đầy đủ',
     SOURCE_REVIEW_INCOMPLETE: 'Phân tích nguồn chưa đầy đủ', SOURCE_REVIEW_FINDING: 'Cảnh báo nguồn cần xử lý', TARGET_REVIEW_FINDING: 'Cảnh báo đích cần xử lý',
     TARGET_REVIEW_INCOMPLETE: 'Đối chiếu đích chưa đầy đủ', TARGET_INDEXES_REQUIRE_REVIEW: 'Chưa đủ bằng chứng chỉ mục đích; cần đối chiếu thêm', TARGET_FOREIGN_KEYS_REQUIRE_REVIEW: 'Chưa đủ metadata FK đích; cần kiểm tra lại', COLUMNS_REQUIRE_REVIEW: 'Cột cần đối chiếu thêm', STATEMENT_NOT_CLASSIFIED: 'Chưa phân loại được phạm vi câu lệnh',
@@ -4130,7 +4192,7 @@ function backupSelectionDraftHtml(plan) {
   return `<details class="backup-selection-draft"><summary>Bản nháp kế hoạch · ${Number(plan.statementCount)} câu lệnh nguồn · Chưa thể thực thi</summary>
     <p>Đích: ${esc(plan.targetDatabase)}. Chỉ để review; chưa cấp quyền chạy. Thứ tự bên dưới giữ theo tệp nguồn, chưa phải thứ tự phục hồi được xác nhận. Không tự bỏ qua câu chưa xử lý hoặc tự chấp thuận DROP.</p>
     <p>Mã bản nháp: <code>${esc(plan.planId)}</code></p>
-    ${backupSelectionConflictPolicyHtml(plan.conflictPolicyReview)}${backupSelectionSessionPolicyHtml(plan.sessionPolicyReview)}${backupSelectionValuesHtml(plan.valueReview)}
+    ${backupSelectionConflictPolicyHtml(plan.conflictPolicyReview)}${backupSelectionSessionPolicyHtml(plan.sessionPolicyReview)}${backupSelectionValuesHtml(plan.valueReview)}${backupSelectionOmittedHtml(plan.omittedValueReview)}${backupSelectionPacketsHtml(plan.packetReview)}
     ${backupSelectionForeignKeysHtml(plan.foreignKeyReview)}${backupSelectionForeignKeyComparisonHtml(plan.foreignKeyComparison)}
     ${plan.syntaxTotals ? `<p>INSERT trong lựa chọn: ${Number(plan.syntaxTotals.matched)} khớp cú pháp literal · ${Number(plan.syntaxTotals.unsupported)} chưa hỗ trợ · ${Number(plan.syntaxTotals.notReviewed)} chưa kiểm tra. Chỉ kiểm tra cú pháp, chưa xác nhận chuyển đổi giá trị hoặc tác động trigger/FK. Số bộ VALUES không phải số dòng đã ghi.</p>` : ''}
     ${plan.createSyntaxTotals ? `<p>CREATE trong lựa chọn: ${Number(plan.createSyntaxTotals.matched)} khớp cú pháp cơ bản · ${Number(plan.createSyntaxTotals.unsupported)} chưa hỗ trợ · ${Number(plan.createSyntaxTotals.notReviewed)} chưa kiểm tra. Chưa xác nhận quyền, tính hợp lệ theo server, charset/collation, xung đột hoặc tác động tạo bảng. Nhận diện cú pháp FK chưa xác nhận chỉ mục đích/dữ liệu; generated, CHECK và chính sách context SQL chưa được kiểm chứng.</p>` : ''}

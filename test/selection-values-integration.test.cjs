@@ -41,7 +41,7 @@ test('value bounds integration: read-only preview agrees with strict integer ran
     await t.test('source-wide integers and NULL report narrower target issues without writes or editor changes', async () => {
       initial = await make('items', '`id` BIGINT UNSIGNED, `n` INT', ['INSERT INTO items VALUES(18446744073709551615,NULL)']);
       const report = initial.draft.valueReview, row = report.rows[0];
-      assert.equal(initial.targetReview.version, 7); assert.equal(initial.draft.version, 16);
+      assert.equal(initial.targetReview.version, 9); assert.equal(initial.draft.version, 22);
       assert.equal(initial.targetReview.rows[0].valueColumns.complete, true);
       assert.equal(report.canExecute, false); assert.equal(row.status, 'issues');
       assert.equal(row.fields[0].source.status, 'basic-checked'); assert.equal(row.fields[1].source.status, 'basic-checked');
@@ -122,7 +122,7 @@ test('value bounds integration: read-only preview agrees with strict integer ran
               assert.ok(entries.length > 0);
               // Native dump keeps quoted mysql2 decimal strings. Review only
               // the exact numeric subset without changing the backup format.
-              assert.ok(entries.every(entry => entry.syntaxReview.valueReview?.version === 4
+              assert.ok(entries.every(entry => entry.syntaxReview.valueReview?.version === 7
                 && entry.syntaxReview.valueReview.fields[0].fixedPoint.count === 0
                 && entry.syntaxReview.valueReview.fields[0].numericStrings.count > 0));
               const source = previewRestoreSelection(inventory, { tables: ['decimal_sample'], includeStructure: false });

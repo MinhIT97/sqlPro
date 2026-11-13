@@ -30,6 +30,88 @@ function setup(overrides = {}) {
   return { ...r, ready, calls, canceled, selected, get: selector => elements.get(selector), click: selector => elements.get(selector).listeners.click() };
 }
 
+test('packet report escapes names, bounds detail and never represents within-limit as permission to restore', () => {
+  const r = setup();
+  r.context.packets = { version: 1, settings: { version: 1, maxAllowedPacket: 1024 },
+    totals: { statements: 201, withinObserved: 0, oversized: 201, unknown: 0, excluded: 0 }, findings: ['PACKET_STATEMENT_TOO_LARGE'],
+    requires: ['PACKET_CLIENT_PROTOCOL_NOT_VALIDATED'], truncated: true,
+    rows: Array.from({ length: 200 }, (_, i) => ({ number: i + 1, command: 'INSERT', table: '<img src=table>', utf8Bytes: 1200, status: 'oversized', reason: 'PACKET_STATEMENT_TOO_LARGE' })) };
+  const html = r.evaluate('backupSelectionPacketsHtml(packets)');
+  assert.match(html, /max_allowed_packet/); assert.match(html, /không bảo đảm/i); assert.match(html, /100 câu đầu/);
+  assert.match(html, /&lt;img/); assert.equal((html.match(/<tr><td>/g) || []).length, 100);
+  assert.equal(html.includes('<img'), false); assert.equal(html.includes('<button'), false);
+  assert.equal(r.evaluate('backupSelectionPacketsHtml({version:0})'), '');
+});
+
+test('temporal value report v5 describes calendar/precision risks without exposing dates or write controls', () => {
+  const r = setup();
+  r.context.values = { version: 5, totals: { statements: 1, basicChecked: 0, issues: 1, unknown: 0, excluded: 0 },
+    findings: ['VALUE_BASIC_ISSUES'], requires: ['VALUE_FULL_VALIDATION_REQUIRED'], truncated: false,
+    rows: [{ number: 2, table: '<img src=date>', status: 'issues', reasons: [], fields: [{ position: 1, column: '<img src=column>',
+      sourceColumn: 'event_date', targetColumn: 'event_date', counts: { nulls: 0, integers: 0, other: 1, temporalStrings: 1 },
+      source: { status: 'issues', findings: ['VALUE_TEMPORAL_INVALID_CALENDAR', 'VALUE_TEMPORAL_ZERO_REQUIRES_POLICY'] },
+      target: { status: 'issues', findings: ['VALUE_TEMPORAL_PRECISION_LOSS', 'VALUE_TEMPORAL_INVALID_TIME'] } }] }] };
+  const html = r.evaluate('backupSelectionValuesHtml(values)');
+  assert.match(html, /lịch Gregorian/); assert.match(html, /phần lẻ giây không thể lưu nguyên vẹn/);
+  assert.match(html, /Chuỗi ngày giờ đúng mẫu: 1/); assert.match(html, /cần chính sách riêng/);
+  assert.match(html, /TIMESTAMP/); assert.match(html, /&lt;img/);
+  assert.equal(html.includes('<img'), false); assert.equal(html.includes('<button'), false);
+});
+
+test('TIME report v6 describes signed durations and precision risks with no literal values or write action', () => {
+  const r = setup();
+  r.context.values = { version: 6, totals: { statements: 1, basicChecked: 0, issues: 1, unknown: 0, excluded: 0 },
+    findings: ['VALUE_BASIC_ISSUES'], requires: ['VALUE_FULL_VALIDATION_REQUIRED'], truncated: false,
+    rows: [{ number: 3, table: '<img src=time>', status: 'issues', reasons: [], fields: [{ position: 1, column: 'duration',
+      sourceColumn: 'duration', targetColumn: 'duration', counts: { nulls: 0, integers: 0, other: 1, temporalStrings: 1 },
+      source: { status: 'basic-checked', findings: [] }, target: { status: 'issues', findings: ['VALUE_TEMPORAL_PRECISION_LOSS'] } }] }] };
+  const html = r.evaluate('backupSelectionValuesHtml(values)');
+  assert.match(html, /TIME nhận thời lượng/); assert.match(html, /giờ trên 23 và dấu âm/);
+  assert.match(html, /phần lẻ giây không thể lưu nguyên vẹn/); assert.match(html, /TIMESTAMP/);
+  assert.match(html, /&lt;img/); assert.equal(html.includes('<img'), false); assert.equal(html.includes('<button'), false);
+});
+
+test('YEAR report v7 distinguishes zero/short-year conversion and range issues without raw values or write controls', () => {
+  const r = setup();
+  r.context.values = { version: 7, totals: { statements: 1, basicChecked: 0, issues: 1, unknown: 0, excluded: 0 },
+    findings: ['VALUE_BASIC_ISSUES'], requires: ['VALUE_FULL_VALIDATION_REQUIRED'], truncated: false,
+    rows: [{ number: 2, table: '<img src=year>', status: 'issues', reasons: [], fields: [{ position: 1, column: 'yr', sourceColumn: 'yr', targetColumn: 'yr',
+      counts: { nulls: 0, integers: 1, other: 0, yearLiterals: 1 }, source: { status: 'unknown', findings: ['VALUE_YEAR_CONVERSION_NOT_REVIEWED'] },
+      target: { status: 'issues', findings: ['VALUE_YEAR_OUT_OF_RANGE'] } }] }] };
+  const html = r.evaluate('backupSelectionValuesHtml(values)');
+  assert.match(html, /YEAR có giá trị rút gọn/); assert.match(html, /ngoài phạm vi YEAR/); assert.match(html, /Literal YEAR được phân loại: 1/);
+  assert.match(html, /&lt;img/); assert.equal(html.includes('<img'), false); assert.equal(html.includes('<button'), false);
+});
+
+test('TIMESTAMP report v8 explains local checks and mandatory zone/range review without write controls', () => {
+  const r = setup();
+  r.context.values = { version: 8, totals: { statements: 1, basicChecked: 0, issues: 1, unknown: 0, excluded: 0 },
+    findings: ['VALUE_BASIC_ISSUES'], requires: ['VALUE_FULL_VALIDATION_REQUIRED'], truncated: false,
+    rows: [{ number: 2, table: '<img src=timestamp>', status: 'issues', reasons: [], fields: [{ position: 1, column: '<img src=column>',
+      sourceColumn: 'ts', targetColumn: 'ts', counts: { nulls: 0, integers: 0, other: 1, temporalStrings: 1 },
+      source: { status: 'unknown', findings: ['VALUE_TIMESTAMP_ZONE_RANGE_NOT_REVIEWED'] },
+      target: { status: 'issues', findings: ['VALUE_TEMPORAL_PRECISION_LOSS', 'VALUE_TIMESTAMP_ZONE_RANGE_NOT_REVIEWED'] } }] }] };
+  const html = r.evaluate('backupSelectionValuesHtml(values)');
+  assert.match(html, /TIMESTAMP kiểm tra lịch và phần lẻ giây/); assert.match(html, /múi giờ nguồn\/đích, DST và phạm vi lưu của server/);
+  assert.match(html, /Chuỗi ngày giờ đúng mẫu: 1/); assert.match(html, /phần lẻ giây không thể lưu nguyên vẹn/);
+  assert.match(html, /&lt;img/); assert.equal(html.includes('<img'), false); assert.equal(html.includes('<button'), false);
+});
+
+test('omitted-column review escapes names, limits both sides and presents no default contents or write controls', () => {
+  const r = setup();
+  const side = { status: 'unknown', omittedCount: 4, findings: ['OMITTED_DEFAULT_VALUES_NOT_VALIDATED'],
+    columns: Array.from({ length: 4 }, () => ({ name: '<img src=column>', invisible: true, code: 'OMITTED_DEFAULT_NOT_REVIEWED' })) };
+  r.context.omitted = { version: 1, totals: { statements: 25, checked: 0, issues: 0, unknown: 25, excluded: 0 }, findings: [],
+    requires: ['OMITTED_SERVER_RULES_NOT_VALIDATED'], truncated: false,
+    rows: Array.from({ length: 25 }, (_, i) => ({ number: i + 1, table: '<img src=table>', status: 'unknown', reasons: ['<img src=reason>'], source: side, target: side })) };
+  const html = r.evaluate('backupSelectionOmittedHtml(omitted)');
+  assert.equal(html.includes('<img'), false); assert.equal(html.includes('<button'), false);
+  assert.match(html, /&lt;img/); assert.match(html, /Có DEFAULT nhưng chưa kiểm chứng/); assert.match(html, /Invisible/);
+  assert.match(html, /20 câu \/ 100 cột/);
+  assert.equal((html.match(/<tr><td>/g) || []).length, 100);
+  assert.equal(r.evaluate('backupSelectionOmittedHtml({version:0})'), '');
+});
+
 test('value review HTML escapes names and reasons, limits detail and offers no execution controls', () => {
   const r = setup();
   r.context.values = { version: 1, totals: { statements: 25, basicChecked: 0, issues: 25, unknown: 0, excluded: 0 },

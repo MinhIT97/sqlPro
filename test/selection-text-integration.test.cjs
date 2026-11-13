@@ -48,7 +48,7 @@ test('text preview integration: Unicode length, encoded bytes, charset and nativ
       ]) {
         await admin.query(`CREATE TABLE \`${table}\` (v ${type} CHARACTER SET utf8mb4) ENGINE=InnoDB`);
         const report = await preview(table, sourceType, values);
-        assert.equal(report.targetReview.version, 7); assert.equal(report.draft.version, 16);
+        assert.equal(report.targetReview.version, 9); assert.equal(report.draft.version, 22);
         assert.deepEqual(report.draft.valueReview.rows.map(row => row.status), ['basic-checked', 'basic-checked', 'issues']);
         assert.equal(String((await admin.query(`SELECT COUNT(*) AS n FROM \`${table}\``))[0][0].n), '0');
         await admin.query(`INSERT INTO \`${table}\` VALUES (?)`, [values[0]]); await admin.query(`INSERT INTO \`${table}\` VALUES (?)`, [values[1]]);
@@ -120,7 +120,7 @@ test('text preview integration: Unicode length, encoded bytes, charset and nativ
         const inventory = scanned.inventory.selectionPreview, result = await build(inventory, 'native_text', saved.checksum);
         assert.ok(result.draft.valueReview.rows.length > 0); assert.ok(result.draft.valueReview.rows.every(row => row.status === 'basic-checked'));
         const entries = inventory.statementLedger.entries.filter(entry => entry.command === 'INSERT');
-        assert.ok(entries.every(entry => entry.syntaxReview.valueReview?.version === 4 && entry.syntaxReview.valueReview.fields.every(field => field.text.count === 1)));
+        assert.ok(entries.every(entry => entry.syntaxReview.valueReview?.version === 7 && entry.syntaxReview.valueReview.fields.every(field => field.text.count === 1)));
         for (const value of values) assert.equal(JSON.stringify(result).includes(value), false);
         assert.deepEqual((await admin.query('SELECT v,body FROM native_text'))[0].map(row => [row.v, row.body]), [values]);
         assert.equal(result.draft.canExecute, false); assert.ok(result.draft.blockers.some(item => item.code === 'VALUE_FULL_VALIDATION_REQUIRED'));

@@ -199,7 +199,7 @@ test('MySQL integration: snapshots, precise import, typed keys, full export and 
         const scanned = await scanner.scanRestoreInventoryInWorker({ filePath, database, selectionPreview: true, totalBytes: saved.bytes });
         const valueEvidence = scanned.inventory.selectionPreview.statementLedger.entries.filter(entry => entry.command === 'INSERT');
         assert.ok(valueEvidence.length > 0);
-        assert.ok(valueEvidence.every(entry => entry.syntaxReview.valueReview?.version === 4));
+        assert.ok(valueEvidence.every(entry => entry.syntaxReview.valueReview?.version === 7));
         const source = previewRestoreSelection(scanned.inventory.selectionPreview, { tables: ['fk_review_parent', 'fk_review_child'] });
         const reader = await session();
         const facts = await collectSelectionTargetFacts(reader, targetDatabase);

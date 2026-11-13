@@ -220,7 +220,7 @@ function targetFixture(t, { scanDelayMs = 0, ...overrides } = {}) {
     onRaw: async (sql, params) => {
       calls.push({ sql, params }); assert.match(sql, /^SELECT /);
       if (sql.includes('VERSION()')) return { rows: [{ version: '8.4', lowerCaseTableNames: 0 }] };
-      if (sql.includes('AS foreignKeyChecks')) return { rows: [{ foreignKeyChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES', charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4' }] };
+      if (sql.includes('AS foreignKeyChecks')) return { rows: [{ foreignKeyChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES', charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4', maxAllowedPacket: 67108864 }] };
     if (sql.includes('SCHEMATA')) return { rows: [{ name: 'destination' }] };
       return { rows: [] };
     }, ...overrides });
@@ -247,7 +247,7 @@ test('conflict policy is validated before I/O, captured before await and never t
   const r = targetFixture(t, { scanDelayMs: 5, onRaw: async sql => {
     assert.match(sql, /^SELECT /);
     if (sql.includes('VERSION()')) return { rows: [{ version: '8.4', lowerCaseTableNames: 0 }] };
-    if (sql.includes('AS foreignKeyChecks')) return { rows: [{ foreignKeyChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES', charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4' }] };
+    if (sql.includes('AS foreignKeyChecks')) return { rows: [{ foreignKeyChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES', charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4', maxAllowedPacket: 67108864 }] };
     if (sql.includes('SCHEMATA')) return { rows: [{ name: 'destination' }] };
     if (sql.includes('information_schema.TABLES')) return { rows: [{ name: 'items', type: 'BASE TABLE' }] };
     return { rows: [] };

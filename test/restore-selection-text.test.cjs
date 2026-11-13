@@ -32,7 +32,7 @@ test('counts Unicode scalars and UTF8 bytes, handles doubled quotes/empty text a
   for (const [value, start, end] of [["a'b", 0, 3], ['a\\n', 0, 3], ['a', -1, 1], ['a', 0, 2], ['a', 1, 0]]) assert.equal(reviewTextLiteral(value, start, end), null);
   const sql = "INSERT INTO items VALUES('private-value'),('a''b'),('😀'),(NULL),(X'ff'),('123')";
   const syntax = reviewLiteralInsert(sql, { collectValues: true });
-  assert.equal(syntax.valueReview.version, 4); assert.equal(syntax.valueReview.fields[0].text.count, 4);
+  assert.equal(syntax.valueReview.version, 7); assert.equal(syntax.valueReview.fields[0].text.count, 4);
   assert.equal(syntax.valueReview.fields[0].text.maxCharacters, 13); assert.equal(syntax.valueReview.fields[0].text.bmp, false);
   assert.equal(JSON.stringify(syntax).includes('private-value'), false); assert.equal(JSON.stringify(syntax).includes('😀'), false);
   assert.equal(reviewLiteralInsert("INSERT INTO items VALUES('a\\n')", { collectValues: true }).status, 'unsupported');
@@ -77,7 +77,7 @@ test('projection validates profiles, numeric-string subset and byte/character co
   assert.deepEqual(projectText({ ...field.text, rawText: 'private' }, field), field.text);
   const missing = structuredClone(syntax.valueReview); delete missing.fields[0].text;
   assert.equal(projectValueEvidence(missing, syntax), null);
-  const legacy = structuredClone(syntax.valueReview); legacy.version = 3; delete legacy.fields[0].text;
+  const legacy = structuredClone(syntax.valueReview); legacy.version = 3; delete legacy.fields[0].text; delete legacy.fields[0].temporal; delete legacy.fields[0].year;
   assert.deepEqual(projectValueEvidence(legacy, syntax), legacy);
   const old = fixture('VARCHAR(10)', ["'plain'"]);
   old.inventory.statementLedger.entries[1].syntaxReview.valueReview.version = 3;
@@ -88,9 +88,11 @@ test('projection validates profiles, numeric-string subset and byte/character co
 test('long text profiles stay bounded, reports freeze/bind observations and known loss blocks INSERT without execution', () => {
   const body = 'é'.repeat(100000), syntax = reviewLiteralInsert(`INSERT INTO items VALUES('${body}')`, { collectValues: true });
   assert.equal(syntax.valueReview.fields[0].text.maxCharacters, 100000); assert.equal(syntax.valueReview.fields[0].text.maxUtf8Bytes, 200000);
-  assert.ok(JSON.stringify(syntax).length < 1000);
+  assert.ok(JSON.stringify(syntax).length < 1500);
+  const larger = reviewLiteralInsert(`INSERT INTO items VALUES('${body + body}')`, { collectValues: true });
+  assert.ok(Math.abs(JSON.stringify(larger).length - JSON.stringify(syntax).length) < 20);
   const input = fixture('VARCHAR(10)', ["'😀'"]), initial = input.build();
-  assert.equal(initial.version, 16); assert.equal(initial.valueReview.version, 4); assert.equal(initial.canExecute, false);
+  assert.equal(initial.version, 22); assert.equal(initial.valueReview.version, 8); assert.equal(initial.canExecute, false);
   assert.equal(Object.isFrozen(initial.valueReview.rows[0].fields[0]), true);
   input.targetReview.rows[0].valueColumns.columns[0].charset = 'ascii';
   const changed = input.build(); assert.notEqual(initial.planId, changed.planId);

@@ -8,6 +8,8 @@ const { projectIndexes } = require('./restore-selection-indexes.cjs');
 const { compareSelectedForeignKeys } = require('./restore-selection-fk-comparison.cjs');
 const { buildSelectionSessionPolicy } = require('./restore-selection-session-policy.cjs');
 const { projectValueEvidence, reviewSelectionValues } = require('./restore-selection-values.cjs');
+const { reviewOmittedValues } = require('./restore-selection-omitted.cjs');
+const { projectStatementSize, reviewSelectionPackets } = require('./restore-selection-packets.cjs');
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 
 function freeze(value) {
@@ -61,12 +63,20 @@ function buildSelectionDraft({ inventory, source, checksum, targetIdentity, targ
   const valueReview = reviewSelectionValues({ ledger, source, targetReview, policyReview: conflictPolicyReview, sessionPolicyReview });
   const valueIssues = new Set(valueReview.rows.filter(row => row.status === 'issues').map(row => row.number));
   const valueRows = new Set(valueReview.rows.map(row => row.number));
+  const omittedValueReview = reviewOmittedValues({ ledger, source, targetReview, policyReview: conflictPolicyReview });
+  const omittedIssues = new Set(omittedValueReview.rows.filter(row => row.status === 'issues').map(row => row.number));
+  const omittedRows = new Set(omittedValueReview.rows.map(row => row.number));
+  const packetReview = reviewSelectionPackets({ ledger, source, targetReview, policyReview: conflictPolicyReview });
+  const oversized = new Set(packetReview.rows.filter(row => row.status === 'oversized').map(row => row.number));
+  const packetRows = new Set(packetReview.rows.map(row => row.number));
   const blockers = []; let blockersTruncated = false;
   const block = (code, table = null, detail = null) => {
     if (blockers.length < 100) blockers.push({ code, table, detail }); else blockersTruncated = true;
   };
   block('EXECUTION_NOT_IMPLEMENTED');
   for (const code of [...valueReview.findings, ...valueReview.requires]) block(code);
+  for (const code of [...omittedValueReview.findings, ...omittedValueReview.requires]) block(code);
+  for (const code of [...packetReview.findings, ...packetReview.requires]) block(code);
   for (const finding of sessionPolicyReview.findings) block(finding.code);
   for (const code of sessionPolicyReview.requires) block(code);
   block('SOURCE_SUBSET_NOT_VALIDATED');
@@ -124,11 +134,15 @@ function buildSelectionDraft({ inventory, source, checksum, targetIdentity, targ
       else if (tablePolicies.get(entry.table)?.disposition === 'skip') { decision = 'excluded'; reason = 'POLICY_SKIP_EXISTING_TABLE'; }
       else if (tablePolicies.get(entry.table)?.disposition === 'blocked') reason = tablePolicies.get(entry.table).reason;
       else if (entry.command === 'DROP') reason = 'DESTRUCTIVE_POLICY_REQUIRED';
+      else if (oversized.has(entry.number)) reason = 'PACKET_STATEMENT_TOO_LARGE';
+      else if (packetReview.truncated && !packetRows.has(entry.number)) reason = 'PACKET_REPORT_LIMIT';
       else if (entry.command === 'INSERT' && syntaxReview?.status !== 'matched') reason = syntaxReview?.code || 'INSERT_SYNTAX_NOT_REVIEWED';
       else if (entry.command === 'INSERT' && valueIssues.has(entry.number)) reason = 'VALUE_BASIC_ISSUES';
       // The bounded report can omit a statement whose values have known issues.
       // Missing detail must never turn that statement back into a candidate.
       else if (entry.command === 'INSERT' && valueReview.truncated && !valueRows.has(entry.number)) reason = 'VALUE_REPORT_LIMIT';
+      else if (entry.command === 'INSERT' && omittedIssues.has(entry.number)) reason = 'OMITTED_REQUIRED_COLUMN';
+      else if (entry.command === 'INSERT' && omittedValueReview.truncated && !omittedRows.has(entry.number)) reason = 'OMITTED_REPORT_LIMIT';
       else if (entry.command === 'CREATE' && syntaxReview?.status !== 'matched') reason = syntaxReview?.code || 'CREATE_SYNTAX_NOT_REVIEWED';
       else if (entry.kind === 'structure' && entry.command === 'CREATE' || entry.kind === 'data' && entry.command === 'INSERT') {
         decision = 'candidate'; reason = entry.command === 'INSERT' ? 'LITERAL_INSERT_MATCHED' : 'BASIC_CREATE_MATCHED';
@@ -138,18 +152,18 @@ function buildSelectionDraft({ inventory, source, checksum, targetIdentity, targ
     else if (numbered && entry.kind === 'skipped') { decision = 'skipped'; reason = 'DIRECTIVE_SKIPPED_BY_CURRENT_RESTORE'; }
     totals[decision]++;
     if (decision === 'blocked') block(reason, entry.table || null, `#${entry.number}`);
-    if (steps.length < 200) steps.push({ number: entry.number, command: entry.command, table: entry.table, schema: entry.schema, decision, reason, syntaxReview, contextReview });
+    if (steps.length < 200) steps.push({ number: entry.number, command: entry.command, table: entry.table, schema: entry.schema, decision, reason, syntaxReview, contextReview, sizeReview: projectStatementSize(entry.sizeReview) });
   }
   if (entries.length > 10000) block('STATEMENT_LEDGER_INCOMPLETE');
   const selection = { tables: [...source.selectedTables].sort(), includeStructure: source.includeStructure, includeData: source.includeData };
-  const binding = { version: 16, checksum, targetIdentity, targetSnapshotId: targetReview.snapshotId,
+  const binding = { version: 22, checksum, targetIdentity, targetSnapshotId: targetReview.snapshotId,
     sourceDatabase: source.sourceDatabase, targetDatabase: targetReview.database, selection, policy: 'review-only',
-    ledger: ledger || null, sessionContextReview, conflictPolicyReview, foreignKeyReview, foreignKeyComparison, sessionPolicyReview, valueReview, sourceFindings: source.findings, sourceTruncated: inventory.truncated || source.findingsTruncated,
+    ledger: ledger || null, sessionContextReview, conflictPolicyReview, foreignKeyReview, foreignKeyComparison, sessionPolicyReview, valueReview, omittedValueReview, packetReview, sourceFindings: source.findings, sourceTruncated: inventory.truncated || source.findingsTruncated,
     blockers: [...blockers].sort((left, right) => JSON.stringify(left) < JSON.stringify(right) ? -1 : JSON.stringify(left) > JSON.stringify(right) ? 1 : 0), blockersTruncated };
   const planId = crypto.createHash('sha256').update(JSON.stringify(binding)).digest('hex');
-  return freeze({ version: 16, kind: 'restore-selection-draft', canExecute: false, status: 'blocked', planId,
+  return freeze({ version: 22, kind: 'restore-selection-draft', canExecute: false, status: 'blocked', planId,
     checksum, targetSnapshotId: targetReview.snapshotId, sourceDatabase: source.sourceDatabase, targetDatabase: targetReview.database,
-    selection, policy: 'review-only', statementCount: ledger?.total || 0, totals, syntaxTotals, createSyntaxTotals, sessionContextReview, conflictPolicyReview, foreignKeyReview, foreignKeyComparison, sessionPolicyReview, valueReview, steps,
+    selection, policy: 'review-only', statementCount: ledger?.total || 0, totals, syntaxTotals, createSyntaxTotals, sessionContextReview, conflictPolicyReview, foreignKeyReview, foreignKeyComparison, sessionPolicyReview, valueReview, omittedValueReview, packetReview, steps,
     stepsTruncated: steps.length < entries.length || !!ledger?.truncated, blockers, blockersTruncated });
 }
 

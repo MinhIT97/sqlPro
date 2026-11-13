@@ -19,7 +19,7 @@ const report = (metadata = facts(), selected = source(), checksum = 'a'.repeat(6
 
 test('session metadata is read-only, bounded, projected and bound to snapshot including unknown-mode drift', async () => {
   const raw = { foreignKeyChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES,PRIVATE_MODE',
-    charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4', privateValue: 'secret' };
+    charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4', maxAllowedPacket: 67108864, privateValue: 'secret' };
   const queries = [];
   const result = await collectSelectionTargetFacts({ raw: async (sql, params) => {
     queries.push(sql); assert.match(sql, /^SELECT /);
@@ -242,7 +242,7 @@ test('index metadata errors, malformed rows and quotas remain unknown and cancel
 test('target index snapshot binds order, prefix, uniqueness and type drift; missing legacy evidence stays unknown', () => {
   const index = { table: 'parent', name: 'pair', nonUnique: false, ordinal: 1, column: 'id', prefixLength: null, direction: 'A', type: 'BTREE', visibility: 'visible' };
   const first = report(facts({ indexes: [index] }));
-  assert.equal(first.version, 7); assert.equal(first.rows[0].indexReview.complete, true);
+  assert.equal(first.version, 9); assert.equal(first.rows[0].indexReview.complete, true);
   for (const changes of [{ nonUnique: true }, { ordinal: 2 }, { prefixLength: 8 }, { direction: 'D' }, { type: 'HASH' }, { column: null }, { visibility: 'invisible' }]) {
     assert.notEqual(report(facts({ indexes: [{ ...index, ...changes }] })).snapshotId, first.snapshotId);
   }

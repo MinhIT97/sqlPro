@@ -41,7 +41,7 @@ test('all ten signed/unsigned integer boundaries use exact arithmetic, ignoring 
 test('lexer emits only bounded aggregate counts/masks, retaining no literal contents', () => {
   const result = reviewLiteralInsert("INSERT INTO items(`X`,`y`) VALUES(-128,'secret-value'),(+127,0xabcdef),(TRUE,1e2),(NULL,18446744073709551615)", { collectValues: true });
   assert.equal(result.status, 'matched'); assert.deepEqual(result.valueReview.columns, ['X', 'y']);
-  assert.deepEqual(result.valueReview.fields.map(({ fitMask, fixedPoint, numericStrings, text, ...rest }) => rest), [{ nulls: 1, integers: 3, other: 0 }, { nulls: 0, integers: 1, other: 3 }]);
+  assert.deepEqual(result.valueReview.fields.map(({ fitMask, fixedPoint, numericStrings, text, temporal, year, ...rest }) => rest), [{ nulls: 1, integers: 3, other: 0 }, { nulls: 0, integers: 1, other: 3 }]);
   const serialized = JSON.stringify(result);
   for (const value of ['secret-value', '18446744073709551615', 'abcdef', '-128', 'numericText']) assert.equal(serialized.includes(value), false);
   assert.deepEqual(projectValueEvidence({ ...result.valueReview, privateSql: 'secret' }, result), result.valueReview);
@@ -101,6 +101,19 @@ test('legacy/malformed evidence, schema mapping and incomplete columns never bec
   }
 });
 
+test('qualified CREATE from a different schema cannot certify source values for an unqualified INSERT', () => {
+  const input = fixture('`id` INT', ['INSERT INTO items VALUES(1)']);
+  const create = input.ledger.entries[0];
+  create.schema = 'elsewhere'; create.syntaxReview.schema = 'elsewhere';
+  const result = review(input);
+  assert.equal(result.rows[0].status, 'unknown');
+  assert.ok(result.rows[0].reasons.includes('VALUE_SOURCE_COLUMNS_NOT_REVIEWED'));
+  assert.equal(result.rows[0].fields[0].source.status, 'unknown');
+  assert.equal(result.rows[0].fields[0].target.status, 'basic-checked');
+  create.schema = 'demo'; create.syntaxReview.schema = 'demo';
+  assert.equal(review(input).rows[0].status, 'basic-checked');
+});
+
 test('skip and structure-only selections exclude value work; invalid ledger and session remain blocking', () => {
   const input = fixture('`id` INT NOT NULL', ['INSERT INTO items VALUES(NULL)']);
   input.policyReview.rows[0].disposition = 'skip'; assert.equal(review(input).totals.excluded, 1); assert.equal(review(input).rows.length, 0);
@@ -130,7 +143,7 @@ test('plan blocks known bad value statements, freezes reports and binds changes 
   const input = fixture('`id` BIGINT UNSIGNED', ['INSERT INTO items VALUES(18446744073709551615)'], ['tinyint']);
   input.source.includeStructure = false;
   const build = () => buildSelectionDraft({ ...input, checksum: 'b'.repeat(64), targetIdentity: 'c'.repeat(64) });
-  const first = build(); assert.equal(first.version, 16); assert.equal(first.canExecute, false);
+  const first = build(); assert.equal(first.version, 22); assert.equal(first.canExecute, false);
   assert.equal(first.steps[1].reason, 'VALUE_BASIC_ISSUES'); assert.equal(first.steps[1].decision, 'blocked');
   assert.equal(Object.isFrozen(first.valueReview.rows[0].fields[0].source), true);
   assert.equal(JSON.stringify(first).includes('18446744073709551615'), false);

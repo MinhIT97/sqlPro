@@ -6,13 +6,14 @@ const { reviewTargetIndexes } = require('./restore-selection-target-indexes.cjs'
 const { reviewTargetForeignKeys } = require('./restore-selection-target-foreign-keys.cjs');
 const { normalizeSessionSettings, projectSessionSettings } = require('./restore-selection-session-policy.cjs');
 const { projectValueColumns } = require('./restore-selection-values.cjs');
+const { normalizePacketSettings, projectPacketSettings } = require('./restore-selection-packets.cjs');
 const LIMIT = 5000;
 const validName = value => typeof value === 'string' && value.length > 0 && value.length <= 64 && !value.includes('\0');
 
 async function collectSelectionTargetFacts(session, database, checkContext = () => {}, selectedTables = null) {
   if (!validName(database)) throw new Error('Database đích không hợp lệ.');
   if (selectedTables !== null && (!Array.isArray(selectedTables) || !selectedTables.length || selectedTables.length > 1000 || selectedTables.some(name => !validName(name)))) throw new Error('Danh sách bảng đích không hợp lệ.');
-  const facts = { database, checkedAt: new Date().toISOString(), version: null, lowerCaseTableNames: null, sessionSettings: null,
+  const facts = { database, checkedAt: new Date().toISOString(), version: null, lowerCaseTableNames: null, sessionSettings: null, packetSettings: null,
     databaseVisible: null, objects: [], triggers: [], foreignKeys: [], foreignKeyMetadataVersion: 2, columns: [], indexes: [], indexVisibility: { version: 1, status: 'unknown', kind: null }, errors: [], truncated: [] };
   const read = async (section, sql, params, map, maximum = LIMIT) => {
     checkContext();
@@ -41,9 +42,15 @@ async function collectSelectionTargetFacts(session, database, checkContext = () 
   });
   if (server?.length === 1) Object.assign(facts, server[0]);
   else if (server) facts.errors.push({ section: 'server', code: 'METADATA_RESULT_INVALID' });
-  const settings = await read('sessionSettings', 'SELECT @@SESSION.foreign_key_checks AS foreignKeyChecks, @@SESSION.autocommit AS autocommit, @@SESSION.sql_mode AS sqlMode, @@SESSION.character_set_client AS charsetClient, @@SESSION.character_set_connection AS charsetConnection, @@SESSION.character_set_results AS charsetResults', [], normalizeSessionSettings, 1);
-  if (settings?.length === 1 && !facts.truncated.includes('sessionSettings')) facts.sessionSettings = settings[0];
-  else if (settings) facts.errors.push({ section: 'sessionSettings', code: 'METADATA_RESULT_INVALID' });
+  const settings = await read('sessionSettings', 'SELECT @@SESSION.foreign_key_checks AS foreignKeyChecks, @@SESSION.autocommit AS autocommit, @@SESSION.sql_mode AS sqlMode, @@SESSION.character_set_client AS charsetClient, @@SESSION.character_set_connection AS charsetConnection, @@SESSION.character_set_results AS charsetResults, @@SESSION.max_allowed_packet AS maxAllowedPacket', [], row => {
+    const session = normalizeSessionSettings(row);
+    return session ? { session, packetSettings: normalizePacketSettings(row.maxAllowedPacket) } : null;
+  }, 1);
+  if (settings?.length === 1 && !facts.truncated.includes('sessionSettings')) {
+    facts.sessionSettings = settings[0].session;
+    facts.packetSettings = settings[0].packetSettings;
+    if (!facts.packetSettings) facts.errors.push({ section: 'packetSettings', code: 'METADATA_RESULT_INVALID' });
+  } else if (settings) facts.errors.push({ section: 'sessionSettings', code: 'METADATA_RESULT_INVALID' });
   const schemas = await read('database', 'SELECT SCHEMA_NAME AS name FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ? LIMIT 2', [database], row => validName(row.name) ? { name: row.name } : null);
   if (schemas) facts.databaseVisible = schemas.some(row => facts.lowerCaseTableNames === 1 || facts.lowerCaseTableNames === 2 ? row.name.toLowerCase() === database.toLowerCase() : row.name === database);
   facts.objects = await read('objects', `SELECT TABLE_NAME AS name, TABLE_TYPE AS type FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME LIMIT ${LIMIT + 1}`, [database], row => {
@@ -181,11 +188,11 @@ function buildSelectionTargetPreview({ source, checksum, targetIdentity, facts }
   // The digest names an observation, never an approval token or executable plan.
   // Exclude observation time; include full collected metadata even if the UI is bounded.
   const { checkedAt, ...metadata } = facts;
-  const snapshotId = crypto.createHash('sha256').update(JSON.stringify({ version: 7, checksum, targetIdentity,
+  const snapshotId = crypto.createHash('sha256').update(JSON.stringify({ version: 9, checksum, targetIdentity,
     sourceDatabase: source.sourceDatabase, tables: [...source.selectedTables].sort(),
     includeStructure: source.includeStructure, includeData: source.includeData, metadata })).digest('hex');
-  return { version: 7, canExecute: false, snapshotId, checkedAt, database: facts.database, serverVersion: facts.version,
-    lowerCaseTableNames: facts.lowerCaseTableNames, sessionSettings: projectSessionSettings(facts.sessionSettings), visibility: 'account-visible', status: 'partial',
+  return { version: 9, canExecute: false, snapshotId, checkedAt, database: facts.database, serverVersion: facts.version,
+    lowerCaseTableNames: facts.lowerCaseTableNames, sessionSettings: projectSessionSettings(facts.sessionSettings), packetSettings: projectPacketSettings(facts.packetSettings), visibility: 'account-visible', status: 'partial',
     metadataStatus: { databaseVisible: facts.databaseVisible === true, complete: targetForeignKeyReview.complete && indexMetadataComplete && facts.errors.length === 0 && facts.truncated.length === 0 },
     rows, foreignKeys, targetForeignKeyReview, findings, findingsTruncated };
 }

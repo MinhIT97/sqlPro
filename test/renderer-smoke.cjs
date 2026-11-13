@@ -219,13 +219,58 @@ for (const [index, sql] of [
   "INSERT INTO users VALUES('Việt😀','abc ')"
 ].entries()) textCollector.add(sql, require('../electron/sql-script.cjs').assertStatementScope(sql, 'test', index + 1), index + 1);
 const textInventory = textCollector.finish();
+const omittedCollector = new (require('../electron/restore-selection.cjs').RestoreSelectionInventory)('test');
+for (const [index, sql] of [
+  "CREATE TABLE `users` (`id` INT, `required` INT NOT NULL, `<img src=default>` VARCHAR(30) DEFAULT 'private-default', `optional` INT NULL) ENGINE=InnoDB",
+  'CREATE TABLE `<img src=x>` (`id` INT) ENGINE=InnoDB',
+  'INSERT INTO users (`id`) VALUES(1)'
+].entries()) omittedCollector.add(sql, require('../electron/sql-script.cjs').assertStatementScope(sql, 'test', index + 1), index + 1);
+const omittedInventory = omittedCollector.finish();
+const temporalCollector = new (require('../electron/restore-selection.cjs').RestoreSelectionInventory)('test');
+for (const [index, sql] of [
+  'CREATE TABLE `users` (`d` DATE, `dt` DATETIME(6)) ENGINE=InnoDB',
+  'CREATE TABLE `<img src=x>` (`id` INT) ENGINE=InnoDB',
+  "INSERT INTO users VALUES('1900-02-29','2024-02-29 01:02:03.123456'),('0000-00-00','2024-02-29 24:00:00')"
+].entries()) temporalCollector.add(sql, require('../electron/sql-script.cjs').assertStatementScope(sql, 'test', index + 1), index + 1);
+const temporalInventory = temporalCollector.finish();
+const packetCollector = new (require('../electron/restore-selection.cjs').RestoreSelectionInventory)('test');
+for (const [index, sql] of [
+  'CREATE TABLE `users` (`value` TEXT) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4',
+  'CREATE TABLE `<img src=x>` (`id` INT) ENGINE=InnoDB',
+  `INSERT INTO users VALUES('${'private-packet-'.repeat(100)}')`
+].entries()) packetCollector.add(sql, require('../electron/sql-script.cjs').assertStatementScope(sql, 'test', index + 1), index + 1);
+const packetInventory = packetCollector.finish();
+const timeCollector = new (require('../electron/restore-selection.cjs').RestoreSelectionInventory)('test');
+for (const [index, sql] of [
+  'CREATE TABLE `users` (`duration` TIME(6), `overflow` TIME(6)) ENGINE=InnoDB',
+  'CREATE TABLE `<img src=x>` (`id` INT) ENGINE=InnoDB',
+  "INSERT INTO users VALUES('-123:45:56.123456','839:00:00')"
+].entries()) timeCollector.add(sql, require('../electron/sql-script.cjs').assertStatementScope(sql, 'test', index + 1), index + 1);
+const timeInventory = timeCollector.finish();
+const yearCollector = new (require('../electron/restore-selection.cjs').RestoreSelectionInventory)('test');
+for (const [index, sql] of [
+  'CREATE TABLE `users` (`yr` YEAR) ENGINE=InnoDB', 'CREATE TABLE `<img src=x>` (`id` INT) ENGINE=InnoDB',
+  "INSERT INTO users VALUES(2156),('0'),('99')"
+].entries()) yearCollector.add(sql, require('../electron/sql-script.cjs').assertStatementScope(sql, 'test', index + 1), index + 1);
+const yearInventory = yearCollector.finish();
+const timestampCollector = new (require('../electron/restore-selection.cjs').RestoreSelectionInventory)('test');
+for (const [index, sql] of [
+  'CREATE TABLE `users` (`ts` TIMESTAMP(6) NULL) ENGINE=InnoDB', 'CREATE TABLE `<img src=x>` (`id` INT) ENGINE=InnoDB',
+  "INSERT INTO users VALUES('2024-02-29 01:02:03.123456')"
+].entries()) timestampCollector.add(sql, require('../electron/sql-script.cjs').assertStatementScope(sql, 'test', index + 1), index + 1);
+const timestampInventory = timestampCollector.finish();
+const selectionInventories = new Map([
+  ['timestamp_destination', timestampInventory], ['year_destination', yearInventory],
+  ['time_destination', timeInventory], ['packet_destination', packetInventory], ['temporal_destination', temporalInventory],
+  ['omitted_destination', omittedInventory], ['text_destination', textInventory], ['decimal_destination', decimalInventory]
+]);
 handle('db:preview-backup-selection', payload => ok({
   ...require('../electron/restore-selection.cjs').previewRestoreSelection(selectionInventory, payload), checksum: 'a'.repeat(64), cached: true
 }));
 let holdSelectionTarget = false, pendingSelectionTarget;
 handle('db:preview-backup-selection-target', payload => {
   if (holdSelectionTarget) return new Promise(resolve => { pendingSelectionTarget = { payload, resolve }; });
-  const currentInventory = payload.targetDatabase === 'text_destination' ? textInventory : payload.targetDatabase === 'decimal_destination' ? decimalInventory : selectionInventory;
+  const currentInventory = selectionInventories.get(payload.targetDatabase) || selectionInventory;
   const source = require('../electron/restore-selection.cjs').previewRestoreSelection(currentInventory, payload);
   const checksum = 'a'.repeat(64);
   const facts = { sessionSettings: require('../electron/restore-selection-session-policy.cjs').normalizeSessionSettings({ foreignKeyChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION', charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4' }), indexVisibility: { version: 1, status: 'observed', kind: 'mysql-visible' }, indexes: [{ table: 'users', name: 'PRIMARY', nonUnique: false, ordinal: 1, column: 'id', prefixLength: null, direction: 'A', type: 'BTREE', visibility: 'visible' }, { table: 'users', name: '<img src=index>', nonUnique: true, ordinal: 1, column: 'email', prefixLength: 10, direction: 'A', type: 'BTREE', visibility: 'invisible' }], database: payload.targetDatabase, checkedAt: '2026-11-12T12:00:00Z', version: '8.4', lowerCaseTableNames: 0, databaseVisible: true,
@@ -249,6 +294,35 @@ handle('db:preview-backup-selection-target', payload => {
   }
   if (payload.targetDatabase === 'empty_destination') {
     facts.objects = []; facts.triggers = []; facts.foreignKeys = []; facts.columns = []; facts.indexes = [];
+  }
+  if (payload.targetDatabase === 'omitted_destination') {
+    facts.objects = [{ name: 'users', type: 'table' }]; facts.triggers = []; facts.foreignKeys = []; facts.indexes = [];
+    facts.columns = omittedInventory.tables[0].columnSchema.columns.map(column => ({ ...column, table: 'users' }));
+  }
+  if (payload.targetDatabase === 'temporal_destination') {
+    facts.objects = [{ name: 'users', type: 'table' }]; facts.triggers = []; facts.foreignKeys = []; facts.indexes = [];
+    facts.columns = temporalInventory.tables[0].columnSchema.columns.map(column => ({ ...column, table: 'users',
+      ...(column.name === 'dt' ? require('../electron/restore-selection-columns.cjs').normalizeColumnType('datetime(3)') : {}) }));
+  }
+  facts.packetSettings = { version: 1, maxAllowedPacket: 67108864 };
+  if (payload.targetDatabase === 'packet_destination') {
+    facts.packetSettings.maxAllowedPacket = 1024;
+    facts.objects = [{ name: 'users', type: 'table' }]; facts.triggers = []; facts.foreignKeys = []; facts.indexes = [];
+    facts.columns = packetInventory.tables[0].columnSchema.columns.map(column => ({ ...column, table: 'users' }));
+  }
+  if (payload.targetDatabase === 'time_destination') {
+    facts.objects = [{ name: 'users', type: 'table' }]; facts.triggers = []; facts.foreignKeys = []; facts.indexes = [];
+    facts.columns = timeInventory.tables[0].columnSchema.columns.map(column => ({ ...column, table: 'users',
+      ...require('../electron/restore-selection-columns.cjs').normalizeColumnType('time(3)') }));
+  }
+  if (payload.targetDatabase === 'year_destination') {
+    facts.objects = [{ name: 'users', type: 'table' }]; facts.triggers = []; facts.foreignKeys = []; facts.indexes = [];
+    facts.columns = yearInventory.tables[0].columnSchema.columns.map(column => ({ ...column, table: 'users' }));
+  }
+  if (payload.targetDatabase === 'timestamp_destination') {
+    facts.objects = [{ name: 'users', type: 'table' }]; facts.triggers = []; facts.foreignKeys = []; facts.indexes = [];
+    facts.columns = timestampInventory.tables[0].columnSchema.columns.map(column => ({ ...column, table: 'users',
+      ...require('../electron/restore-selection-columns.cjs').normalizeColumnType('timestamp(3)') }));
   }
   const targetIdentity = 'b'.repeat(64);
   const targetReview = require('../electron/restore-selection-target.cjs').buildSelectionTargetPreview({ source, checksum, targetIdentity, facts });
@@ -1129,6 +1203,119 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
     await evaluate("$('#backupSelectionResult .backup-selection-values').scrollIntoView({block:'start'})");
     await captureReview('backup-selection-text-small');
+    await evaluate("$('#selectionTargetDatabase').value='omitted_destination';$('#selectionTargetDatabase').dispatchEvent(new Event('input',{bubbles:true}));$('#reviewBackupSelectionTarget').click()");
+    await until("Boolean($('#backupSelectionResult .backup-selection-omitted'))");
+    await evaluate("$('#backupSelectionResult .backup-selection-draft').open=true;$('#backupSelectionResult .backup-selection-omitted summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-omitted').open");
+    const omittedText = await evaluate("$('#backupSelectionResult .backup-selection-omitted').textContent");
+    assert.match(omittedText, /Cột bắt buộc bị bỏ khỏi INSERT/);
+    assert.match(omittedText, /Có DEFAULT nhưng chưa kiểm chứng/); assert.match(omittedText, /dự kiến NULL/);
+    assert.equal(omittedText.includes('private-default'), false);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-omitted').querySelectorAll('button,img').length"), 0);
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    await evaluate("$('#backupSelectionResult .backup-selection-omitted').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-omitted-small');
+    win.setContentSize(1344, 835);
+    await until("innerWidth === 1344 && innerHeight === 835");
+    await evaluate("$('#backupSelectionResult .backup-selection-omitted').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-omitted');
+    await evaluate("$('#selectionTargetDatabase').value='temporal_destination';$('#selectionTargetDatabase').dispatchEvent(new Event('input',{bubbles:true}));$('#reviewBackupSelectionTarget').click()");
+    await until("Boolean($('#backupSelectionResult .backup-selection-values'))");
+    await evaluate("$('#backupSelectionResult .backup-selection-draft').open=true;$('#backupSelectionResult .backup-selection-values summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-values').open");
+    const temporalText = await evaluate("$('#backupSelectionResult .backup-selection-values').textContent");
+    assert.match(temporalText, /lịch Gregorian/); assert.match(temporalText, /thành phần ngày bằng 0/);
+    assert.match(temporalText, /phần lẻ giây không thể lưu nguyên vẹn/); assert.match(temporalText, /Chuỗi ngày giờ đúng mẫu: 2/);
+    assert.equal(temporalText.includes('1900-02-29'), false); assert.equal(temporalText.includes('2024-02-29'), false);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-values').querySelectorAll('button,img').length"), 0);
+    await evaluate("$('#backupSelectionResult .backup-selection-values').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-temporal');
+    win.setContentSize(900, 650);
+    await until("innerWidth === 900 && innerHeight === 650");
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    await evaluate("$('#backupSelectionResult .backup-selection-values').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-temporal-small');
+    await evaluate("$('#selectionTargetDatabase').value='packet_destination';$('#selectionTargetDatabase').dispatchEvent(new Event('input',{bubbles:true}));$('#reviewBackupSelectionTarget').click()");
+    await until("Boolean($('#backupSelectionResult .backup-selection-packets'))");
+    await evaluate("$('#backupSelectionResult .backup-selection-draft').open=true;$('#backupSelectionResult .backup-selection-packets summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-packets').open");
+    const packetText = await evaluate("$('#backupSelectionResult .backup-selection-packets').textContent");
+    assert.match(packetText, /vượt max_allowed_packet/); assert.match(packetText, /Chưa kiểm chứng giới hạn client/);
+    assert.equal(packetText.includes('private-packet-'), false);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-packets').querySelectorAll('button,img').length"), 0);
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    await evaluate("$('#backupSelectionResult .backup-selection-packets').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-packets-small');
+    win.setContentSize(1344, 835);
+    await until("innerWidth === 1344 && innerHeight === 835");
+    await evaluate("$('#backupSelectionResult .backup-selection-packets').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-packets');
+    await evaluate("$('#selectionTargetDatabase').value='time_destination';$('#selectionTargetDatabase').dispatchEvent(new Event('input',{bubbles:true}));$('#reviewBackupSelectionTarget').click()");
+    await until("Boolean($('#backupSelectionResult .backup-selection-values'))");
+    await evaluate("$('#backupSelectionResult .backup-selection-draft').open=true;$('#backupSelectionResult .backup-selection-values summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-values').open");
+    const timeText = await evaluate("$('#backupSelectionResult .backup-selection-values').textContent");
+    assert.match(timeText, /TIME nhận thời lượng/); assert.match(timeText, /giờ trên 23 và dấu âm/);
+    assert.match(timeText, /ngoài phạm vi kiểu ngày giờ/); assert.match(timeText, /phần lẻ giây không thể lưu nguyên vẹn/);
+    assert.equal(timeText.includes('123:45:56'), false); assert.equal(timeText.includes('839:00:00'), false);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-values').querySelectorAll('button,img').length"), 0);
+    await evaluate("$('#backupSelectionResult .backup-selection-values').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-time');
+    win.setContentSize(900, 650);
+    await until("innerWidth === 900 && innerHeight === 650");
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    await evaluate("$('#backupSelectionResult .backup-selection-values').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-time-small');
+    await evaluate("$('#selectionTargetDatabase').value='year_destination';$('#selectionTargetDatabase').dispatchEvent(new Event('input',{bubbles:true}));$('#reviewBackupSelectionTarget').click()");
+    await until("Boolean($('#backupSelectionResult .backup-selection-values'))");
+    await evaluate("$('#backupSelectionResult .backup-selection-draft').open=true;$('#backupSelectionResult .backup-selection-values summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-values').open");
+    const yearText = await evaluate("$('#backupSelectionResult .backup-selection-values').textContent");
+    assert.match(yearText, /ngoài phạm vi YEAR/); assert.match(yearText, /YEAR có giá trị rút gọn/); assert.match(yearText, /Literal YEAR được phân loại: 3/);
+    assert.equal(yearText.includes('2156'), false); assert.equal(yearText.includes('2069'), false);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-values').querySelectorAll('button,img').length"), 0);
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    await evaluate("$('#backupSelectionResult .backup-selection-values').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-year-small');
+    win.setContentSize(1344, 835);
+    await until("innerWidth === 1344 && innerHeight === 835");
+    await evaluate("$('#backupSelectionResult .backup-selection-values').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-year');
+    await evaluate("$('#selectionTargetDatabase').value='timestamp_destination';$('#selectionTargetDatabase').dispatchEvent(new Event('input',{bubbles:true}));$('#reviewBackupSelectionTarget').click()");
+    await until("Boolean($('#backupSelectionResult .backup-selection-values'))");
+    await evaluate("$('#backupSelectionResult .backup-selection-draft').open=true;$('#backupSelectionResult .backup-selection-values summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-values').open");
+    const timestampText = await evaluate("$('#backupSelectionResult .backup-selection-values').textContent");
+    assert.match(timestampText, /TIMESTAMP kiểm tra lịch và phần lẻ giây/);
+    assert.match(timestampText, /TIMESTAMP cần kiểm chứng múi giờ nguồn\/đích, DST và phạm vi lưu của server/);
+    assert.match(timestampText, /phần lẻ giây không thể lưu nguyên vẹn/); assert.match(timestampText, /Chuỗi ngày giờ đúng mẫu: 1/);
+    assert.equal(timestampText.includes('2024-02-29'), false);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-values').querySelectorAll('button,img').length"), 0);
+    await evaluate("$('#backupSelectionResult .backup-selection-values').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-timestamp');
+    win.setContentSize(900, 650);
+    await until("innerWidth === 900 && innerHeight === 650");
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    await evaluate("$('#backupSelectionResult .backup-selection-values').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-timestamp-small');
     win.setContentSize(1344, 835);
     await until("innerWidth === 1344 && innerHeight === 835");
     holdSelectionTarget = true;

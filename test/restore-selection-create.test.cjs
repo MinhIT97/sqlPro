@@ -20,7 +20,7 @@ test('CREATE review matches exact quoted names, columns and basic indexes withou
 test('supported primitive types and literal defaults keep a bounded syntax-only report', () => {
   for (const definition of ['`id` int', '`id` tinyint(1) unsigned NOT NULL', '`id` decimal(65,30) DEFAULT -123.456', '`id` numeric(20) NULL',
     '`id` float DEFAULT +1e-10', '`id` double', '`id` bit(64)', '`id` date', '`id` datetime(6)', '`id` timestamp(0) DEFAULT NULL',
-    '`id` time(3)', '`id` year', '`id` char(1)', '`id` varchar(80) DEFAULT TRUE', '`id` binary(16)', '`id` varbinary(16)',
+    '`id` time(3)', '`id` year', '`id` year(4)', '`id` char(1)', '`id` varchar(80) DEFAULT TRUE', '`id` binary(16)', '`id` varbinary(16)',
     '`id` tinyblob', '`id` blob', '`id` mediumblob', '`id` longblob', '`id` tinytext', '`id` text', '`id` mediumtext', '`id` longtext',
     '`id` json DEFAULT NULL', '`id` bool', '`id` boolean', "`id` varchar(60) DEFAULT 'Việt -- /* text */; ) (' COMMENT 'hidden'",
     '`id` int, KEY `ix` (`id` ASC)', '`id` int, UNIQUE INDEX `ix` (`id`)']) {
@@ -108,7 +108,7 @@ test('duplicate columns/indexes, absent key columns and malformed index lists ar
 
 test('type arguments and quotas are checked without converting large literals or exposing them', () => {
   for (const definition of ['`id` int(0)', '`id` int(999)', '`id` decimal(66,2)', '`id` decimal(5,6)', '`id` decimal(65,31)',
-    '`id` varchar(0)', '`id` binary(256)', '`id` datetime(7)', '`id` bit(65)', '`id` int(1e2)', '`id` int, KEY `ix` (`id`(0))',
+    '`id` varchar(0)', '`id` binary(256)', '`id` datetime(7)', '`id` bit(65)', '`id` year(2)', '`id` year(0)', '`id` year(5)', '`id` year(4,2)', '`id` year(4e0)', '`id` int(1e2)', '`id` int, KEY `ix` (`id`(0))',
     Array.from({ length: 257 }, (_, i) => `\`c${i}\` int`).join(','), '`id` int,' + Array.from({ length: 129 }, (_, i) => `KEY \`i${i}\` (\`id\`)`).join(',')]) {
     assert.equal(reviewBasicCreate(create(definition)).status, 'unsupported', definition.slice(0, 100));
   }

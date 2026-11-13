@@ -36,7 +36,7 @@ test('session policy integration: read-only proposal and isolated strict/FK/zero
     const initialFacts = await read(), initial = review(initialFacts), draft = plan(initial);
 
     await t.test('fresh settings bind preview without executing native SET or touching editor transaction', async () => {
-      assert.deepEqual(initialFacts.errors, []); assert.equal(initial.version, 7); assert.equal(draft.version, 16);
+      assert.deepEqual(initialFacts.errors, []); assert.equal(initial.version, 9); assert.equal(draft.version, 22);
       assert.deepEqual(draft.sessionPolicyReview.findings, []); assert.equal(draft.canExecute, false);
       assert.equal(draft.sessionPolicyReview.foreignKeys, 'keep-enabled');
       assert.ok(draft.sessionPolicyReview.proposedMode.flags.includes('NO_AUTO_VALUE_ON_ZERO'));

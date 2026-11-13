@@ -7,6 +7,8 @@ const { integerRangeMask } = require('./restore-selection-integer.cjs');
 const { fixedPointShape, emptyFixedPoint, addFixedPoint } = require('./restore-selection-decimal.cjs');
 const { reviewNumericString, emptyNumericStrings, addNumericString } = require('./restore-selection-numeric-strings.cjs');
 const { reviewTextLiteral, emptyText, addText } = require('./restore-selection-text.cjs');
+const { reviewTemporalString, emptyTemporal, addTemporal } = require('./restore-selection-temporal.cjs');
+const { reviewYearDigits, emptyYear, addYear } = require('./restore-selection-year.cjs');
 
 class UnsupportedInsert extends Error {}
 
@@ -36,6 +38,8 @@ function reviewLiteralInsert(sql, { collectValues = false } = {}) {
             if (alphabet === 'hex' && count % 2 || alphabet === 'bit' && !count) reject('INSERT_LITERAL_UNSUPPORTED');
             return keepName ? { kind: 'identifier', value: name } : { kind: 'literal',
               ...(collectValues && !alphabet ? { text: reviewTextLiteral(sql, start, index - 1) } : {}),
+              ...(collectValues && !alphabet && !doubledQuote && count <= 26 ? { temporal: reviewTemporalString(sql.slice(start, index - 1)) } : {}),
+              ...(collectValues && !alphabet && !doubledQuote && count <= 4 ? { year: reviewYearDigits(sql.slice(start, index - 1), true) } : {}),
               ...(collectValues && !alphabet && !doubledQuote && count <= 256 ? { numericString: reviewNumericString(sql.slice(start, index - 1)) } : {}) };
           }
         } else {
@@ -106,10 +110,11 @@ function reviewLiteralInsert(sql, { collectValues = false } = {}) {
       token = next(); let count = 0;
       for (;;) {
         const negative = isSymbol('-');
+        const signed = negative || isSymbol('+');
         if (isSymbol('+') || isSymbol('-')) { token = next(); if (token.kind !== 'number') reject('INSERT_VALUE_EXPRESSION'); }
         if (token.kind !== 'number' && token.kind !== 'literal' && !['NULL', 'TRUE', 'FALSE'].some(isWord)) reject('INSERT_VALUE_EXPRESSION');
         if (collectValues && count < 256) {
-          const field = valueFields[count] || { nulls: 0, integers: 0, other: 0, fitMask: 1023, fixedPoint: emptyFixedPoint(), numericStrings: emptyNumericStrings(), text: emptyText() };
+          const field = valueFields[count] || { nulls: 0, integers: 0, other: 0, fitMask: 1023, fixedPoint: emptyFixedPoint(), numericStrings: emptyNumericStrings(), text: emptyText(), temporal: emptyTemporal(), year: emptyYear() };
           if (isWord('NULL')) field.nulls++;
           else if (isWord('TRUE') || isWord('FALSE') || token.kind === 'number' && /^\d+$/.test(token.numericText)) {
             field.integers++;
@@ -119,6 +124,9 @@ function reviewLiteralInsert(sql, { collectValues = false } = {}) {
           else if (isWord('TRUE') || isWord('FALSE')) addFixedPoint(field.fixedPoint, fixedPointShape(isWord('TRUE') ? '1' : '0'));
           addNumericString(field.numericStrings, token.numericString);
           addText(field.text, token.text);
+          addTemporal(field.temporal, token.temporal);
+          if (token.kind === 'number' && !signed) addYear(field.year, reviewYearDigits(token.numericText));
+          else if (token.year) addYear(field.year, token.year, true);
           valueFields[count] = field;
         }
         count++; valueCount++;
@@ -139,7 +147,7 @@ function reviewLiteralInsert(sql, { collectValues = false } = {}) {
     if (token.kind !== 'end') reject('INSERT_TRAILING_SQL');
     return { version: 1, status: 'matched', code: 'LITERAL_INSERT_MATCHED', table, schema, rows, valuesPerRow,
       columnMode: columnCount === null ? 'positional' : 'explicit',
-      ...(collectValues ? { valueReview: { version: 4, rows, columns: columnCount === null ? null : columnNames, fields: valueFields } } : {}) };
+      ...(collectValues ? { valueReview: { version: 7, rows, columns: columnCount === null ? null : columnNames, fields: valueFields } } : {}) };
   } catch (error) {
     if (!(error instanceof UnsupportedInsert)) throw error;
     return { version: 1, status: 'unsupported', code: error.message };

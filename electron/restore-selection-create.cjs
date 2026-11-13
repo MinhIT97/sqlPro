@@ -99,7 +99,10 @@ function reviewBasicCreate(sql) {
           if (symbol(',')) { token = next(); boundedInteger(0, Math.min(30, precision)); }
           consume(')');
         }
-      } else if (['FLOAT', 'DOUBLE', 'DATE', 'YEAR', 'JSON', 'BOOL', 'BOOLEAN', 'TINYBLOB', 'BLOB', 'MEDIUMBLOB', 'LONGBLOB', 'TINYTEXT', 'TEXT', 'MEDIUMTEXT', 'LONGTEXT'].includes(type)) {
+      } else if (type === 'YEAR') {
+        // MariaDB native SHOW CREATE emits YEAR(4); short-year semantics stay unsupported.
+        if (symbol('(')) oneArgument(4, 4);
+      } else if (['FLOAT', 'DOUBLE', 'DATE', 'JSON', 'BOOL', 'BOOLEAN', 'TINYBLOB', 'BLOB', 'MEDIUMBLOB', 'LONGBLOB', 'TINYTEXT', 'TEXT', 'MEDIUMTEXT', 'LONGTEXT'].includes(type)) {
         // Parameters for these types are outside this grammar.
       } else if (['DATETIME', 'TIMESTAMP', 'TIME'].includes(type)) {
         if (symbol('(')) oneArgument(0, 6);

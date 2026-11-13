@@ -44,13 +44,13 @@ test('DECIMAL and NUMERIC defaults, common precision/scale limits and unsigned f
 
 test('value evidence projects bounded fixed-point aggregates and rejects inconsistent/forged stats; v1 remains explicit', () => {
   const syntax = reviewLiteralInsert("INSERT INTO items VALUES(123.4500),(-0.001),(TRUE),(NULL),(1e2),('private-value')", { collectValues: true });
-  const evidence = syntax.valueReview; assert.equal(evidence.version, 4);
+  const evidence = syntax.valueReview; assert.equal(evidence.version, 7);
   assert.deepEqual(evidence.fields[0].fixedPoint, { count: 3, integerDigits: 3, scale: 3, literalDigits: 7, negativeCount: 1 });
   assert.deepEqual(projectValueEvidence({ ...evidence, rawSql: 'private-sql' }, syntax), evidence);
   assert.equal(JSON.stringify(evidence).includes('private-'), false); assert.equal(JSON.stringify(evidence).includes('123.45'), false);
   const field = evidence.fields[0];
   for (const changes of [{ count: 0 }, { count: 99 }, { integerDigits: 67 }, { scale: 32 }, { negativeCount: 4 }, { literalDigits: 0 }]) assert.equal(projectFixedPoint({ ...field.fixedPoint, ...changes }, field), null);
-  const legacy = structuredClone(evidence); legacy.version = 1; delete legacy.fields[0].fixedPoint; delete legacy.fields[0].numericStrings; delete legacy.fields[0].text;
+  const legacy = structuredClone(evidence); legacy.version = 1; delete legacy.fields[0].fixedPoint; delete legacy.fields[0].numericStrings; delete legacy.fields[0].text; delete legacy.fields[0].temporal; delete legacy.fields[0].year;
   assert.deepEqual(projectValueEvidence(legacy, syntax), legacy);
   const invalid = structuredClone(evidence); delete invalid.fields[0].fixedPoint;
   assert.equal(projectValueEvidence(invalid, syntax), null);
@@ -62,7 +62,7 @@ test('value evidence projects bounded fixed-point aggregates and rejects inconsi
 test('decimal endpoints and exact zero fit, excess integer digits and negative unsigned remain issues', () => {
   const values = ['999.99', '-999.99', '1000', '-1000', '.01', '-0.00', '1.2300', '0'];
   const result = fixture('DECIMAL(5,2)', values).build();
-  assert.equal(result.version, 16); assert.equal(result.valueReview.version, 4); assert.equal(result.canExecute, false);
+  assert.equal(result.version, 22); assert.equal(result.valueReview.version, 8); assert.equal(result.canExecute, false);
   assert.deepEqual(result.valueReview.rows.map(row => row.status), ['basic-checked', 'basic-checked', 'issues', 'issues', 'basic-checked', 'basic-checked', 'basic-checked', 'basic-checked']);
   assert.ok(result.valueReview.rows[2].fields[0].target.findings.includes('VALUE_DECIMAL_OUT_OF_RANGE'));
   const unsigned = fixture('DECIMAL(5,2)', ['-0.00', '-0.01'], 'decimal(5,2) unsigned').build();

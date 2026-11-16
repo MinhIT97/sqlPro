@@ -262,14 +262,9 @@
       }
       return Object.freeze(columns);
     };
-    const outputCache = new WeakMap();
-    const selectColumns = group => {
-      if (outputCache.has(group)) return outputCache.get(group);
-      outputCache.set(group, null);
-      if (!group.query || !group.headerKnown || sql[group.end] !== ')') return null;
-      const tokens = group.tokens, head = command(tokens);
-      if (head < 0 || !word(tokens[head], 'SELECT')) return null;
-      if (tokens.some((token, index) => ['UNION', 'INTERSECT', 'EXCEPT', 'INTO', 'PROCEDURE', 'QUALIFY'].some(value => keyword(tokens, index, value)))) return null;
+    const readSelectColumns = (tokens, blockEnd) => {
+      const head = 0;
+      if (!word(tokens[head], 'SELECT')) return null;
       let begin = head + 1, end = tokens.length;
       if (word(tokens[begin], 'ALL') || word(tokens[begin], 'DISTINCT')) begin++;
       if (['DISTINCTROW', 'HIGH_PRIORITY', 'STRAIGHT_JOIN', 'SQL_SMALL_RESULT', 'SQL_BIG_RESULT', 'SQL_BUFFER_RESULT', 'SQL_NO_CACHE', 'SQL_CALC_FOUND_ROWS'].some(value => word(tokens[begin], value))) return null;
@@ -309,7 +304,7 @@
       let itemStart = tokens[begin - 1]?.start + tokens[begin - 1]?.value.length;
       for (let index = begin; index <= end; index++) {
         if (index !== end && !(tokens[index].type === 'symbol' && tokens[index].value === ',')) continue;
-        const itemEnd = tokens[index]?.start ?? group.end;
+        const itemEnd = tokens[index]?.start ?? blockEnd;
         const item = tokens.slice(begin, index);
         const aliasIndex = item.findIndex(token => word(token, 'AS'));
         let column;
@@ -331,9 +326,29 @@
         begin = index + 1; itemStart = itemEnd + 1;
       }
       if (!columns.length) return null;
-      const result = Object.freeze(columns);
-      outputCache.set(group, result);
-      return result;
+      return Object.freeze(columns);
+    };
+    const outputCache = new WeakMap();
+    const selectColumns = group => {
+      if (outputCache.has(group)) return outputCache.get(group);
+      outputCache.set(group, null);
+      if (!group.query || !group.headerKnown || sql[group.end] !== ')') return null;
+      const tokens = group.tokens, head = command(tokens);
+      if (head < 0 || !word(tokens[head], 'SELECT')) return null;
+      if (tokens.some((token, index) => ['INTO', 'PROCEDURE', 'QUALIFY'].some(value => keyword(tokens, index, value)))) return null;
+      const separators = tokens.map((token, index) => index >= head
+        && ['UNION', 'INTERSECT', 'EXCEPT'].some(value => keyword(tokens, index, value)) ? index : -1).filter(index => index >= 0);
+      if (separators.length > 15) return null;
+      let begin = head, first = null;
+      for (const end of [...separators, tokens.length]) {
+        const columns = readSelectColumns(tokens.slice(begin, end), tokens[end]?.start ?? group.end);
+        if (!columns || first && columns.length !== first.length) return null;
+        if (!first) first = columns;
+        begin = end + 1;
+        if (word(tokens[begin], 'ALL') || word(tokens[begin], 'DISTINCT')) begin++;
+      }
+      outputCache.set(group, first);
+      return first;
     };
     for (const group of groups) {
       group.query = group === root || word(group.tokens[0], 'SELECT') || word(group.tokens[0], 'WITH');

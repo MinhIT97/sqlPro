@@ -37,7 +37,7 @@ test('unknown, masked, duplicate, unsupported or oversized projections stay enti
     'NULL', 'CURRENT_TIMESTAMP', 'id,', ',id', 'id,,total', 'id,ID FROM t', 'a.id,b.id FROM a JOIN b',
     "id 'literal' FROM t", "'literal' id FROM t", "id AS 'literal' other FROM t", "id AS other 'literal' FROM t",
     'AS label FROM t', 'id AS x AS y FROM t', '* AS guessed FROM t', 't.* AS guessed FROM t',
-    'SQL_CALC_FOUND_ROWS id FROM t', 'id FROM t UNION SELECT other FROM u',
+    'SQL_CALC_FOUND_ROWS id FROM t',
     'id INTO OUTFILE \'private\' FROM t', 'id FROM t QUALIFY id=1', '`' + 'x'.repeat(65) + '` FROM t',
     Array.from({ length: 257 }, (_, index) => `c${index}`).join(',')
   ]) {

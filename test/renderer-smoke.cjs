@@ -746,6 +746,42 @@ app.whenReady().then(async () => {
     await evaluate("app.tables=implicitSavedTables;delete window.implicitSavedTables;invalidateSqlAutocomplete();app.query.sql='SELECT 1';renderQueryView()");
     win.setContentSize(1344, 835); autocompleteColumns = null;
   });
+  await check('set output suggestions use first-arm names with no metadata reads and preserve keyboard/undo', async () => {
+    autocompleteColumns = new Map([['recent', [{ name: 'wrong_physical_key', type: 'int' }]], ['d', [{ name: 'wrong_derived_key', type: 'int' }]]]);
+    await evaluate("invalidateSqlAutocomplete();window.setOutputSavedTables=app.tables;app.tables=[...app.tables,{name:'recent',type:'table'},{name:'d',type:'table'}]");
+    const columns = calls.filter(call => call.name === 'db:columns').length;
+    const queries = calls.filter(call => call.name === 'db:query').length;
+    const set = async marked => {
+      const caret = marked.indexOf('|'), sql = marked.replace('|', '');
+      await evaluate(`app.query.sql=${JSON.stringify(sql)};renderQueryView();clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();$('#sql').setSelectionRange(${caret},${caret});refreshSqlSuggestions($('#sql'),true)`);
+    };
+    for (const operator of ['UNION ALL', 'INTERSECT', 'EXCEPT']) {
+      await set(`WITH recent AS (SELECT id AS item_id FROM invoices ${operator} SELECT id AS ignored FROM archive) SELECT * FROM recent r WHERE r.|`);
+      assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['r.item_id']);
+    }
+    for (const body of ['SELECT id FROM invoices UNION SELECT * FROM archive', 'SELECT id FROM invoices UNION SELECT id,name FROM archive']) {
+      await set(`WITH recent AS (${body}) SELECT * FROM recent r WHERE r.|`);
+      assert.equal(await evaluate('sqlAutocomplete.items.length'), 0);
+    }
+    const marked = 'SELECT * FROM (SELECT i.id AS `mã` FROM invoices i\nUNION ALL SELECT a.id AS ignored FROM archive a) d\nWHERE d.`m|ã cũ`>0';
+    win.setContentSize(900, 650); win.webContents.focus();
+    await until('innerWidth===900 && innerHeight===650');
+    await set(marked);
+    await evaluate("$('#sql').style.height='180px';$('#toast').style.display='none'");
+    await captureReview('autocomplete-set-output-small', () => evaluate("clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();refreshSqlSuggestions($('#sql'),true)"));
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['d.mã']);
+    assert.equal(await evaluate("sqlAutocomplete.items[0].detail==='Derived · d · tên từ SELECT'"), true);
+    assert.equal(await evaluate("$('#sqlSuggestions').getBoundingClientRect().bottom<=innerHeight"), true);
+    for (const type of ['keyDown', 'char', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return' });
+    await until(`$('#sql').value===${JSON.stringify(marked.replace('m|ã cũ', 'mã'))}`);
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Z', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Z', modifiers: ['control'] });
+    await until(`$('#sql').value===${JSON.stringify(marked.replace('|', ''))} && $('#sql').selectionStart===${marked.indexOf('|')}`);
+    assert.equal(calls.filter(call => call.name === 'db:columns').length, columns);
+    assert.equal(calls.filter(call => call.name === 'db:query').length, queries);
+    await evaluate("app.tables=setOutputSavedTables;delete window.setOutputSavedTables;invalidateSqlAutocomplete();app.query.sql='SELECT 1';renderQueryView()");
+    win.setContentSize(1344, 835); autocompleteColumns = null;
+  });
   await check('autocomplete replaces complete tokens at the caret, supports undo and ignores stale suggestions', async () => {
     autocompleteColumns = new Map([['users', [{ name: 'name', type: 'text' }]]]);
     await evaluate('invalidateSqlAutocomplete()');

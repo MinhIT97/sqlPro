@@ -92,7 +92,7 @@ test('long text profiles stay bounded, reports freeze/bind observations and know
   const larger = reviewLiteralInsert(`INSERT INTO items VALUES('${body + body}')`, { collectValues: true });
   assert.ok(Math.abs(JSON.stringify(larger).length - JSON.stringify(syntax).length) < 20);
   const input = fixture('VARCHAR(10)', ["'😀'"]), initial = input.build();
-  assert.equal(initial.version, 23); assert.equal(initial.valueReview.version, 8); assert.equal(initial.canExecute, false);
+  assert.equal(initial.version, 29); assert.equal(initial.valueReview.version, 8); assert.equal(initial.canExecute, false);
   assert.equal(Object.isFrozen(initial.valueReview.rows[0].fields[0]), true);
   input.targetReview.rows[0].valueColumns.columns[0].charset = 'ascii';
   const changed = input.build(); assert.notEqual(initial.planId, changed.planId);

@@ -8,7 +8,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const root = path.join(__dirname, '..');
+const root = process.env.SQLPRO_RENDERER_APP_ROOT ? path.resolve(process.env.SQLPRO_RENDERER_APP_ROOT) : path.join(__dirname, '..');
 app.setPath('userData', fs.mkdtempSync(path.join(os.tmpdir(), 'sqlpro-smoke-')));
 app.commandLine.appendSwitch('disable-gpu');
 const calls = [];
@@ -260,20 +260,20 @@ for (const [index, sql] of [
 ].entries()) timestampCollector.add(sql, require('../electron/sql-script.cjs').assertStatementScope(sql, 'test', index + 1), index + 1);
 const timestampInventory = timestampCollector.finish();
 const selectionInventories = new Map([
-  ['checks_destination', timestampInventory], ['timestamp_destination', timestampInventory], ['year_destination', yearInventory],
+  ['unique_destination', timestampInventory], ['checks_destination', timestampInventory], ['timestamp_destination', timestampInventory], ['year_destination', yearInventory],
   ['time_destination', timeInventory], ['packet_destination', packetInventory], ['temporal_destination', temporalInventory],
   ['omitted_destination', omittedInventory], ['text_destination', textInventory], ['decimal_destination', decimalInventory]
 ]);
 handle('db:preview-backup-selection', payload => ok({
   ...require('../electron/restore-selection.cjs').previewRestoreSelection(selectionInventory, payload), checksum: 'a'.repeat(64), cached: true
 }));
-let holdSelectionTarget = false, pendingSelectionTarget;
+let holdSelectionTarget = false, pendingSelectionTarget, selectionMetadataChanged = false;
 handle('db:preview-backup-selection-target', payload => {
   if (holdSelectionTarget) return new Promise(resolve => { pendingSelectionTarget = { payload, resolve }; });
   const currentInventory = selectionInventories.get(payload.targetDatabase) || selectionInventory;
   const source = require('../electron/restore-selection.cjs').previewRestoreSelection(currentInventory, payload);
   const checksum = 'a'.repeat(64);
-  const facts = { sessionSettings: require('../electron/restore-selection-session-policy.cjs').normalizeSessionSettings({ foreignKeyChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION', charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4' }), indexVisibility: { version: 1, status: 'observed', kind: 'mysql-visible' }, indexes: [{ table: 'users', name: 'PRIMARY', nonUnique: false, ordinal: 1, column: 'id', prefixLength: null, direction: 'A', type: 'BTREE', visibility: 'visible' }, { table: 'users', name: '<img src=index>', nonUnique: true, ordinal: 1, column: 'email', prefixLength: 10, direction: 'A', type: 'BTREE', visibility: 'invisible' }], database: payload.targetDatabase, checkedAt: '2026-11-12T12:00:00Z', version: '8.4', lowerCaseTableNames: 0, databaseVisible: true,
+  const facts = { sessionSettings: require('../electron/restore-selection-session-policy.cjs').normalizeSessionSettings({ foreignKeyChecks: 1, uniqueChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION', charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4' }), indexVisibility: { version: 1, status: 'observed', kind: 'mysql-visible' }, indexes: [{ table: 'users', name: 'PRIMARY', nonUnique: false, ordinal: 1, column: 'id', prefixLength: null, direction: 'A', type: 'BTREE', visibility: 'visible' }, { table: 'users', name: '<img src=index>', nonUnique: true, ordinal: 1, column: 'email', prefixLength: 10, direction: 'A', type: 'BTREE', visibility: 'invisible' }], database: payload.targetDatabase, checkedAt: '2026-11-12T12:00:00Z', version: '8.4', lowerCaseTableNames: 0, databaseVisible: true,
     objects: [{ name: 'users', type: 'table' }, { name: '<img src=x>', type: 'view' }], triggers: [{ name: '<img src=trigger>', table: 'users', event: 'INSERT' }],
     foreignKeyMetadataVersion: 2, foreignKeys: [{ ordinal: 1, onDelete: 'SET NULL', onUpdate: 'CASCADE', match: 'NONE', name: 'fk_outside', tableSchema: 'other', table: 'external_child', column: 'user_id', referencedSchema: payload.targetDatabase, referencedTable: 'users', referencedColumn: 'id' },
       { ordinal: 2, onDelete: 'SET NULL', onUpdate: 'CASCADE', match: 'NONE', name: 'fk_outside', tableSchema: 'other', table: 'external_child', column: 'owner_email', referencedSchema: payload.targetDatabase, referencedTable: 'users', referencedColumn: 'email' },
@@ -304,6 +304,8 @@ handle('db:preview-backup-selection-target', payload => {
     facts.columns = temporalInventory.tables[0].columnSchema.columns.map(column => ({ ...column, table: 'users',
       ...(column.name === 'dt' ? require('../electron/restore-selection-columns.cjs').normalizeColumnType('datetime(3)') : {}) }));
   }
+  if (payload.targetDatabase === 'unique_destination') facts.sessionSettings.uniqueChecks = false;
+  facts.checkSessionSettings = payload.targetDatabase === 'checks_destination' ? { version: 1, status: 'observed', enabled: false, reason: 'TARGET_CHECK_SESSION_OBSERVED' } : { version: 1, status: 'unknown', enabled: null, reason: 'TARGET_CHECK_SESSION_VARIABLE_UNAVAILABLE' };
   facts.checks = []; facts.checkCapabilities = { version: 1, status: 'observed', tableColumn: false, enforcedColumn: true };
   if (payload.targetDatabase === 'checks_destination') facts.checks = [{ constraintSchema: payload.targetDatabase, tableSchema: payload.targetDatabase, table: 'users', name: '<img src=check>', clauseDigest: 'c'.repeat(64), declaredEnforcement: 'yes' }];
   facts.packetSettings = { version: 1, maxAllowedPacket: 67108864 };
@@ -327,6 +329,13 @@ handle('db:preview-backup-selection-target', payload => {
       ...require('../electron/restore-selection-columns.cjs').normalizeColumnType('timestamp(3)') }));
   }
   const targetIdentity = 'b'.repeat(64);
+  facts.triggerMetadataVersion = 1;
+  facts.columns = facts.columns.map(column => ({ ...column, expressionProfile: { version: 1,
+    defaultStatus: column.hasDefault ? 'observed' : 'null-metadata', defaultDigest: column.hasDefault ? '7'.repeat(64) : null,
+    generatedStatus: column.generated ? 'observed' : 'not-reported', generatedDigest: column.generated ? '8'.repeat(64) : null } }));
+  facts.triggers = facts.triggers.map(trigger => ({ ...trigger, triggerSchema: payload.targetDatabase, tableSchema: payload.targetDatabase,
+    timing: 'AFTER', orientation: 'ROW', actionOrder: 1, actionDigest: (selectionMetadataChanged ? 'f' : 'd').repeat(64), contextDigest: 'e'.repeat(64) }));
+  facts.objects = facts.objects.map(object => ({ ...object, engine: object.type === 'table' ? payload.targetDatabase === 'checks_destination' ? 'MyISAM' : 'InnoDB' : null }));
   const targetReview = require('../electron/restore-selection-target.cjs').buildSelectionTargetPreview({ source, checksum, targetIdentity, facts });
   const draftPlan = require('../electron/restore-selection-plan.cjs').buildSelectionDraft({ inventory: currentInventory, source, checksum, targetIdentity, targetReview, conflictPolicy: payload.conflictPolicy });
   return ok({ ...source, checksum, cached: false, targetReview, draftPlan });
@@ -1328,6 +1337,7 @@ app.whenReady().then(async () => {
     const checksText = await evaluate("$('#backupSelectionResult .backup-selection-checks').textContent");
     assert.match(checksText, /CHECK ở đích/); assert.match(checksText, /1 định nghĩa quan sát được/);
     assert.match(checksText, /ENFORCED chỉ là metadata/); assert.match(checksText, /chưa kiểm chứng dữ liệu phục hồi/);
+    assert.match(checksText, /check_constraint_checks của phiên kiểm tra: tắt/); assert.match(checksText, /Phiên đích đang tắt check_constraint_checks/);
     assert.equal(checksText.includes('c'.repeat(64)), false);
     assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-checks').querySelectorAll('button,img').length"), 0);
     assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
@@ -1337,6 +1347,105 @@ app.whenReady().then(async () => {
     await until("innerWidth === 1344 && innerHeight === 835");
     await evaluate("$('#backupSelectionResult .backup-selection-checks').scrollIntoView({block:'start'})");
     await captureReview('backup-selection-checks');
+    await evaluate("$('#backupSelectionResult .backup-selection-engines summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-engines').open");
+    const enginesText = await evaluate("$('#backupSelectionResult .backup-selection-engines').textContent");
+    assert.match(enginesText, /MyISAM/); assert.match(enginesText, /Engine ngoài phạm vi/); assert.match(enginesText, /InnoDB chưa bảo đảm rollback toàn bộ/);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-engines').querySelectorAll('button,img').length"), 0);
+    await evaluate("$('#backupSelectionResult .backup-selection-engines').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-engines');
+    win.setContentSize(900, 650);
+    await until("innerWidth === 900 && innerHeight === 650");
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    await evaluate("$('#backupSelectionResult .backup-selection-engines').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-engines-small');
+    win.setContentSize(1344, 835);
+    await until("innerWidth === 1344 && innerHeight === 835");
+    await evaluate("$('#backupSelectionResult .backup-selection-triggers summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-triggers').open");
+    const triggerText = await evaluate("$('#backupSelectionResult .backup-selection-triggers').textContent");
+    assert.match(triggerText, /Trigger ở đích/); assert.match(triggerText, /AFTER INSERT/); assert.match(triggerText, /Chưa phân tích nội dung và tác động gián tiếp/);
+    assert.match(triggerText, /1 định nghĩa quan sát được/); assert.equal(triggerText.includes('d'.repeat(64)), false); assert.equal(triggerText.includes('e'.repeat(64)), false);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-triggers').querySelectorAll('button,img').length"), 0);
+    await evaluate("$('#backupSelectionResult .backup-selection-triggers').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-triggers');
+    win.setContentSize(900, 650);
+    await until("innerWidth === 900 && innerHeight === 650");
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    await evaluate("$('#backupSelectionResult .backup-selection-triggers').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-triggers-small');
+    win.setContentSize(1344, 835);
+    await until("innerWidth === 1344 && innerHeight === 835");
+    await evaluate("$('#backupSelectionResult .backup-selection-expressions summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-expressions').open");
+    const expressionText = await evaluate("$('#backupSelectionResult .backup-selection-expressions').textContent");
+    assert.match(expressionText, /DEFAULT\/generated ở đích/); assert.match(expressionText, /chưa đối chiếu DEFAULT\/generated nguồn và đích/);
+    assert.match(expressionText, /Chưa kiểm chứng giá trị và ngữ nghĩa DEFAULT/); assert.match(expressionText, /Chưa kiểm chứng giá trị do generated tạo ra/);
+    assert.equal(expressionText.includes('7'.repeat(64)), false); assert.equal(expressionText.includes('8'.repeat(64)), false);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-expressions').querySelectorAll('button,img').length"), 0);
+    await evaluate("$('#backupSelectionResult .backup-selection-expressions').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-expressions');
+    win.setContentSize(900, 650);
+    await until("innerWidth === 900 && innerHeight === 650");
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    await evaluate("$('#backupSelectionResult .backup-selection-expressions').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-expressions-small');
+    win.setContentSize(1344, 835);
+    await until("innerWidth === 1344 && innerHeight === 835");
+    await evaluate("$('#selectionTargetDatabase').value='unique_destination';$('#selectionTargetDatabase').dispatchEvent(new Event('input',{bubbles:true}));$('#reviewBackupSelectionTarget').click()");
+    await until("Boolean($('#backupSelectionResult .backup-selection-session-policy'))");
+    await evaluate("$('#backupSelectionResult .backup-selection-draft').open=true;$('#backupSelectionResult .backup-selection-session-policy summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-session-policy').open");
+    const uniqueText = await evaluate("$('#backupSelectionResult .backup-selection-session-policy').textContent");
+    assert.match(uniqueText, /unique_checks tắt/); assert.match(uniqueText, /đang tắt unique_checks/);
+    assert.match(uniqueText, /Bật unique_checks không chứng minh dữ liệu không trùng khóa/);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-session-policy').querySelectorAll('button,img').length"), 0);
+    await evaluate("$('#backupSelectionResult .backup-selection-session-policy').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-unique-checks');
+    win.setContentSize(900, 650);
+    await until("innerWidth === 900 && innerHeight === 650");
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    await evaluate("$('#backupSelectionResult .backup-selection-session-policy').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-unique-checks-small');
+    win.setContentSize(1344, 835);
+    await until("innerWidth === 1344 && innerHeight === 835");
+    assert.match(await evaluate("$('#backupSelectionResult .backup-selection-drift').textContent"), /Đã ghi nhận mốc so sánh/);
+    await evaluate("$('#reviewBackupSelectionTarget').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#backupSelectionResult .backup-selection-drift')?.textContent.includes('Chưa thấy thay đổi trong tệp và metadata')");
+    // unique_destination has no visible triggers, so use checks_destination to
+    // observe an actual same-name body digest change across fresh fixtures.
+    await evaluate("$('#selectionTargetDatabase').value='checks_destination';$('#selectionTargetDatabase').dispatchEvent(new Event('input',{bubbles:true}));$('#reviewBackupSelectionTarget').click()");
+    await until("$('#backupSelectionResult .backup-selection-drift')?.textContent.includes('Đã ghi nhận mốc so sánh')");
+    selectionMetadataChanged = true;
+    await evaluate("$('#reviewBackupSelectionTarget').click()");
+    await until("$('#backupSelectionResult .backup-selection-drift')?.textContent.includes('Metadata/ngữ cảnh đích đã quan sát: đã thay đổi')");
+    const driftText = await evaluate("$('#backupSelectionResult .backup-selection-drift').textContent");
+    assert.match(driftText, /Tệp backup: chưa thấy thay đổi/); assert.match(driftText, /Bản nháp kế hoạch: đã thay đổi/);
+    assert.match(driftText, /không theo dõi dữ liệu dòng/);
+    assert.equal(await evaluate("$('#backupSelectionResult .backup-selection-drift').querySelectorAll('button,img').length"), 0);
+    await evaluate("$('#backupSelectionResult .backup-selection-drift').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-drift');
+    win.setContentSize(900, 650);
+    await until("innerWidth === 900 && innerHeight === 650");
+    assert.equal(await evaluate("$('#backupSelectionEditor').scrollWidth <= $('#backupSelectionEditor').clientWidth"), true);
+    await evaluate("$('#backupSelectionResult .backup-selection-drift').scrollIntoView({block:'start'})");
+    await captureReview('backup-selection-drift-small');
+    selectionMetadataChanged = false;
     holdSelectionTarget = true;
     await evaluate("$('#reviewBackupSelectionTarget').click()");
     await untilNode(() => Boolean(pendingSelectionTarget));

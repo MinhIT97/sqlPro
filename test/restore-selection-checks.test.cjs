@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { reviewTargetChecks } = require('../electron/restore-selection-checks.cjs');
+const { reviewTargetChecks, collectCheckSessionSettings, projectCheckSessionSettings } = require('../electron/restore-selection-checks.cjs');
 const { collectSelectionTargetFacts, buildSelectionTargetPreview } = require('../electron/restore-selection-target.cjs');
 const { RestoreSelectionInventory, previewRestoreSelection } = require('../electron/restore-selection.cjs');
 const { assertStatementScope } = require('../electron/sql-script.cjs');
@@ -107,9 +107,54 @@ test('snapshot and plan bind CHECK metadata drift without returning expressions 
     const target = buildSelectionTargetPreview({ source, facts: input, checksum: 'a'.repeat(64), targetIdentity: 'b'.repeat(64) });
     return { target, plan: buildSelectionDraft({ inventory, source, targetReview: target, checksum: 'a'.repeat(64), targetIdentity: 'b'.repeat(64) }) };
   };
-  const first = build(); assert.equal(first.target.version, 10); assert.equal(first.plan.version, 23); assert.equal(first.plan.canExecute, false);
+  const first = build(); assert.equal(first.target.version, 16); assert.equal(first.plan.version, 29); assert.equal(first.plan.canExecute, false);
   assert.ok(first.plan.blockers.some(item => item.detail === 'TARGET_CHECKS_PRESENT'));
   input.checks[0].clauseDigest = 'd'.repeat(64);
   const second = build(); assert.notEqual(first.target.snapshotId, second.target.snapshotId); assert.notEqual(first.plan.planId, second.plan.planId);
   assert.equal(JSON.stringify(second.target).includes('d'.repeat(64)), false);
+  input.checkSessionSettings = { version: 1, status: 'observed', enabled: false, reason: 'TARGET_CHECK_SESSION_OBSERVED' };
+  const disabled = build();
+  assert.notEqual(second.target.snapshotId, disabled.target.snapshotId); assert.notEqual(second.plan.planId, disabled.plan.planId);
+  assert.ok(disabled.plan.blockers.some(item => item.detail === 'TARGET_CHECK_SESSION_DISABLED'));
+  assert.equal(disabled.target.targetCheckReview.version, 2); assert.equal(disabled.target.targetCheckReview.sessionSettings.enabled, false);
+  assert.equal(disabled.plan.canExecute, false);
+  input.checkSessionSettings.enabled = true;
+  const enabled = build(); assert.notEqual(disabled.plan.planId, enabled.plan.planId);
+  assert.equal(enabled.target.targetCheckReview.rows[0].status, 'requires-review'); assert.equal(enabled.plan.canExecute, false);
+});
+
+test('CHECK session probe is one fixed SELECT, normalizes only binary values, and projects no raw fields', async () => {
+  for (const value of [0, 1, '0', '1']) {
+    let calls = 0;
+    const result = await collectCheckSessionSettings({ raw: async (sql, params, timeout) => {
+      calls++; assert.equal(sql, 'SELECT @@SESSION.check_constraint_checks AS enabled'); assert.deepEqual(params, []); assert.equal(timeout, 10000);
+      return { rows: [{ enabled: value, private: 'private-expression' }] };
+    } });
+    assert.equal(calls, 1); assert.equal(result.enabled, Number(value) === 1); assert.equal(result.status, 'observed');
+    assert.deepEqual(projectCheckSessionSettings({ ...result, rawSql: 'private-sql' }), result);
+    assert.equal(JSON.stringify(result).includes('private'), false);
+  }
+  for (const rows of [null, [], [{ enabled: 1 }, { enabled: 0 }], [null], ...[null, true, false, 'ON', '1suffix', '1\n', [], {}, -1, 2].map(enabled => [{ enabled }])]) {
+    const result = await collectCheckSessionSettings({ raw: async () => ({ rows }) });
+    assert.equal(result.enabled, null); assert.equal(result.reason, 'TARGET_CHECK_SESSION_RESULT_INVALID');
+  }
+});
+
+test('unavailable, denied or stale CHECK session observations remain unknown and cancellation propagates', async () => {
+  for (const [code, reason] of [['ER_UNKNOWN_SYSTEM_VARIABLE', 'TARGET_CHECK_SESSION_VARIABLE_UNAVAILABLE'],
+    ['ER_SPECIFIC_ACCESS_DENIED_ERROR', 'TARGET_CHECK_SESSION_QUERY_FAILED'], ['ECONNRESET', 'TARGET_CHECK_SESSION_QUERY_FAILED']]) {
+    const result = await collectCheckSessionSettings({ raw: async () => { throw Object.assign(new Error('private-error'), { code }); } });
+    assert.equal(result.status, 'unknown'); assert.equal(result.enabled, null); assert.equal(result.reason, reason);
+    assert.equal(JSON.stringify(result).includes('private'), false);
+  }
+  for (const value of [null, { version: 0, status: 'observed', enabled: true },
+    { version: 1, status: 'unknown', enabled: true, reason: 'TARGET_CHECK_SESSION_VARIABLE_UNAVAILABLE' },
+    { version: 1, status: 'observed', enabled: '1', reason: 'TARGET_CHECK_SESSION_OBSERVED' }]) {
+    assert.deepEqual(projectCheckSessionSettings(value), { version: 1, status: 'unknown', enabled: null, reason: 'TARGET_CHECK_SESSION_NOT_REVIEWED' });
+  }
+  let called = false;
+  await assert.rejects(collectCheckSessionSettings({ raw: async () => { called = true; return { rows: [{ enabled: 1 }] }; } },
+    () => { if (called) throw new Error('canceled-after-read'); }), /canceled-after-read/);
+  await assert.rejects(collectCheckSessionSettings({ raw: async () => { throw new Error('should-not-run'); } },
+    () => { throw new Error('canceled-before-read'); }), /canceled-before-read/);
 });

@@ -8,6 +8,7 @@ const { RestoreSelectionInventory, previewRestoreSelection } = require('../elect
 const { assertStatementScope } = require('../electron/sql-script.cjs');
 const { collectSelectionTargetFacts, buildSelectionTargetPreview } = require('../electron/restore-selection-target.cjs');
 const { buildSelectionDraft } = require('../electron/restore-selection-plan.cjs');
+const { captureObservation, compareObservations } = require('../restore-review.js');
 
 test('omitted values integration: metadata-only preview observes defaults and special columns without writing', {
   skip: !process.env.SQLPRO_TEST_OMITTED_PORT, timeout: 30000
@@ -36,8 +37,11 @@ test('omitted values integration: metadata-only preview observes defaults and sp
       const targetReview = buildSelectionTargetPreview({ source, checksum, targetIdentity, facts });
       const draft = buildSelectionDraft({ inventory, source, checksum, targetIdentity, targetReview });
       assert.equal(draft.canExecute, false); assert.equal(draft.omittedValueReview.canExecute, false);
-      return { draft, targetReview, row: draft.omittedValueReview.rows[0] };
+      return { facts, draft, targetReview, row: draft.omittedValueReview.rows[0] };
     };
+    const observation = (table, result) => captureObservation({ profileId: 'fixture', id: 'backup.sql', database, targetDatabase: database,
+      conflictPolicy: 'stop-on-conflict', includeStructure: false, includeData: true, tables: [table] },
+    { checksum: 'a'.repeat(64), targetReview: result.targetReview, draftPlan: result.draft });
 
     await t.test('required omission fails under strict mode and DEFAULT drift changes the snapshot/draft', async () => {
       await admin.query('CREATE TABLE required_sample (id INT, required_value INT NOT NULL) ENGINE=InnoDB');
@@ -69,6 +73,60 @@ test('omitted values integration: metadata-only preview observes defaults and sp
       await admin.query('INSERT INTO defaults_sample (id) VALUES(1)');
       const row = (await admin.query('SELECT optional_value, label FROM defaults_sample'))[0][0];
       assert.equal(row.optional_value, null); assert.equal(row.label, 'private-default');
+    });
+
+    await t.test('changing one non-null DEFAULT to another changes metadata/snapshot/plan without exposing either value', async () => {
+      await admin.query("CREATE TABLE default_drift (id INT, label VARCHAR(30) NOT NULL DEFAULT 'private-default-one', empty_label VARCHAR(10) DEFAULT '') ENGINE=InnoDB");
+      const definition = "`id` INT, `label` VARCHAR(30) NOT NULL DEFAULT 'private-default-one'", insert = 'INSERT INTO default_drift(id) VALUES(1)';
+      const initial = await build('default_drift', definition, insert);
+      assert.equal(initial.targetReview.targetExpressionReview.complete, true);
+      assert.equal(initial.facts.columns.find(column => column.name === 'empty_label').expressionProfile.defaultStatus, 'observed');
+      await admin.query("ALTER TABLE default_drift ALTER COLUMN label SET DEFAULT 'private-default-two'");
+      const changed = await build('default_drift', definition, insert);
+      const left = initial.facts.columns.find(column => column.name === 'label'), right = changed.facts.columns.find(column => column.name === 'label');
+      assert.equal(left.hasDefault, true); assert.equal(right.hasDefault, true); assert.notEqual(left.expressionProfile.defaultDigest, right.expressionProfile.defaultDigest);
+      assert.notEqual(initial.targetReview.metadataId, changed.targetReview.metadataId); assert.notEqual(initial.targetReview.snapshotId, changed.targetReview.snapshotId);
+      assert.notEqual(initial.draft.planId, changed.draft.planId); assert.equal(compareObservations(observation('default_drift', initial), observation('default_drift', changed)).metadataChanged, true);
+      assert.equal(changed.row.target.columns[0].code, 'OMITTED_DEFAULT_NOT_REVIEWED'); assert.equal(changed.draft.canExecute, false);
+      const json = JSON.stringify({ target: changed.targetReview, plan: changed.draft });
+      assert.equal(json.includes(right.expressionProfile.defaultDigest), false); assert.equal(json.includes('private-default-'), false);
+      assert.equal(Number((await admin.query('SELECT COUNT(*) AS n FROM default_drift'))[0][0].n), 0);
+      await admin.query(insert);
+      assert.equal((await admin.query('SELECT label FROM default_drift'))[0][0].label, 'private-default-two');
+    });
+
+    await t.test('same-name generated expression changes are observed but never evaluated by preview', async () => {
+      await admin.query('CREATE TABLE generated_drift (id INT, supplied INT, computed INT GENERATED ALWAYS AS (supplied+1) VIRTUAL) ENGINE=InnoDB');
+      const definition = '`id` INT, `supplied` INT', insert = 'INSERT INTO generated_drift(supplied) VALUES(5)';
+      const initial = await build('generated_drift', definition, insert);
+      assert.equal(initial.targetReview.targetExpressionReview.complete, true);
+      await admin.query('ALTER TABLE generated_drift MODIFY computed INT GENERATED ALWAYS AS (supplied+2) VIRTUAL');
+      const changed = await build('generated_drift', definition, insert);
+      const left = initial.facts.columns.find(column => column.name === 'computed'), right = changed.facts.columns.find(column => column.name === 'computed');
+      assert.equal(left.generated, true); assert.equal(right.generated, true); assert.notEqual(left.expressionProfile.generatedDigest, right.expressionProfile.generatedDigest);
+      assert.notEqual(initial.targetReview.metadataId, changed.targetReview.metadataId); assert.notEqual(initial.targetReview.snapshotId, changed.targetReview.snapshotId);
+      assert.notEqual(initial.draft.planId, changed.draft.planId); assert.equal(compareObservations(observation('generated_drift', initial), observation('generated_drift', changed)).metadataChanged, true);
+      assert.equal(changed.row.target.columns.at(-1).code, 'OMITTED_GENERATED_NOT_REVIEWED'); assert.equal(changed.draft.canExecute, false);
+      const json = JSON.stringify({ target: changed.targetReview, plan: changed.draft });
+      assert.equal(json.includes(right.expressionProfile.generatedDigest), false); assert.equal(json.includes('supplied+2'), false); assert.equal(json.includes('supplied + 2'), false);
+      assert.equal(Number((await admin.query('SELECT COUNT(*) AS n FROM generated_drift'))[0][0].n), 0);
+      await admin.query(insert); assert.equal((await admin.query('SELECT computed FROM generated_drift'))[0][0].computed, 7);
+    });
+
+    await t.test('missing or malformed expression evidence remains unknown without changing column/omission semantics', async () => {
+      const recorded = reader.raw;
+      try {
+        reader.raw = async (sql, ...args) => {
+          const result = await recorded(sql, ...args);
+          if (sql.includes('COLUMN_TYPE AS columnType')) result.rows = result.rows.map(row => ({ ...row, defaultDigest: '<private-digest>', generatedDigest: null }));
+          return result;
+        };
+        const result = await build('generated_drift', '`id` INT, `supplied` INT', 'INSERT INTO generated_drift(supplied) VALUES(5)');
+        assert.equal(result.targetReview.targetExpressionReview.complete, false); assert.equal(result.draft.canExecute, false);
+        assert.ok(result.draft.blockers.some(item => item.code === 'TARGET_COLUMN_EXPRESSIONS_INCOMPLETE'));
+        assert.equal(JSON.stringify(result).includes('private-digest'), false);
+        assert.equal(result.row.target.columns.at(-1).code, 'OMITTED_GENERATED_NOT_REVIEWED');
+      } finally { reader.raw = recorded; }
     });
 
     await t.test('positional INSERT leaves Invisible columns to their unreviewed defaults', async () => {

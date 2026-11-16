@@ -30,6 +30,48 @@ function setup(overrides = {}) {
   return { ...r, ready, calls, canceled, selected, get: selector => elements.get(selector), click: selector => elements.get(selector).listeners.click() };
 }
 
+test('DEFAULT/generated report is bounded, escapes identifiers and never renders values, expressions or individual digests', () => {
+  const r = setup();
+  r.context.expressionReport = { version: 1, totals: { observed: 201, unknown: 0 }, findings: [], truncated: true,
+    requires: ['TARGET_DEFAULT_VALUES_NOT_VALIDATED', 'TARGET_GENERATED_VALUES_NOT_VALIDATED'],
+    rows: Array.from({ length: 200 }, () => ({ table: '<img src=table>', column: '<img src=column>', status: 'metadata-observed',
+      defaultStatus: 'observed', generatedStatus: 'observed', defaultValue: 'private-default', expression: 'private-expression', defaultDigest: 'a'.repeat(64) })) };
+  const html = r.evaluate('backupSelectionTargetExpressionsHtml(expressionReport)');
+  assert.match(html, /201 cột có metadata đã quan sát/); assert.match(html, /100 cột/); assert.match(html, /&lt;img/);
+  assert.match(html, /chưa đối chiếu DEFAULT\/generated nguồn và đích/); assert.equal((html.match(/<tr><td>/g) || []).length, 100);
+  for (const value of ['<img', '<button', 'private-default', 'private-expression', 'a'.repeat(64)]) assert.equal(html.includes(value), false);
+  r.context.expressionReport.rows = [{ table: 'items', column: 'v', defaultStatus: 'null-metadata', generatedStatus: 'not-reported', status: 'metadata-observed' }];
+  const missing = r.evaluate('backupSelectionTargetExpressionsHtml(expressionReport)');
+  assert.match(missing, /NULL trong metadata; chưa kết luận không có DEFAULT/); assert.match(missing, /Không có biểu thức được công bố/);
+  assert.match(r.evaluate('backupSelectionTargetExpressionsHtml({version:0})'), /cần kiểm tra lại đích/);
+});
+
+test('trigger report is bounded, escapes names and never renders expressions, accounts or individual digests', () => {
+  const r = setup();
+  r.context.triggerReport = { version: 1, totals: { observed: 201, unknown: 0, insert: 201 }, findings: ['TARGET_TRIGGERS_REQUIRE_REVIEW'],
+    requires: ['TARGET_TRIGGER_EFFECTS_NOT_VALIDATED', 'TARGET_TRIGGER_VISIBILITY_NOT_PROVEN'], truncated: true,
+    rows: Array.from({ length: 200 }, () => ({ name: '<img src=trigger>', table: '<img src=table>', event: 'INSERT', timing: 'BEFORE', actionOrder: 1,
+      definitionObserved: true, contextObserved: true, reason: 'TARGET_TRIGGER_EFFECTS_NOT_VALIDATED', actionDigest: 'a'.repeat(64), contextDigest: 'b'.repeat(64), body: 'private-body', definer: 'private-account' })) };
+  const html = r.evaluate('backupSelectionTargetTriggersHtml(triggerReport)');
+  assert.match(html, /201 định nghĩa quan sát được/); assert.match(html, /BEFORE INSERT/); assert.match(html, /Chưa thấy không chứng minh/);
+  assert.match(html, /100 trigger/); assert.match(html, /&lt;img/); assert.equal((html.match(/<tr><td>/g) || []).length, 100);
+  for (const value of ['<img', '<button', 'private-body', 'private-account', 'a'.repeat(64), 'b'.repeat(64)]) assert.equal(html.includes(value), false);
+  assert.match(r.evaluate('backupSelectionTargetTriggersHtml({version:0})'), /cần kiểm tra lại metadata/);
+});
+
+test('target engine report is bounded, escapes names, treats legacy/missing observations as unknown and grants no rollback guarantee', () => {
+  const r = setup();
+  r.context.engineRows = Array.from({ length: 101 }, () => ({ name: '<img src=engine>', engineReview: { version: 1, status: 'observed', engine: 'MyISAM', reason: 'TARGET_ENGINE_UNSUPPORTED', privateValue: 'private-value' } }));
+  const html = r.evaluate('backupSelectionTargetEnginesHtml(engineRows)');
+  assert.match(html, /Storage engine bảng đích/); assert.match(html, /InnoDB chưa bảo đảm rollback toàn bộ/); assert.match(html, /MyISAM/);
+  assert.match(html, /100 bảng/); assert.match(html, /&lt;img/); assert.equal((html.match(/<tr><td>/g) || []).length, 100);
+  assert.equal(html.includes('<img'), false); assert.equal(html.includes('<button'), false); assert.equal(html.includes('private-value'), false);
+  for (const profile of [undefined, { version: 0, status: 'observed', engine: 'InnoDB' }, { version: 1, status: 'unknown', engine: 'InnoDB' }]) {
+    r.context.engineRows = [{ name: 'items', engineReview: profile }];
+    assert.match(r.evaluate('backupSelectionTargetEnginesHtml(engineRows)'), /Chưa đủ metadata engine/);
+  }
+});
+
 test('target CHECK report escapes names, bounds detail and never displays expressions or write controls', () => {
   const r = setup();
   r.context.checks = { version: 1, totals: { observed: 201, unknown: 0 }, findings: ['TARGET_CHECK_DATA_NOT_VALIDATED'],
@@ -42,6 +84,21 @@ test('target CHECK report escapes names, bounds detail and never displays expres
   assert.equal((html.match(/<tr><td>/g) || []).length, 100); assert.equal(html.includes('<img'), false); assert.equal(html.includes('<button'), false);
   assert.equal(html.includes('private-expression'), false); assert.equal(html.includes('c'.repeat(64)), false);
   assert.match(r.evaluate('backupSelectionTargetChecksHtml({version:0})'), /cần kiểm tra lại metadata/);
+});
+
+test('CHECK v2 displays session state separately from ENFORCED; legacy and malformed observations remain unknown', () => {
+  const r = setup();
+  r.context.checks = { version: 2, totals: { observed: 0, unknown: 0 }, findings: ['TARGET_CHECK_SESSION_DISABLED'], requires: [], truncated: false, rows: [],
+    sessionSettings: { version: 1, status: 'observed', enabled: false, reason: 'TARGET_CHECK_SESSION_OBSERVED' } };
+  const disabled = r.evaluate('backupSelectionTargetChecksHtml(checks)');
+  assert.match(disabled, /check_constraint_checks của phiên kiểm tra: tắt/); assert.match(disabled, /Phiên đích đang tắt check_constraint_checks/);
+  assert.match(disabled, /Trạng thái bật không chứng minh dữ liệu thỏa CHECK/); assert.equal(disabled.includes('<button'), false);
+  r.context.checks.sessionSettings.enabled = true;
+  assert.match(r.evaluate('backupSelectionTargetChecksHtml(checks)'), /check_constraint_checks của phiên kiểm tra: bật/);
+  r.context.checks.sessionSettings.status = 'unknown';
+  assert.match(r.evaluate('backupSelectionTargetChecksHtml(checks)'), /check_constraint_checks của phiên kiểm tra: chưa xác định/);
+  r.context.checks.sessionSettings.status = 'observed'; r.context.checks.version = 1;
+  assert.match(r.evaluate('backupSelectionTargetChecksHtml(checks)'), /check_constraint_checks của phiên kiểm tra: chưa xác định/);
 });
 
 test('packet report escapes names, bounds detail and never represents within-limit as permission to restore', () => {
@@ -191,6 +248,24 @@ test('session policy HTML escapes observations and proposals and exposes no exec
   assert.equal(r.evaluate('backupSelectionSessionPolicyHtml({version:0})'), '');
 });
 
+test('session policy v2 displays unique_checks on/off/unknown while legacy reports cannot assert it is enabled', () => {
+  const r = setup();
+  r.context.sessionReview = { version: 2, observations: { version: 2, foreignKeyChecks: true, uniqueChecks: false, autocommit: true,
+    sqlMode: { flags: ['STRICT_TRANS_TABLES'], unreviewedCount: 0 } }, proposedMode: null,
+    findings: [{ code: 'SESSION_UNIQUE_CHECKS_DISABLED' }], requires: ['SESSION_UNIQUE_DATA_NOT_VALIDATED', 'SESSION_UNIQUE_CHECKS_RECHECK_REQUIRED'],
+    actions: [], lifecycle: ['verify-unique-checks-enabled'] };
+  const disabled = r.evaluate('backupSelectionSessionPolicyHtml(sessionReview)');
+  assert.match(disabled, /unique_checks tắt/); assert.match(disabled, /đang tắt unique_checks/);
+  assert.match(disabled, /Bật unique_checks không chứng minh dữ liệu không trùng khóa/); assert.match(disabled, /đúng phiên trước khi ghi/);
+  assert.equal(disabled.includes('<button'), false);
+  r.context.sessionReview.observations.uniqueChecks = true;
+  assert.match(r.evaluate('backupSelectionSessionPolicyHtml(sessionReview)'), /unique_checks bật/);
+  r.context.sessionReview.observations.uniqueChecks = null;
+  assert.match(r.evaluate('backupSelectionSessionPolicyHtml(sessionReview)'), /unique_checks chưa xác định/);
+  r.context.sessionReview.version = 1; r.context.sessionReview.observations.uniqueChecks = true;
+  assert.match(r.evaluate('backupSelectionSessionPolicyHtml(sessionReview)'), /unique_checks chưa xác định/);
+});
+
 test('selection preview captures scope, escapes names and sends selected tables with explicit flags', async () => {
   const r = setup(); await r.ready;
   assert.match(r.get('#backupSelectionTables').innerHTML, /&lt;img src=x&gt;/);
@@ -234,6 +309,40 @@ test('initial scan supports captured cancellation and refuses late inventory aft
   r.evaluate("app.database='different'");
   finish(ok({ selectionPreview: inventory })); await r.ready;
   assert.equal(r.get('#backupSelectionTables').innerHTML, '');
+});
+
+test('two fresh target reviews compare metadata/source/plan and invalidated or failed requests discard the baseline', async () => {
+  let answer, fail = false;
+  const r = setup({ previewBackupSelectionTarget: async payload => {
+    if (fail) throw new Error('fixture canceled');
+    return ok({ ...response, checksum: answer.checksum, targetReview: { ...answer.targetReview, database: payload.targetDatabase, findings: [], rows: [] },
+      draftPlan: { ...answer.draftPlan, sourceDatabase: payload.database, targetDatabase: payload.targetDatabase,
+        selection: { tables: [...payload.tables], includeStructure: payload.includeStructure, includeData: payload.includeData }, conflictPolicyReview: { policy: payload.conflictPolicy } } });
+  } });
+  answer = { checksum: 'a'.repeat(64), targetReview: { version: 15, canExecute: false, metadataId: 'b'.repeat(64), snapshotId: 'c'.repeat(64), checkedAt: '2026-11-16T00:00:00Z' },
+    draftPlan: { version: 28, canExecute: false, checksum: 'a'.repeat(64), targetSnapshotId: 'c'.repeat(64), planId: 'd'.repeat(64) } };
+  r.evaluate('backupSelectionDraftHtml=()=>\'\''); await r.ready;
+  const html = () => r.get('#backupSelectionResult').innerHTML;
+  await r.click('#reviewBackupSelectionTarget'); assert.match(html(), /Đã ghi nhận mốc so sánh/);
+  await r.click('#reviewBackupSelectionTarget'); assert.match(html(), /Chưa thấy thay đổi trong tệp và metadata/);
+  answer.targetReview.metadataId = 'e'.repeat(64); answer.targetReview.snapshotId = answer.draftPlan.targetSnapshotId = 'f'.repeat(64); answer.draftPlan.planId = 'e'.repeat(64);
+  await r.click('#reviewBackupSelectionTarget'); assert.match(html(), /Có thay đổi kể từ lần/); assert.match(html(), /Metadata\/ngữ cảnh đích đã quan sát: đã thay đổi/);
+  assert.match(html(), /Tệp backup: chưa thấy thay đổi/); assert.match(html(), /không theo dõi dữ liệu dòng/);
+  answer.checksum = answer.draftPlan.checksum = 'f'.repeat(64); answer.targetReview.snapshotId = answer.draftPlan.targetSnapshotId = 'a'.repeat(64); answer.draftPlan.planId = 'b'.repeat(64);
+  await r.click('#reviewBackupSelectionTarget'); assert.match(html(), /Tệp backup: đã thay đổi/);
+  r.get('#selectionTargetDatabase').listeners.input(); await r.click('#reviewBackupSelectionTarget'); assert.match(html(), /Đã ghi nhận mốc so sánh/);
+  r.get('#backupSelectionForm').listeners.change(); await r.click('#reviewBackupSelectionTarget'); assert.match(html(), /Đã ghi nhận mốc so sánh/);
+  fail = true; await r.click('#reviewBackupSelectionTarget'); fail = false;
+  await r.click('#reviewBackupSelectionTarget'); assert.match(html(), /Đã ghi nhận mốc so sánh/);
+  await r.click('#previewBackupSelection'); await r.click('#reviewBackupSelectionTarget'); assert.match(html(), /Đã ghi nhận mốc so sánh/);
+});
+
+test('drift report text is bounded to known statuses and contains no identities, HTML or write controls', () => {
+  const r = setup();
+  r.context.drift = { version: 1, status: '<img src=x>', sourceChanged: false, metadataChanged: false, planChanged: false, sql: 'private-query', token: 'private-token' };
+  const html = r.evaluate('backupSelectionDriftHtml(drift)');
+  assert.match(html, /Chưa đủ thông tin để so sánh/);
+  for (const value of ['<img', '<button', 'private-query', 'private-token']) assert.equal(html.includes(value), false);
 });
 
 test('target review captures database, escapes metadata and target edits discard old observations', async () => {

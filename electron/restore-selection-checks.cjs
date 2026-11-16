@@ -4,6 +4,32 @@ const validName = value => typeof value === 'string' && value.length > 0 && valu
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const CAPABILITIES = new Set(['CHECK_CONSTRAINTS.CONSTRAINT_SCHEMA', 'CHECK_CONSTRAINTS.CONSTRAINT_NAME',
   'CHECK_CONSTRAINTS.CHECK_CLAUSE', 'CHECK_CONSTRAINTS.TABLE_NAME', 'TABLE_CONSTRAINTS.ENFORCED']);
+const SESSION_UNKNOWN = new Set(['TARGET_CHECK_SESSION_NOT_REVIEWED', 'TARGET_CHECK_SESSION_VARIABLE_UNAVAILABLE',
+  'TARGET_CHECK_SESSION_QUERY_FAILED', 'TARGET_CHECK_SESSION_RESULT_INVALID']);
+const unknownSession = reason => ({ version: 1, status: 'unknown', enabled: null, reason });
+
+async function collectCheckSessionSettings(session, checkContext = () => {}) {
+  checkContext();
+  let result;
+  try { result = await session.raw('SELECT @@SESSION.check_constraint_checks AS enabled', [], 10000); }
+  catch (error) {
+    checkContext();
+    return unknownSession(error?.code === 'ER_UNKNOWN_SYSTEM_VARIABLE' ? 'TARGET_CHECK_SESSION_VARIABLE_UNAVAILABLE' : 'TARGET_CHECK_SESSION_QUERY_FAILED');
+  }
+  checkContext();
+  if (!Array.isArray(result?.rows) || result.rows.length !== 1 || ![0, 1, '0', '1'].includes(result.rows[0]?.enabled)) {
+    return unknownSession('TARGET_CHECK_SESSION_RESULT_INVALID');
+  }
+  return { version: 1, status: 'observed', enabled: Number(result.rows[0].enabled) === 1, reason: 'TARGET_CHECK_SESSION_OBSERVED' };
+}
+
+function projectCheckSessionSettings(value) {
+  if (value?.version === 1 && value.status === 'observed' && typeof value.enabled === 'boolean' && value.reason === 'TARGET_CHECK_SESSION_OBSERVED') {
+    return { version: 1, status: 'observed', enabled: value.enabled, reason: 'TARGET_CHECK_SESSION_OBSERVED' };
+  }
+  if (value?.version === 1 && value.status === 'unknown' && value.enabled === null && SESSION_UNKNOWN.has(value.reason)) return unknownSession(value.reason);
+  return unknownSession('TARGET_CHECK_SESSION_NOT_REVIEWED');
+}
 
 async function collectTargetChecks(read, database, selectedTables) {
   const columns = await read('checkCapabilities', "SELECT TABLE_NAME AS tableName, COLUMN_NAME AS name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND ((TABLE_NAME = ? AND COLUMN_NAME IN (?,?,?,?)) OR (TABLE_NAME = ? AND COLUMN_NAME = ?)) ORDER BY TABLE_NAME, COLUMN_NAME LIMIT 6",
@@ -34,6 +60,7 @@ async function collectTargetChecks(read, database, selectedTables) {
 
 function reviewTargetChecks(facts, selectedTables) {
   const rows = [], findings = [], seen = new Set();
+  const sessionSettings = projectCheckSessionSettings(facts.checkSessionSettings);
   let truncated = false;
   const flag = code => { if (!findings.includes(code)) { if (findings.length < 50) findings.push(code); else truncated = true; } };
   const capabilities = facts.checkCapabilities;
@@ -76,9 +103,11 @@ function reviewTargetChecks(facts, selectedTables) {
     for (const row of rows) { row.status = 'unknown'; row.reason = 'TARGET_CHECK_METADATA_INCOMPLETE'; }
   }
   if (totals.observed + totals.unknown) flag('TARGET_CHECK_DATA_NOT_VALIDATED');
+  if (sessionSettings.enabled === false) flag('TARGET_CHECK_SESSION_DISABLED');
+  if (sessionSettings.enabled === null) flag(sessionSettings.reason);
   if (truncated) flag('TARGET_CHECK_REPORT_LIMIT');
-  return { version: 1, canExecute: false, status: 'partial', visibility: 'account-visible', complete, totals, rows, findings, truncated,
+  return { version: 2, canExecute: false, status: 'partial', visibility: 'account-visible', complete, sessionSettings, totals, rows, findings, truncated,
     requires: ['TARGET_CHECK_EXPRESSION_NOT_EVALUATED', 'TARGET_CHECK_SESSION_NOT_REVIEWED', 'TARGET_CHECK_RECHECK_REQUIRED'] };
 }
 
-module.exports = { collectTargetChecks, reviewTargetChecks };
+module.exports = { collectTargetChecks, reviewTargetChecks, collectCheckSessionSettings, projectCheckSessionSettings };

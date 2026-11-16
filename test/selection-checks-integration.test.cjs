@@ -93,6 +93,52 @@ test('CHECK metadata integration: observed constraints are never a proof that re
       } finally { reader.raw = recorded; }
     });
 
+    await t.test('CHECK session state is observed when available, or explicitly unknown without a version guess', async () => {
+      const initial = await build(), observation = initial.facts.checkSessionSettings;
+      assert.deepEqual(initial.facts.errors, []); assert.equal(initial.target.targetCheckReview.version, 2);
+      assert.deepEqual(initial.target.targetCheckReview.sessionSettings, observation);
+      if (observation.status === 'observed') {
+        assert.equal(observation.enabled, true);
+        try {
+          await raw('SET SESSION check_constraint_checks=0');
+          const disabled = await build(); assert.deepEqual(disabled.facts.errors, []);
+          assert.equal(disabled.target.targetCheckReview.sessionSettings.enabled, false);
+          assert.notEqual(initial.target.snapshotId, disabled.target.snapshotId); assert.notEqual(initial.plan.planId, disabled.plan.planId);
+          assert.ok(disabled.plan.blockers.some(item => item.detail === 'TARGET_CHECK_SESSION_DISABLED'));
+          assert.equal(Number((await raw('SELECT @@SESSION.check_constraint_checks AS n')).rows[0].n), 0);
+          assert.equal(Number((await admin.query('SELECT COUNT(*) AS n FROM items'))[0][0].n), 0);
+          // Only this explicit fixture write runs while checks are disabled.
+          await raw('INSERT INTO items VALUES(-1)');
+          assert.equal(Number((await raw('SELECT COUNT(*) AS n FROM items')).rows[0].n), 1);
+          assert.equal(disabled.plan.canExecute, false);
+        } finally {
+          try { await raw('DELETE FROM items'); } finally { await raw('SET SESSION check_constraint_checks=1'); }
+        }
+        assert.equal((await build()).target.snapshotId, initial.target.snapshotId);
+      } else {
+        assert.equal(observation.enabled, null); assert.equal(observation.reason, 'TARGET_CHECK_SESSION_VARIABLE_UNAVAILABLE');
+        assert.ok(initial.plan.blockers.some(item => item.detail === 'TARGET_CHECK_SESSION_NOT_REVIEWED'));
+        assert.equal(initial.plan.canExecute, false);
+      }
+      assert.equal(editor.inTransaction, true); assert.deepEqual((await settings(editor)).rows, beforeEditor);
+    });
+
+    await t.test('denied or malformed CHECK session results stay unknown without exposing errors or trusting ENFORCED', async () => {
+      try {
+        reader.raw = async (sql, ...args) => {
+          if (sql.includes('@@SESSION.check_constraint_checks AS enabled')) throw Object.assign(new Error('private-check-session-error'), { code: 'ER_SPECIFIC_ACCESS_DENIED_ERROR' });
+          return recorded(sql, ...args);
+        };
+        const denied = await build(); assert.deepEqual(denied.facts.errors, []);
+        assert.equal(denied.target.targetCheckReview.sessionSettings.reason, 'TARGET_CHECK_SESSION_QUERY_FAILED');
+        assert.ok(denied.plan.blockers.some(item => item.detail === 'TARGET_CHECK_SESSION_NOT_REVIEWED'));
+        assert.equal(JSON.stringify(denied).includes('private-check-session-error'), false); assert.equal(denied.plan.canExecute, false);
+        reader.raw = async (sql, ...args) => sql.includes('@@SESSION.check_constraint_checks AS enabled') ? { rows: [] } : recorded(sql, ...args);
+        const missing = await build(); assert.equal(missing.target.targetCheckReview.sessionSettings.reason, 'TARGET_CHECK_SESSION_RESULT_INVALID');
+        assert.equal(missing.plan.canExecute, false);
+      } finally { reader.raw = recorded; }
+    });
+
     await t.test('preview uses only SELECT and preserves Reader/Editor settings and the Editor transaction', async () => {
       assert.ok(queries.length > 0); assert.ok(queries.every(sql => /^SELECT /.test(sql)));
       assert.deepEqual((await settings(reader)).rows, beforeReader); assert.deepEqual((await settings(editor)).rows, beforeEditor);

@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { normalizeSessionSettings, projectSessionSettings, buildSelectionSessionPolicy } = require('../electron/restore-selection-session-policy.cjs');
 const { reviewDumpContext } = require('../electron/restore-selection-context.cjs');
-const settings = (changes = {}) => ({ foreignKeyChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION',
+const settings = (changes = {}) => ({ foreignKeyChecks: 1, uniqueChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION',
   charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4', ...changes });
 function fixture() {
   const sql = ['SET NAMES utf8mb4', 'SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0',
@@ -65,4 +65,43 @@ test('old/forged target settings, missing context, malformed sequence, quotas an
   const report = buildSelectionSessionPolicy(noContext); assert.equal(report.contextPresent, false); assert.equal(report.proposedMode.changed, false);
   const many = fixture(); many.ledger.entries = Array.from({ length: 60 }, (_, index) => ({ ...many.ledger.entries[0], number: index + 1 })); many.ledger.total = 60;
   assert.equal(buildSelectionSessionPolicy(many).actions.length, 50); assert.ok(buildSelectionSessionPolicy(many).findings.some(finding => finding.code === 'SESSION_ACTION_LIMIT'));
+});
+
+test('unique_checks accepts only observed binary values and keeps missing/legacy metadata unknown', () => {
+  for (const value of [0, 1, '0', '1']) {
+    const normalized = normalizeSessionSettings(settings({ uniqueChecks: value }));
+    assert.equal(normalized.version, 2); assert.equal(normalized.uniqueChecks, Number(value) === 1);
+    assert.deepEqual(projectSessionSettings({ ...normalized, private: 'secret' }), normalized);
+  }
+  for (const value of [true, false, null, '', 'ON', '1suffix', '1\n', -1, 2, [], {}]) {
+    assert.equal(normalizeSessionSettings(settings({ uniqueChecks: value })), null);
+  }
+  for (const value of [undefined, '', 'ON', '0', '1', 0, 1, -1, 2, [], {}]) {
+    assert.equal(projectSessionSettings({ ...normalizeSessionSettings(settings()), uniqueChecks: value }), null);
+  }
+  const missing = settings(); delete missing.uniqueChecks;
+  const normalized = normalizeSessionSettings(missing);
+  assert.equal(normalized.uniqueChecks, null); assert.deepEqual(projectSessionSettings(normalized), normalized);
+  const legacy = { ...normalizeSessionSettings(settings()), version: 1, uniqueChecks: true };
+  assert.equal(projectSessionSettings(legacy).uniqueChecks, null);
+  const forged = { ...normalizeSessionSettings(settings()) }; delete forged.uniqueChecks;
+  assert.equal(projectSessionSettings(forged), null);
+});
+
+test('disabled and unknown unique checks retain explicit findings and never become duplicate-data validation', () => {
+  for (const [value, code] of [[false, 'SESSION_UNIQUE_CHECKS_DISABLED'], [null, 'SESSION_UNIQUE_CHECKS_NOT_REVIEWED']]) {
+    const input = fixture(); input.targetReview.sessionSettings.uniqueChecks = value;
+    const before = structuredClone(input), report = buildSelectionSessionPolicy(input);
+    assert.equal(report.version, 2); assert.equal(report.uniqueChecks, 'keep-enabled');
+    assert.ok(report.findings.some(item => item.code === code));
+    assert.ok(report.requires.includes('SESSION_UNIQUE_DATA_NOT_VALIDATED'));
+    assert.ok(report.requires.includes('SESSION_UNIQUE_CHECKS_RECHECK_REQUIRED'));
+    assert.ok(report.lifecycle.includes('verify-unique-checks-enabled'));
+    assert.equal(report.canExecute, false); assert.deepEqual(input, before);
+  }
+  const legacy = fixture(); legacy.targetReview.sessionSettings.version = 1;
+  assert.ok(buildSelectionSessionPolicy(legacy).findings.some(item => item.code === 'SESSION_UNIQUE_CHECKS_NOT_REVIEWED'));
+  const observed = buildSelectionSessionPolicy(fixture());
+  assert.equal(observed.observations.uniqueChecks, true); assert.deepEqual(observed.findings, []);
+  assert.ok(observed.requires.includes('SESSION_UNIQUE_DATA_NOT_VALIDATED'));
 });

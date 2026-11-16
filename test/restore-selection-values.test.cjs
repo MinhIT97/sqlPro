@@ -15,7 +15,7 @@ function fixture(definition, inserts, targetTypes = null) {
   const columns = structuredClone(source.rows[0].columnSchema.columns);
   if (targetTypes) columns.forEach((column, index) => { column.type = targetTypes[index]; });
   const targetReview = { canExecute: false, snapshotId: 'a'.repeat(64), database: 'demo', lowerCaseTableNames: 0, findings: [],
-    metadataStatus: { complete: true, databaseVisible: true }, rows: [{ name: 'items', objects: [{ name: 'items', type: 'table' }], objectCount: 1,
+    metadataStatus: { complete: true, databaseVisible: true }, rows: [{ name: 'items', objects: [{ name: 'items', type: 'table', engine: 'InnoDB' }], objectCount: 1,
       columnReview: { findings: [], truncated: false }, valueColumns: projectValueColumns(columns, true) }] };
   return { inventory, ledger: inventory.statementLedger, source, targetReview,
     policyReview: { rows: [{ name: 'items', disposition: 'review' }] }, sessionPolicyReview: { observations: {}, findings: [] } };
@@ -143,7 +143,7 @@ test('plan blocks known bad value statements, freezes reports and binds changes 
   const input = fixture('`id` BIGINT UNSIGNED', ['INSERT INTO items VALUES(18446744073709551615)'], ['tinyint']);
   input.source.includeStructure = false;
   const build = () => buildSelectionDraft({ ...input, checksum: 'b'.repeat(64), targetIdentity: 'c'.repeat(64) });
-  const first = build(); assert.equal(first.version, 23); assert.equal(first.canExecute, false);
+  const first = build(); assert.equal(first.version, 29); assert.equal(first.canExecute, false);
   assert.equal(first.steps[1].reason, 'VALUE_BASIC_ISSUES'); assert.equal(first.steps[1].decision, 'blocked');
   assert.equal(Object.isFrozen(first.valueReview.rows[0].fields[0].source), true);
   assert.equal(JSON.stringify(first).includes('18446744073709551615'), false);

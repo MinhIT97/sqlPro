@@ -94,7 +94,7 @@ test('projection checks counts/disjoint profiles and strips private fields; old 
 
 test('calendar report is bound/frozen with no raw dates/SQL and preserves execution/session/omission gates', () => {
   const input = fixture('DATETIME(6)', ["'2024-02-29 01:02:03.123456'"]), first = input.build();
-  assert.equal(first.version, 23); assert.equal(first.valueReview.version, 8); assert.equal(first.canExecute, false);
+  assert.equal(first.version, 29); assert.equal(first.valueReview.version, 8); assert.equal(first.canExecute, false);
   assert.equal(Object.isFrozen(first.valueReview.rows[0].fields[0].counts), true);
   assert.equal(JSON.stringify(first).includes('2024-02-29'), false);
   assert.ok(first.blockers.some(item => item.code === 'SESSION_EXECUTION_NOT_IMPLEMENTED'));

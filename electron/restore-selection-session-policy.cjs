@@ -11,17 +11,20 @@ const charset = value => typeof value === 'string' && /^[a-z0-9_]{1,64}$/.test(v
 
 function normalizeSessionSettings(row) {
   if (!row || ![0, 1, '0', '1'].includes(row.foreignKeyChecks) || ![0, 1, '0', '1'].includes(row.autocommit)
+      || row.uniqueChecks !== undefined && ![0, 1, '0', '1'].includes(row.uniqueChecks)
       || typeof row.sqlMode !== 'string' || row.sqlMode.length > 4096 || !/^(?:[A-Za-z0-9_]+(?:[ \t]*,[ \t]*[A-Za-z0-9_]+)*)?$/.test(row.sqlMode)
       || ![row.charsetClient, row.charsetConnection, row.charsetResults].every(charset)) return null;
   const flags = row.sqlMode ? row.sqlMode.toUpperCase().split(',').map(flag => flag.trim()).sort() : [];
   if (flags.length > 64 || new Set(flags).size !== flags.length) return null;
-  return { version: 1, foreignKeyChecks: Number(row.foreignKeyChecks) === 1, autocommit: Number(row.autocommit) === 1,
+  return { version: 2, foreignKeyChecks: Number(row.foreignKeyChecks) === 1, autocommit: Number(row.autocommit) === 1,
+    uniqueChecks: row.uniqueChecks === undefined ? null : Number(row.uniqueChecks) === 1,
     sqlMode: { flags: flags.filter(flag => MODES.has(flag)), unreviewedCount: flags.filter(flag => !MODES.has(flag)).length, fingerprint: digest(flags.join(',')) },
     charsetClient: row.charsetClient, charsetConnection: row.charsetConnection, charsetResults: row.charsetResults };
 }
 
 function projectSessionSettings(value) {
-  if (value?.version !== 1 || typeof value.foreignKeyChecks !== 'boolean' || typeof value.autocommit !== 'boolean'
+  if (![1, 2].includes(value?.version) || typeof value.foreignKeyChecks !== 'boolean' || typeof value.autocommit !== 'boolean'
+      || value.version === 2 && value.uniqueChecks !== null && typeof value.uniqueChecks !== 'boolean'
       || ![value.charsetClient, value.charsetConnection, value.charsetResults].every(charset)) return null;
   const mode = value.sqlMode;
   if (!mode || !Array.isArray(mode.flags) || mode.flags.length > MODES.size || mode.flags.some(flag => !MODES.has(flag))
@@ -29,7 +32,8 @@ function projectSessionSettings(value) {
       || mode.flags.length + mode.unreviewedCount > 64 || typeof mode.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(mode.fingerprint)) return null;
   const flags = [...mode.flags].sort();
   if (mode.unreviewedCount === 0 && digest(flags.join(',')) !== mode.fingerprint) return null;
-  return { version: 1, foreignKeyChecks: value.foreignKeyChecks, autocommit: value.autocommit,
+  return { version: 2, foreignKeyChecks: value.foreignKeyChecks, autocommit: value.autocommit,
+    uniqueChecks: value.version === 2 ? value.uniqueChecks : null,
     charsetClient: value.charsetClient, charsetConnection: value.charsetConnection, charsetResults: value.charsetResults,
     sqlMode: { flags, unreviewedCount: mode.unreviewedCount, fingerprint: mode.fingerprint } };
 }
@@ -43,6 +47,8 @@ function buildSelectionSessionPolicy({ ledger, source, targetReview }) {
   if (!observations) flag('SESSION_SETTINGS_NOT_REVIEWED');
   else {
     if (!observations.foreignKeyChecks) flag('SESSION_FK_CHECKS_DISABLED');
+    if (observations.uniqueChecks === null) flag('SESSION_UNIQUE_CHECKS_NOT_REVIEWED');
+    else if (!observations.uniqueChecks) flag('SESSION_UNIQUE_CHECKS_DISABLED');
     if (!observations.autocommit) flag('SESSION_AUTOCOMMIT_DISABLED');
     if ([observations.charsetClient, observations.charsetConnection, observations.charsetResults].some(value => value !== 'utf8mb4')) flag('SESSION_CHARSET_REQUIRES_REVIEW');
     if (observations.sqlMode.unreviewedCount) flag('SESSION_SQL_MODE_FLAGS_NOT_REVIEWED');
@@ -69,13 +75,14 @@ function buildSelectionSessionPolicy({ ledger, source, targetReview }) {
   proposedFlags?.sort();
   if (!Array.isArray(source.unresolvedOrder) || source.unresolvedOrder.length) flag('SESSION_DEPENDENCY_ORDER_NOT_PROVEN');
   const requires = ['SESSION_DEDICATED_CONNECTION_REQUIRED', 'SESSION_RECHECK_REQUIRED', 'SESSION_VALUES_NOT_VALIDATED',
-    'SESSION_FK_DATA_RECHECK_REQUIRED', 'SESSION_CLEANUP_NOT_IMPLEMENTED', 'SESSION_EXECUTION_NOT_IMPLEMENTED'];
-  return { version: 1, canExecute: false, status: 'blocked', policy: 'preserve-target-with-fk-checks', observations,
-    foreignKeys: 'keep-enabled', charset: 'require-existing-utf8mb4', sqlMode: 'preserve-target-add-zero-if-needed',
+    'SESSION_FK_DATA_RECHECK_REQUIRED', 'SESSION_UNIQUE_DATA_NOT_VALIDATED', 'SESSION_UNIQUE_CHECKS_RECHECK_REQUIRED',
+    'SESSION_CLEANUP_NOT_IMPLEMENTED', 'SESSION_EXECUTION_NOT_IMPLEMENTED'];
+  return { version: 2, canExecute: false, status: 'blocked', policy: 'preserve-target-with-integrity-checks', observations,
+    foreignKeys: 'keep-enabled', uniqueChecks: 'keep-enabled', charset: 'require-existing-utf8mb4', sqlMode: 'preserve-target-add-zero-if-needed',
     proposedMode: proposedFlags ? { flags: proposedFlags, fingerprint: digest(proposedFlags.join(',')), changed: digest(proposedFlags.join(',')) !== observations.sqlMode.fingerprint } : null,
     contextPresent: context.total > 0, contextSequenceMatched: context.sequenceMatched, actions, findings: findings.map(code => ({ code })), requires,
     lifecycle: ['open-dedicated-connection', 'capture-and-recheck-settings', 'validate-selection-and-values', 'apply-reviewed-mode',
-      'execute-reviewed-statements-with-fk-enabled', 'check-result-and-foreign-keys', 'restore-captured-settings-in-finally', 'close-dedicated-connection'],
+      'verify-unique-checks-enabled', 'execute-reviewed-statements-with-fk-enabled', 'check-result-and-foreign-keys', 'restore-captured-settings-in-finally', 'close-dedicated-connection'],
     failurePolicy: 'stop-report-partial-never-auto-retry', rollbackAllDdlGuaranteed: false };
 }
 

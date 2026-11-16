@@ -33,7 +33,7 @@ function reviewSelectionPackets({ ledger, source, targetReview, policyReview }) 
   const entries = ledger?.version === 1 && Array.isArray(ledger.entries) ? ledger.entries.slice(0, 10000) : [];
   let truncated = false;
   const flag = code => { if (!findings.includes(code)) { if (findings.length < 20) findings.push(code); else truncated = true; } };
-  const encodingKnown = targetReview.sessionSettings?.version === 1 && targetReview.sessionSettings.charsetClient === 'utf8mb4';
+  const encodingKnown = [1, 2].includes(targetReview.sessionSettings?.version) && targetReview.sessionSettings.charsetClient === 'utf8mb4';
   if (!settings) flag('PACKET_LIMIT_NOT_OBSERVED');
   if (!encodingKnown) flag('PACKET_ENCODING_NOT_REVIEWED');
   if (!entries.length || ledger.truncated || ledger.total !== entries.length || entries.some((entry, i) => entry.number !== i + 1)) flag('PACKET_LEDGER_INCOMPLETE');

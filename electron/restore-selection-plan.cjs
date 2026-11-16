@@ -10,6 +10,9 @@ const { buildSelectionSessionPolicy } = require('./restore-selection-session-pol
 const { projectValueEvidence, reviewSelectionValues } = require('./restore-selection-values.cjs');
 const { reviewOmittedValues } = require('./restore-selection-omitted.cjs');
 const { projectStatementSize, reviewSelectionPackets } = require('./restore-selection-packets.cjs');
+const { reviewTargetEngine } = require('./restore-selection-engines.cjs');
+const { projectTargetTriggerReview } = require('./restore-selection-triggers.cjs');
+const { projectTargetExpressions } = require('./restore-selection-expressions.cjs');
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 
 function freeze(value) {
@@ -55,6 +58,17 @@ function buildSelectionDraft({ inventory, source, checksum, targetIdentity, targ
   const sessionContextReview = reviewContextSequence(ledger);
   const conflictPolicyReview = reviewConflictPolicy({ source, targetReview, conflictPolicy });
   const tablePolicies = new Map(conflictPolicyReview.rows.map(row => [row.name, row]));
+  const engineObservations = new Map();
+  const engineRows = Array.isArray(targetReview.rows) && targetReview.rows.length <= 1000 ? targetReview.rows : [];
+  for (const row of engineRows) engineObservations.set(row.name, engineObservations.has(row.name) ? null : row);
+  const targetEngineReview = { version: 1, rows: source.rows.map(row => {
+    return { name: row.name, ...reviewTargetEngine(engineObservations.get(row.name), {
+      lowerCaseTableNames: targetReview.lowerCaseTableNames, metadataComplete: targetReview.metadataStatus?.complete === true && !targetReview.findingsTruncated,
+      databaseVisible: targetReview.metadataStatus?.databaseVisible }) };
+  }) };
+  const targetEngines = new Map(targetEngineReview.rows.map(row => [row.name, row]));
+  const targetTriggerReview = projectTargetTriggerReview(targetReview.targetTriggerReview);
+  const targetExpressionReview = projectTargetExpressions(targetReview.targetExpressionReview);
   const foreignKeyReview = reviewSelectedForeignKeys({ source, targetReview, policyReview: conflictPolicyReview,
     creates: entries.slice(0, 10000).filter(entry => entry.command === 'CREATE').map(entry => ({ table: entry.table, schema: entry.schema, review: syntaxReviewFor(entry) })) });
   const foreignKeyComparison = compareSelectedForeignKeys({ source, targetReview,
@@ -82,6 +96,12 @@ function buildSelectionDraft({ inventory, source, checksum, targetIdentity, targ
   block('SOURCE_SUBSET_NOT_VALIDATED');
   block('TARGET_RECHECK_REQUIRED');
   block('WRITE_PRIVILEGES_NOT_REVIEWED');
+  for (const code of [...targetTriggerReview.findings, ...targetTriggerReview.requires]) block(code);
+  for (const code of [...targetExpressionReview.findings, ...targetExpressionReview.requires]) block(code);
+  if (source.includeData) {
+    block('TARGET_ENGINE_RECHECK_REQUIRED');
+    block('TARGET_INDIRECT_WRITES_NOT_REVIEWED');
+  }
   for (const finding of foreignKeyReview.findings) block(finding.code, finding.table);
   if (foreignKeyReview.truncated) block('FK_REVIEW_LIMIT');
   for (const row of foreignKeyReview.rows) {
@@ -144,6 +164,9 @@ function buildSelectionDraft({ inventory, source, checksum, targetIdentity, targ
       else if (entry.command === 'INSERT' && omittedIssues.has(entry.number)) reason = 'OMITTED_REQUIRED_COLUMN';
       else if (entry.command === 'INSERT' && omittedValueReview.truncated && !omittedRows.has(entry.number)) reason = 'OMITTED_REPORT_LIMIT';
       else if (entry.command === 'CREATE' && syntaxReview?.status !== 'matched') reason = syntaxReview?.code || 'CREATE_SYNTAX_NOT_REVIEWED';
+      else if (entry.command === 'INSERT' && !source.includeStructure && targetEngines.get(entry.table)?.reason !== 'TARGET_ENGINE_INNODB_OBSERVED') {
+        reason = targetEngines.get(entry.table)?.reason || 'TARGET_ENGINE_NOT_REVIEWED';
+      }
       else if (entry.kind === 'structure' && entry.command === 'CREATE' || entry.kind === 'data' && entry.command === 'INSERT') {
         decision = 'candidate'; reason = entry.command === 'INSERT' ? 'LITERAL_INSERT_MATCHED' : 'BASIC_CREATE_MATCHED';
       }
@@ -156,14 +179,14 @@ function buildSelectionDraft({ inventory, source, checksum, targetIdentity, targ
   }
   if (entries.length > 10000) block('STATEMENT_LEDGER_INCOMPLETE');
   const selection = { tables: [...source.selectedTables].sort(), includeStructure: source.includeStructure, includeData: source.includeData };
-  const binding = { version: 23, checksum, targetIdentity, targetSnapshotId: targetReview.snapshotId,
+  const binding = { version: 29, checksum, targetIdentity, targetSnapshotId: targetReview.snapshotId,
     sourceDatabase: source.sourceDatabase, targetDatabase: targetReview.database, selection, policy: 'review-only',
-    ledger: ledger || null, sessionContextReview, conflictPolicyReview, foreignKeyReview, foreignKeyComparison, sessionPolicyReview, valueReview, omittedValueReview, packetReview, sourceFindings: source.findings, sourceTruncated: inventory.truncated || source.findingsTruncated,
+    ledger: ledger || null, sessionContextReview, conflictPolicyReview, targetEngineReview, targetTriggerReview, targetExpressionReview, foreignKeyReview, foreignKeyComparison, sessionPolicyReview, valueReview, omittedValueReview, packetReview, sourceFindings: source.findings, sourceTruncated: inventory.truncated || source.findingsTruncated,
     blockers: [...blockers].sort((left, right) => JSON.stringify(left) < JSON.stringify(right) ? -1 : JSON.stringify(left) > JSON.stringify(right) ? 1 : 0), blockersTruncated };
   const planId = crypto.createHash('sha256').update(JSON.stringify(binding)).digest('hex');
-  return freeze({ version: 23, kind: 'restore-selection-draft', canExecute: false, status: 'blocked', planId,
+  return freeze({ version: 29, kind: 'restore-selection-draft', canExecute: false, status: 'blocked', planId,
     checksum, targetSnapshotId: targetReview.snapshotId, sourceDatabase: source.sourceDatabase, targetDatabase: targetReview.database,
-    selection, policy: 'review-only', statementCount: ledger?.total || 0, totals, syntaxTotals, createSyntaxTotals, sessionContextReview, conflictPolicyReview, foreignKeyReview, foreignKeyComparison, sessionPolicyReview, valueReview, omittedValueReview, packetReview, steps,
+    selection, policy: 'review-only', statementCount: ledger?.total || 0, totals, syntaxTotals, createSyntaxTotals, sessionContextReview, conflictPolicyReview, targetEngineReview, targetTriggerReview, targetExpressionReview, foreignKeyReview, foreignKeyComparison, sessionPolicyReview, valueReview, omittedValueReview, packetReview, steps,
     stepsTruncated: steps.length < entries.length || !!ledger?.truncated, blockers, blockersTruncated });
 }
 

@@ -18,12 +18,12 @@ function facts(overrides = {}) {
 const report = (metadata = facts(), selected = source(), checksum = 'a'.repeat(64), targetIdentity = 'b'.repeat(64)) => buildSelectionTargetPreview({ source: selected, checksum, targetIdentity, facts: metadata });
 
 test('session metadata is read-only, bounded, projected and bound to snapshot including unknown-mode drift', async () => {
-  const raw = { foreignKeyChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES,PRIVATE_MODE',
+  const raw = { foreignKeyChecks: 1, uniqueChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES,PRIVATE_MODE',
     charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4', maxAllowedPacket: 67108864, privateValue: 'secret' };
   const queries = [];
   const result = await collectSelectionTargetFacts({ raw: async (sql, params) => {
     queries.push(sql); assert.match(sql, /^SELECT /);
-    if (sql.includes('AS foreignKeyChecks')) { assert.deepEqual(params, []); return { rows: [raw] }; }
+    if (sql.includes('AS foreignKeyChecks')) { assert.match(sql, /@@SESSION.unique_checks AS uniqueChecks/); assert.deepEqual(params, []); return { rows: [raw] }; }
     return { rows: [] };
   } }, 'target_db');
   assert.deepEqual(result.sessionSettings, normalizeSessionSettings(raw));
@@ -31,7 +31,7 @@ test('session metadata is read-only, bounded, projected and bound to snapshot in
   assert.equal(JSON.stringify(result).includes('PRIVATE_MODE'), false); assert.equal(JSON.stringify(result).includes('secret'), false);
   const initial = report(facts({ sessionSettings: result.sessionSettings }));
   assert.notEqual(initial.snapshotId, report(facts()).snapshotId);
-  for (const changes of [{ foreignKeyChecks: 0 }, { autocommit: 0 }, { sqlMode: 'STRICT_TRANS_TABLES,OTHER_MODE' }, { charsetResults: 'latin1' }]) {
+  for (const changes of [{ foreignKeyChecks: 0 }, { uniqueChecks: 0 }, { autocommit: 0 }, { sqlMode: 'STRICT_TRANS_TABLES,OTHER_MODE' }, { charsetResults: 'latin1' }]) {
     assert.notEqual(initial.snapshotId, report(facts({ sessionSettings: normalizeSessionSettings({ ...raw, ...changes }) })).snapshotId);
   }
   for (const rows of [[], [raw, raw], [{ ...raw, autocommit: null }]]) {
@@ -110,6 +110,17 @@ test('snapshot digest binds checksum, selected flags, target identity and all me
   assert.equal(report(facts(), source(['child', 'parent'])).snapshotId, report(facts(), source(['parent', 'child'])).snapshotId);
 });
 
+test('metadata identity isolates observed target facts from source bytes/flags/time and binds exact selection/target identity', () => {
+  const base = report(); assert.match(base.metadataId, /^[a-f0-9]{64}$/);
+  assert.equal(base.metadataId, report(facts({ checkedAt: '2027-01-01T00:00:00Z' })).metadataId);
+  assert.equal(base.metadataId, report(facts(), source(), 'c'.repeat(64)).metadataId);
+  assert.equal(base.metadataId, report(facts(), source(['parent'], { includeStructure: false })).metadataId);
+  assert.equal(base.metadataId, report(facts(), source(['parent'], { includeData: false })).metadataId);
+  for (const changed of [report(facts({ objects: [] })), report(facts({ database: 'another' })), report(facts(), source(['child'])),
+    report(facts(), source(), 'a'.repeat(64), 'c'.repeat(64)), report(facts({ errors: [{ section: 'triggers', code: 'METADATA_QUERY_FAILED' }] }))]) assert.notEqual(base.metadataId, changed.metadataId);
+  assert.equal(report(facts(), source(['child', 'parent'])).metadataId, report(facts(), source(['parent', 'child'])).metadataId);
+});
+
 test('collector sends only fixed metadata SELECT statements with bound schema values', async () => {
   const queries = [], database = "db' OR 1=1 --";
   const session = { raw: async (sql, params, timeout) => {
@@ -120,8 +131,8 @@ test('collector sends only fixed metadata SELECT statements with bound schema va
     return { rows: [] };
   } };
   const result = await collectSelectionTargetFacts(session, database);
-  assert.equal(result.databaseVisible, true); assert.deepEqual(result.objects, [{ name: '__proto__', type: 'table' }]);
-  assert.equal(queries.length, 10); assert.deepEqual(queries.find(query => query.sql.includes('KEY_COLUMN_USAGE')).params, [database, database]);
+  assert.equal(result.databaseVisible, true); assert.deepEqual(result.objects, [{ name: '__proto__', type: 'table', engine: null }]);
+  assert.equal(queries.length, 11); assert.deepEqual(queries.find(query => query.sql.includes('KEY_COLUMN_USAGE')).params, [database, database]);
   await assert.rejects(() => collectSelectionTargetFacts(session, 'invalid\0database'));
 });
 
@@ -164,7 +175,8 @@ test('column collector binds selected table names, redacts enum labels/default v
   assert.equal(result.columns[0].type, 'enum(…)'); assert.equal(result.columns[0].generated, false);
   assert.equal(result.columns[1].generated, true); assert.equal(result.columns[1].generatedKind, 'stored');
   assert.equal(JSON.stringify(result).includes('private-'), false);
-  assert.equal(query.sql.includes('GENERATION_EXPRESSION'), false);
+  assert.match(query.sql, /SHA2\(GENERATION_EXPRESSION,256\)/);
+  assert.match(query.sql, /SHA2\(COLUMN_DEFAULT,256\)/);
 });
 
 test('target snapshot changes when column metadata changes and column report remains partial', () => {
@@ -242,7 +254,7 @@ test('index metadata errors, malformed rows and quotas remain unknown and cancel
 test('target index snapshot binds order, prefix, uniqueness and type drift; missing legacy evidence stays unknown', () => {
   const index = { table: 'parent', name: 'pair', nonUnique: false, ordinal: 1, column: 'id', prefixLength: null, direction: 'A', type: 'BTREE', visibility: 'visible' };
   const first = report(facts({ indexes: [index] }));
-  assert.equal(first.version, 10); assert.equal(first.rows[0].indexReview.complete, true);
+  assert.equal(first.version, 16); assert.equal(first.rows[0].indexReview.complete, true);
   for (const changes of [{ nonUnique: true }, { ordinal: 2 }, { prefixLength: 8 }, { direction: 'D' }, { type: 'HASH' }, { column: null }, { visibility: 'invisible' }]) {
     assert.notEqual(report(facts({ indexes: [{ ...index, ...changes }] })).snapshotId, first.snapshotId);
   }

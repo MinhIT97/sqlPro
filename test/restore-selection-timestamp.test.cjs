@@ -54,7 +54,7 @@ test('TIMESTAMP precision loss blocks the draft independently on either side and
   const reversed = fixture(["'2024-02-29 01:02:03.123456'"], 'TIMESTAMP(3)', 'TIMESTAMP(6)').build();
   assert.equal(reversed.valueReview.rows[0].fields[0].source.status, 'issues');
   assert.equal(reversed.valueReview.rows[0].fields[0].target.status, 'unknown');
-  assert.equal(first.version, 23); assert.equal(first.valueReview.version, 8); assert.equal(first.canExecute, false);
+  assert.equal(first.version, 29); assert.equal(first.valueReview.version, 8); assert.equal(first.canExecute, false);
   assert.equal(Object.isFrozen(first.valueReview.rows[0].fields[0].target.findings), true);
 });
 

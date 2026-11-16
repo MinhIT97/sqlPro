@@ -66,7 +66,7 @@ test('profiles are counted separately for raw integers and numeric strings, boun
 
 test('known YEAR issues block the draft, binding and freeze include the report with no original value or execution authority', () => {
   const input = fixture(['2156']), first = input.build();
-  assert.equal(first.version, 23); assert.equal(first.canExecute, false); assert.equal(first.valueReview.version, 8);
+  assert.equal(first.version, 29); assert.equal(first.canExecute, false); assert.equal(first.valueReview.version, 8);
   assert.equal(first.steps[1].reason, 'VALUE_BASIC_ISSUES');
   assert.equal(Object.isFrozen(first.valueReview.rows[0].fields[0].target), true);
   assert.equal(JSON.stringify(first).includes('2156'), false);

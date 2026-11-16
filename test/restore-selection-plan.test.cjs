@@ -21,7 +21,7 @@ function draft(data, options = {}, overrides = {}) {
   const source = previewRestoreSelection(data, { tables: ['items'], ...options });
   const checksum = 'a'.repeat(64), targetIdentity = 'b'.repeat(64);
   const facts = { checks: [], checkCapabilities: { version: 1, status: 'observed', tableColumn: false, enforcedColumn: true }, database: 'demo', checkedAt: '2026-11-12T12:00:00Z', version: '8.4', lowerCaseTableNames: 0,
-    databaseVisible: true, objects: options.includeStructure === false ? [{ name: 'items', type: 'table' }] : [], triggers: [], foreignKeys: [], foreignKeyMetadataVersion: 2, columns: [], indexes: [], errors: [], truncated: [] };
+    databaseVisible: true, objects: options.includeStructure === false ? [{ name: 'items', type: 'table', engine: 'InnoDB' }] : [], triggers: [], foreignKeys: [], foreignKeyMetadataVersion: 2, columns: [], indexes: [], errors: [], truncated: [] };
   const targetReview = buildSelectionTargetPreview({ source, checksum, targetIdentity, facts });
   return buildSelectionDraft({ inventory: data, source, checksum, targetIdentity, targetReview, ...overrides });
 }
@@ -31,7 +31,7 @@ test('session proposal is immutable, bound independently of supplied snapshot an
   const data = inventory("SET NAMES utf8mb4; SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0; SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO'; CREATE TABLE `items` (`id` INT) ENGINE=InnoDB; SET SQL_MODE=@OLD_SQL_MODE; SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;");
   const targetReview = { canExecute: false, snapshotId: 'c'.repeat(64), database: 'demo', findings: [], lowerCaseTableNames: 0,
     metadataStatus: { complete: true, databaseVisible: true }, rows: [{ name: 'items', objects: [], objectCount: 0 }],
-    sessionSettings: normalizeSessionSettings({ foreignKeyChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES',
+    sessionSettings: normalizeSessionSettings({ foreignKeyChecks: 1, uniqueChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES',
       charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4' }) };
   const first = draft(data, {}, { targetReview });
   assert.deepEqual(first.sessionPolicyReview.findings, []); assert.equal(first.canExecute, false);
@@ -43,6 +43,13 @@ test('session proposal is immutable, bound independently of supplied snapshot an
   const changed = structuredClone(targetReview); changed.sessionSettings.foreignKeyChecks = false;
   const second = draft(data, {}, { targetReview: changed });
   assert.notEqual(first.planId, second.planId); assert.ok(second.blockers.some(item => item.code === 'SESSION_FK_CHECKS_DISABLED'));
+  for (const value of [false, null]) {
+    const uniqueTarget = structuredClone(targetReview); uniqueTarget.sessionSettings.uniqueChecks = value;
+    const uniquePlan = draft(data, {}, { targetReview: uniqueTarget });
+    assert.notEqual(first.planId, uniquePlan.planId); assert.equal(uniquePlan.canExecute, false);
+    assert.ok(uniquePlan.blockers.some(item => item.code === (value === false ? 'SESSION_UNIQUE_CHECKS_DISABLED' : 'SESSION_UNIQUE_CHECKS_NOT_REVIEWED')));
+    assert.equal(Object.isFrozen(uniquePlan.sessionPolicyReview.observations), true);
+  }
 });
 
 test('draft attributes bounded statements in source order, marks DROP/context/unknown and preserves all gates', () => {
@@ -116,7 +123,7 @@ test('draft checks syntax evidence target/shape and projects only the review fie
 test('CREATE evidence is required, bound to target/shape and projected without defaults or extra fields', () => {
   const data = inventory("CREATE TABLE `items` (`id` int DEFAULT 123456789, PRIMARY KEY (`id`)) ENGINE=InnoDB; CREATE TABLE `other` (`id` int) ENGINE=MyISAM;");
   const first = draft(data);
-  assert.equal(first.version, 23); assert.equal(first.canExecute, false);
+  assert.equal(first.version, 29); assert.equal(first.canExecute, false);
   assert.equal(first.steps[0].reason, 'BASIC_CREATE_MATCHED');
   assert.deepEqual(first.createSyntaxTotals, { matched: 1, unsupported: 0, notReviewed: 0 });
   assert.equal(first.steps[0].syntaxReview.columns, 1); assert.equal(first.steps[0].syntaxReview.indexes, 1);

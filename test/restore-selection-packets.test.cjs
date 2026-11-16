@@ -19,7 +19,7 @@ function fixture(statements = [insert(1025)]) {
   const inventory = collector.finish(), source = previewRestoreSelection(inventory, { tables: ['items'], includeStructure: false });
   const targetReview = { canExecute: false, snapshotId: 'a'.repeat(64), database: 'demo', lowerCaseTableNames: 0, findings: [],
     metadataStatus: { complete: true, databaseVisible: true }, packetSettings: { version: 1, maxAllowedPacket: 1024 },
-    sessionSettings: { version: 1, charsetClient: 'utf8mb4' }, rows: [{ name: 'items', objects: [{ name: 'items', type: 'table' }], objectCount: 1 }] };
+    sessionSettings: { version: 1, charsetClient: 'utf8mb4' }, rows: [{ name: 'items', objects: [{ name: 'items', type: 'table', engine: 'InnoDB' }], objectCount: 1 }] };
   return { inventory, ledger: inventory.statementLedger, source, targetReview, policyReview: { rows: [{ name: 'items', disposition: 'review' }] } };
 }
 const draft = input => buildSelectionDraft({ ...input, checksum: 'b'.repeat(64), targetIdentity: 'c'.repeat(64) });
@@ -47,6 +47,8 @@ test('only definite original-byte excess is oversized; a conservative protocol m
 });
 
 test('missing/old byte evidence, unknown encoding/limits, schema mapping and incomplete ledgers are not proofs', () => {
+  const current = fixture([insert(1018)]); current.targetReview.sessionSettings.version = 2;
+  assert.equal(reviewSelectionPackets(current).rows[0].status, 'withinObserved');
   for (const [change, reason] of [
     [r => { delete r.ledger.entries[1].sizeReview; }, 'PACKET_SIZE_NOT_REVIEWED'],
     [r => { r.ledger.entries[1].sizeReview.version = 0; }, 'PACKET_SIZE_NOT_REVIEWED'],
@@ -74,7 +76,7 @@ test('scope and skip policy exclude work but never override an explicit schema m
 
 test('draft binds/freezes sizes and server limits, blocks known excess and missing report detail, and retains no SQL', () => {
   const input = fixture(), first = draft(input);
-  assert.equal(first.version, 23); assert.equal(first.canExecute, false);
+  assert.equal(first.version, 29); assert.equal(first.canExecute, false);
   assert.equal(first.steps[1].reason, 'PACKET_STATEMENT_TOO_LARGE');
   assert.equal(Object.isFrozen(first.packetReview.rows[0]), true); assert.equal(Object.isFrozen(first.steps[1].sizeReview), true);
   input.targetReview.packetSettings.maxAllowedPacket = 2048;
@@ -90,7 +92,7 @@ test('draft binds/freezes sizes and server limits, blocks known excess and missi
 });
 
 test('collector reads packet metadata in the existing SELECT and snapshot binds only projected settings', async () => {
-  const input = fixture(), raw = { foreignKeyChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES',
+  const input = fixture(), raw = { foreignKeyChecks: 1, uniqueChecks: 1, autocommit: 1, sqlMode: 'STRICT_TRANS_TABLES',
     charsetClient: 'utf8mb4', charsetConnection: 'utf8mb4', charsetResults: 'utf8mb4', maxAllowedPacket: '32768', private: 'private-metadata' };
   const collect = row => collectSelectionTargetFacts({ raw: async (sql, params) => {
     assert.match(sql, /^SELECT /);

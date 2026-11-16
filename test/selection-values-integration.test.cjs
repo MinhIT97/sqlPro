@@ -41,7 +41,7 @@ test('value bounds integration: read-only preview agrees with strict integer ran
     await t.test('source-wide integers and NULL report narrower target issues without writes or editor changes', async () => {
       initial = await make('items', '`id` BIGINT UNSIGNED, `n` INT', ['INSERT INTO items VALUES(18446744073709551615,NULL)']);
       const report = initial.draft.valueReview, row = report.rows[0];
-      assert.equal(initial.targetReview.version, 10); assert.equal(initial.draft.version, 23);
+      assert.equal(initial.targetReview.version, 16); assert.equal(initial.draft.version, 29);
       assert.equal(initial.targetReview.rows[0].valueColumns.complete, true);
       assert.equal(report.canExecute, false); assert.equal(row.status, 'issues');
       assert.equal(row.fields[0].source.status, 'basic-checked'); assert.equal(row.fields[1].source.status, 'basic-checked');

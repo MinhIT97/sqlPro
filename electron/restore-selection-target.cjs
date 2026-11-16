@@ -7,7 +7,10 @@ const { reviewTargetForeignKeys } = require('./restore-selection-target-foreign-
 const { normalizeSessionSettings, projectSessionSettings } = require('./restore-selection-session-policy.cjs');
 const { projectValueColumns } = require('./restore-selection-values.cjs');
 const { normalizePacketSettings, projectPacketSettings } = require('./restore-selection-packets.cjs');
-const { collectTargetChecks, reviewTargetChecks } = require('./restore-selection-checks.cjs');
+const { collectTargetChecks, reviewTargetChecks, collectCheckSessionSettings } = require('./restore-selection-checks.cjs');
+const { normalizeTargetEngine, reviewTargetEngine } = require('./restore-selection-engines.cjs');
+const { collectTargetTriggers, projectTrigger, reviewTargetTriggers } = require('./restore-selection-triggers.cjs');
+const { COLUMN_EXPRESSION_SQL, normalizeColumnExpressions, reviewTargetExpressions } = require('./restore-selection-expressions.cjs');
 const LIMIT = 5000;
 const validName = value => typeof value === 'string' && value.length > 0 && value.length <= 64 && !value.includes('\0');
 
@@ -15,7 +18,7 @@ async function collectSelectionTargetFacts(session, database, checkContext = () 
   if (!validName(database)) throw new Error('Database đích không hợp lệ.');
   if (selectedTables !== null && (!Array.isArray(selectedTables) || !selectedTables.length || selectedTables.length > 1000 || selectedTables.some(name => !validName(name)))) throw new Error('Danh sách bảng đích không hợp lệ.');
   const facts = { database, checkedAt: new Date().toISOString(), version: null, lowerCaseTableNames: null, sessionSettings: null, packetSettings: null,
-    databaseVisible: null, objects: [], triggers: [], foreignKeys: [], foreignKeyMetadataVersion: 2, columns: [], indexes: [], indexVisibility: { version: 1, status: 'unknown', kind: null }, errors: [], truncated: [] };
+    databaseVisible: null, objects: [], triggers: [], triggerMetadataVersion: 1, foreignKeys: [], foreignKeyMetadataVersion: 2, columns: [], indexes: [], indexVisibility: { version: 1, status: 'unknown', kind: null }, errors: [], truncated: [] };
   const read = async (section, sql, params, map, maximum = LIMIT) => {
     checkContext();
     let result;
@@ -43,7 +46,7 @@ async function collectSelectionTargetFacts(session, database, checkContext = () 
   });
   if (server?.length === 1) Object.assign(facts, server[0]);
   else if (server) facts.errors.push({ section: 'server', code: 'METADATA_RESULT_INVALID' });
-  const settings = await read('sessionSettings', 'SELECT @@SESSION.foreign_key_checks AS foreignKeyChecks, @@SESSION.autocommit AS autocommit, @@SESSION.sql_mode AS sqlMode, @@SESSION.character_set_client AS charsetClient, @@SESSION.character_set_connection AS charsetConnection, @@SESSION.character_set_results AS charsetResults, @@SESSION.max_allowed_packet AS maxAllowedPacket', [], row => {
+  const settings = await read('sessionSettings', 'SELECT @@SESSION.foreign_key_checks AS foreignKeyChecks, @@SESSION.unique_checks AS uniqueChecks, @@SESSION.autocommit AS autocommit, @@SESSION.sql_mode AS sqlMode, @@SESSION.character_set_client AS charsetClient, @@SESSION.character_set_connection AS charsetConnection, @@SESSION.character_set_results AS charsetResults, @@SESSION.max_allowed_packet AS maxAllowedPacket', [], row => {
     const session = normalizeSessionSettings(row);
     return session ? { session, packetSettings: normalizePacketSettings(row.maxAllowedPacket) } : null;
   }, 1);
@@ -54,14 +57,11 @@ async function collectSelectionTargetFacts(session, database, checkContext = () 
   } else if (settings) facts.errors.push({ section: 'sessionSettings', code: 'METADATA_RESULT_INVALID' });
   const schemas = await read('database', 'SELECT SCHEMA_NAME AS name FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ? LIMIT 2', [database], row => validName(row.name) ? { name: row.name } : null);
   if (schemas) facts.databaseVisible = schemas.some(row => facts.lowerCaseTableNames === 1 || facts.lowerCaseTableNames === 2 ? row.name.toLowerCase() === database.toLowerCase() : row.name === database);
-  facts.objects = await read('objects', `SELECT TABLE_NAME AS name, TABLE_TYPE AS type FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME LIMIT ${LIMIT + 1}`, [database], row => {
+  facts.objects = await read('objects', `SELECT TABLE_NAME AS name, TABLE_TYPE AS type, ENGINE AS engine FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME LIMIT ${LIMIT + 1}`, [database], row => {
     if (!validName(row.name) || !['BASE TABLE', 'VIEW'].includes(row.type)) return null;
-    return { name: row.name, type: row.type === 'VIEW' ? 'view' : 'table' };
+    return { name: row.name, type: row.type === 'VIEW' ? 'view' : 'table', engine: row.type === 'BASE TABLE' ? normalizeTargetEngine(row.engine) : null };
   }) || [];
-  facts.triggers = await read('triggers', `SELECT TRIGGER_NAME AS name, EVENT_OBJECT_TABLE AS tableName, EVENT_MANIPULATION AS event FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? ORDER BY TRIGGER_NAME LIMIT ${LIMIT + 1}`, [database], row => {
-    if (!validName(row.name) || !validName(row.tableName) || !['INSERT', 'UPDATE', 'DELETE'].includes(row.event)) return null;
-    return { name: row.name, table: row.tableName, event: row.event };
-  }) || [];
+  facts.triggers = await collectTargetTriggers(read, database);
   facts.foreignKeys = await read('foreignKeys', `SELECT k.CONSTRAINT_NAME AS name, k.TABLE_SCHEMA AS tableSchema, k.TABLE_NAME AS tableName, k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_SCHEMA AS referencedSchema, k.REFERENCED_TABLE_NAME AS referencedTable, k.REFERENCED_COLUMN_NAME AS referencedColumn, k.ORDINAL_POSITION AS ordinal, r.DELETE_RULE AS onDelete, r.UPDATE_RULE AS onUpdate, r.MATCH_OPTION AS matchOption FROM information_schema.KEY_COLUMN_USAGE k LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON BINARY r.CONSTRAINT_SCHEMA = BINARY k.CONSTRAINT_SCHEMA AND BINARY r.TABLE_NAME = BINARY k.TABLE_NAME AND BINARY r.CONSTRAINT_NAME = BINARY k.CONSTRAINT_NAME AND BINARY r.UNIQUE_CONSTRAINT_SCHEMA = BINARY k.REFERENCED_TABLE_SCHEMA AND BINARY r.REFERENCED_TABLE_NAME = BINARY k.REFERENCED_TABLE_NAME WHERE k.REFERENCED_TABLE_NAME IS NOT NULL AND (k.TABLE_SCHEMA = ? OR k.REFERENCED_TABLE_SCHEMA = ?) ORDER BY k.TABLE_SCHEMA, k.TABLE_NAME, k.CONSTRAINT_NAME, k.ORDINAL_POSITION LIMIT ${LIMIT + 1}`, [database, database], row => {
     if (![row.name, row.tableSchema, row.tableName, row.columnName, row.referencedSchema, row.referencedTable, row.referencedColumn].every(validName)
         || !['number', 'string'].includes(typeof row.ordinal) || !/^\d{1,4}$/.test(String(row.ordinal)) || Number(row.ordinal) < 1 || Number(row.ordinal) > 4096
@@ -73,14 +73,15 @@ async function collectSelectionTargetFacts(session, database, checkContext = () 
       ordinal: Number(row.ordinal), onDelete: row.onDelete, onUpdate: row.onUpdate, match: row.matchOption };
   }) || [];
   const tableFilter = selectedTables ? ` AND TABLE_NAME IN (${selectedTables.map(() => '?').join(',')})` : '';
-  facts.columns = await read('columns', `SELECT TABLE_NAME AS tableName, COLUMN_NAME AS name, ORDINAL_POSITION AS ordinal, COLUMN_TYPE AS columnType, IS_NULLABLE AS nullable, EXTRA AS extra, CHARACTER_SET_NAME AS charset, COLLATION_NAME AS collation, (COLUMN_DEFAULT IS NOT NULL) AS hasDefault FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ?${tableFilter} ORDER BY TABLE_NAME, ORDINAL_POSITION LIMIT 10001`, [database, ...(selectedTables || [])], row => {
+  facts.columns = await read('columns', `SELECT TABLE_NAME AS tableName, COLUMN_NAME AS name, ORDINAL_POSITION AS ordinal, COLUMN_TYPE AS columnType, IS_NULLABLE AS nullable, EXTRA AS extra, CHARACTER_SET_NAME AS charset, COLLATION_NAME AS collation, (COLUMN_DEFAULT IS NOT NULL) AS hasDefault, ${COLUMN_EXPRESSION_SQL} FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ?${tableFilter} ORDER BY TABLE_NAME, ORDINAL_POSITION LIMIT 10001`, [database, ...(selectedTables || [])], row => {
     if (!validName(row.tableName) || !validName(row.name) || !Number.isInteger(Number(row.ordinal)) || Number(row.ordinal) < 1 || Number(row.ordinal) > 4096
         || typeof row.columnType !== 'string' || row.columnType.length > 65536 || !['YES', 'NO'].includes(row.nullable)
         || typeof row.extra !== 'string' || row.extra.length > 256 || ![0, 1, '0', '1', true, false].includes(row.hasDefault)
         || row.charset !== null && !validName(row.charset) || row.collation !== null && !validName(row.collation)) return null;
+    const hasDefault = row.hasDefault === true || row.hasDefault === 1 || row.hasDefault === '1', generated = /\b(?:VIRTUAL|STORED) GENERATED\b/i.test(row.extra);
     return { table: row.tableName, name: row.name, ordinal: Number(row.ordinal), ...normalizeColumnType(row.columnType),
-      nullable: row.nullable === 'YES', hasDefault: row.hasDefault === true || row.hasDefault === 1 || row.hasDefault === '1',
-      autoIncrement: /\bauto_increment\b/i.test(row.extra), generated: /\b(?:VIRTUAL|STORED) GENERATED\b/i.test(row.extra),
+      nullable: row.nullable === 'YES', hasDefault, expressionProfile: normalizeColumnExpressions(row, hasDefault, generated),
+      autoIncrement: /\bauto_increment\b/i.test(row.extra), generated,
       generatedKind: /\bSTORED GENERATED\b/i.test(row.extra) ? 'stored' : /\bVIRTUAL GENERATED\b/i.test(row.extra) ? 'virtual' : null,
       invisible: /\bINVISIBLE\b/i.test(row.extra), charset: row.charset, collation: row.collation,
       attributesKnown: !row.extra.replace(/\b(?:auto_increment|DEFAULT_GENERATED|(?:VIRTUAL|STORED) GENERATED|INVISIBLE)\b/gi, '').trim(),
@@ -109,6 +110,7 @@ async function collectSelectionTargetFacts(session, database, checkContext = () 
   }, 20000) || [];
   const checks = await collectTargetChecks(read, database, selectedTables);
   facts.checkCapabilities = checks.capabilities; facts.checks = checks.rows;
+  facts.checkSessionSettings = await collectCheckSessionSettings(session, checkContext);
   checkContext();
   return facts;
 }
@@ -140,6 +142,11 @@ function buildSelectionTargetPreview({ source, checksum, targetIdentity, facts }
   let columnFieldBudget = 2000, columnFindingBudget = 1000, indexBudget = 1000, indexPartBudget = 4000, valueColumnBudget = 2000;
   const rows = source.rows.map(row => {
     const matches = facts.objects.filter(object => key(object.name) === key(row.name));
+    const engineReview = reviewTargetEngine({ name: row.name, objects: matches, objectCount: matches.length }, {
+      lowerCaseTableNames: facts.lowerCaseTableNames, databaseVisible: facts.databaseVisible,
+      metadataComplete: !facts.errors.some(error => ['objects', 'database', 'server'].includes(error.section))
+        && !facts.truncated.some(section => ['objects', 'database', 'server'].includes(section)) });
+    if (!source.includeStructure && source.includeData && engineReview.reason !== 'TARGET_ENGINE_INNODB_OBSERVED') add(engineReview.reason, row.name);
     if (matches.length > 1) add('TARGET_AMBIGUOUS_OBJECT', row.name);
     if (matches.some(object => object.type === 'view')) add('TARGET_VIEW_CONFLICT', row.name);
     else if (source.includeStructure && matches.length) add('TARGET_STRUCTURE_CONFLICT', row.name);
@@ -168,7 +175,7 @@ function buildSelectionTargetPreview({ source, checksum, targetIdentity, facts }
     if (!indexReview.complete && matches.some(object => object.type === 'table')) add('TARGET_INDEXES_REQUIRE_REVIEW', row.name);
     indexBudget -= indexReview.indexes.length; indexPartBudget -= indexReview.parts;
     return { name: row.name, objects: matches.slice(0, 10), objectCount: matches.length,
-      triggers: triggers.slice(0, 10), triggerCount: triggers.length, columnReview, indexReview, valueColumns };
+      triggers: triggers.slice(0, 10).map(projectTrigger), triggerCount: triggers.length, columnReview, indexReview, valueColumns, engineReview };
   });
   const targetForeignKeyReview = reviewTargetForeignKeys(facts.foreignKeys, { database: facts.database, selectedTables: source.selectedTables, lowerCaseTableNames: facts.lowerCaseTableNames,
     metadataComplete: facts.foreignKeyMetadataVersion === 2 && Array.isArray(facts.foreignKeys) && facts.foreignKeys.length <= LIMIT
@@ -190,18 +197,28 @@ function buildSelectionTargetPreview({ source, checksum, targetIdentity, facts }
   if (!targetCheckReview.complete) add('TARGET_CHECKS_REQUIRE_REVIEW');
   if (targetCheckReview.totals.observed + targetCheckReview.totals.unknown) add('TARGET_CHECKS_PRESENT');
   if (targetCheckReview.truncated) add('TARGET_CHECK_REPORT_LIMIT');
+  if (targetCheckReview.sessionSettings.enabled === false) add('TARGET_CHECK_SESSION_DISABLED');
+  if (targetCheckReview.sessionSettings.enabled === null && targetCheckReview.totals.observed + targetCheckReview.totals.unknown) add('TARGET_CHECK_SESSION_NOT_REVIEWED');
+  const targetTriggerReview = reviewTargetTriggers(facts, source.selectedTables);
+  const targetExpressionReview = reviewTargetExpressions(facts, source.selectedTables);
+  if (!targetExpressionReview.complete) add('TARGET_COLUMN_EXPRESSIONS_INCOMPLETE');
+  if (targetExpressionReview.truncated) add('TARGET_COLUMN_EXPRESSIONS_REPORT_LIMIT');
+  if (!targetTriggerReview.complete) add('TARGET_TRIGGER_METADATA_INCOMPLETE');
+  if (targetTriggerReview.truncated) add('TARGET_TRIGGER_REPORT_LIMIT');
   if (source.includeStructure && source.totals.dropStatements) add('SOURCE_DROP_REQUIRES_EXPLICIT_POLICY');
   if (facts.database !== source.sourceDatabase) add('SOURCE_SCHEMA_MAPPING_NOT_VALIDATED');
   // The digest names an observation, never an approval token or executable plan.
   // Exclude observation time; include full collected metadata even if the UI is bounded.
   const { checkedAt, ...metadata } = facts;
-  const snapshotId = crypto.createHash('sha256').update(JSON.stringify({ version: 10, checksum, targetIdentity,
+  const metadataId = crypto.createHash('sha256').update(JSON.stringify({ version: 2, targetIdentity,
+    tables: [...source.selectedTables].sort(), metadata })).digest('hex');
+  const snapshotId = crypto.createHash('sha256').update(JSON.stringify({ version: 16, checksum, targetIdentity,
     sourceDatabase: source.sourceDatabase, tables: [...source.selectedTables].sort(),
     includeStructure: source.includeStructure, includeData: source.includeData, metadata })).digest('hex');
-  return { version: 10, canExecute: false, snapshotId, checkedAt, database: facts.database, serverVersion: facts.version,
+  return { version: 16, canExecute: false, snapshotId, metadataId, checkedAt, database: facts.database, serverVersion: facts.version,
     lowerCaseTableNames: facts.lowerCaseTableNames, sessionSettings: projectSessionSettings(facts.sessionSettings), packetSettings: projectPacketSettings(facts.packetSettings), visibility: 'account-visible', status: 'partial',
     metadataStatus: { databaseVisible: facts.databaseVisible === true, complete: targetCheckReview.complete && targetForeignKeyReview.complete && indexMetadataComplete && facts.errors.length === 0 && facts.truncated.length === 0 },
-    rows, foreignKeys, targetForeignKeyReview, targetCheckReview, findings, findingsTruncated };
+    rows, foreignKeys, targetForeignKeyReview, targetCheckReview, targetTriggerReview, targetExpressionReview, findings, findingsTruncated };
 }
 
 module.exports = { collectSelectionTargetFacts, buildSelectionTargetPreview };

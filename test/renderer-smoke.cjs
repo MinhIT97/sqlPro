@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
 const root = process.env.SQLPRO_RENDERER_APP_ROOT ? path.resolve(process.env.SQLPRO_RENDERER_APP_ROOT) : path.join(__dirname, '..');
 app.setPath('userData', fs.mkdtempSync(path.join(os.tmpdir(), 'sqlpro-smoke-')));
@@ -20,10 +21,19 @@ const columns = [
   { name: 'name', type: 'varchar(255)', key: '', extra: '', nullable: 'YES', defaultValue: null }
 ];
 let rowEditorColumns = columns;
+let autocompleteColumns = null;
 let rowEditorFailure = false;
 let rowEditorResult = { affectedRows: 1, changedRows: 1 };
 let sshTestResponses = [];
 let pendingQueryExport = null;
+let explainTreeUnsupported = false;
+let analyzeCanceled = false;
+let explainAccessMethod = 'ALL';
+let explainSessionId = 'smoke-explain-session';
+let explainSettingsDigest = 'a';
+let explainSettingsMissing = false;
+let explainSchemaDigest = 'a';
+let explainSchemaMissing = false;
 const tables = Array.from({ length: 14 }, (_, i) => ({ name: i ? `table_${i}` : 'users', type: 'table' }));
 const ok = (data) => ({ ok: true, data });
 const rows = (names, data) => ({ kind: 'rows', columns: names.map((name) => ({ name, type: 'TEXT' })), rows: data, durationMs: 1 });
@@ -52,7 +62,7 @@ handle('account:status', () => ok({ loggedIn: false }));
 handle('db:use-database', () => ok({}));
 handle('db:databases', () => ok(['test']));
 handle('db:tables', () => ok(tables));
-handle('db:columns', () => ok(rowEditorColumns));
+handle('db:columns', payload => ok(autocompleteColumns?.get(payload?.table) || rowEditorColumns));
 handle('db:indexes', () => ok([]));
 handle('db:relations', () => ok({ outbound: [{ table: 'users', column: 'id', refTable: 'table_1', refColumn: 'id', refDatabase: 'test' }], inbound: [] }));
 handle('db:table-data', () => ok({ columns, primaryKey: ['id'], rows: [{ id: 1, name: 'Alice' }], total: 1, page: 1, pageSize: 100 }));
@@ -361,29 +371,54 @@ handle('db:cancel-task', (payload) => {
   pendingQueryExport = null;
   return ok({ canceled: true });
 });
+handle('db:analyze-query', () => analyzeCanceled ? ok({ canceled: true }) : ok({
+  ...rows(['ANALYZE'], [['{"query_block":{"r_rows":2,"r_total_time_ms":0.12,"condition":"<img src=x onerror=alert(1)>"}}']]),
+  isAnalyze: true, isExplain: true, explainFormat: 'JSON', analysis: { version: 1, executed: true, engine: 'MariaDB' }
+}));
 handle('db:query', (payload) => {
   if (!payload || typeof payload.sql !== 'string') return { ok: false, error: { message: 'Invalid query payload' } };
   const sql = payload.sql.trim();
+  const explainResult = (names, data) => ok({ ...rows(names, data), explainContext: { version: 1,
+    profileId: payload.profileId, database: payload.database ?? null, taskId: payload.taskId,
+    sessionId: explainSessionId, sqlHash: crypto.createHash('sha256').update(payload.sql).digest('hex'), checkedAt: new Date().toISOString(),
+    ...(payload.explainSettings === true ? { settings: explainSettingsMissing ? null : { version: 1, status: 'observed',
+      fields: require(path.join(root, 'query-results.js')).explainSettingNames.map(name => ({ name,
+        digest: (name === 'time_zone' ? explainSettingsDigest : 'a').repeat(64) })) } } : {}),
+    ...(payload.explainSchema === true ? { schema: explainSchemaMissing ? null : { version: 1, status: 'observed',
+      database: payload.database, table: '<img src=table>', digest: explainSchemaDigest.repeat(64) } } : {}) } });
   if (/FAIL_TEST/.test(sql)) return { ok: false, error: { message: 'Expected SQL failure', code: 'TEST_ERROR' } };
   if (/^(UPDATE|DELETE|ALTER|DROP|KILL)\b/i.test(sql) && !payload.confirmed) {
     return { ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Confirmation required' } };
   }
   if (/^SHOW FULL PROCESSLIST/i.test(sql)) return ok(rows(['Id', 'User', 'Host', 'db', 'Command', 'Time', 'State', 'Info'], [[42, 'test', 'localhost', 'test', 'Query', 8, '', 'SELECT 1']]));
   if (/^SHOW (VARIABLES|STATUS)/i.test(sql)) return ok(rows(['Variable_name', 'Value'], [['max_connections', '151']]));
-  if (/^EXPLAIN/i.test(sql)) return ok(rows(['table', 'type', 'Extra'], [['users', 'ALL', 'Using filesort']]));
+  if (/^EXPLAIN FORMAT=JSON /i.test(sql)) return explainResult(['EXPLAIN'], [['{"query_block":{"rows":90071992547409931234,"condition":"<img src=x onerror=alert(1)>","table_name":"users"}}']]);
+  if (/^EXPLAIN FORMAT=TREE /i.test(sql)) return explainTreeUnsupported
+    ? { ok: false, error: { code: 'ER_UNKNOWN_EXPLAIN_FORMAT', message: 'Server không hỗ trợ TREE' } }
+    : explainResult(['EXPLAIN'], [['-> Table scan on users  (cost=0.35 rows=1)\n']]);
+  if (/^EXPLAIN/i.test(sql)) return explainResult(['table', 'type', 'Extra'], [['users', explainAccessMethod, 'Using filesort']]);
   if (/^(CHECK|OPTIMIZE|ANALYZE|REPAIR) TABLE/i.test(sql)) return ok(rows(['Table', 'Op', 'Msg_type', 'Msg_text'], [['test.users', 'check', 'status', 'OK']]));
   if (/^SELECT/i.test(sql)) return ok(rows(['value', 'type'], [['ALL', 'ALL'], ['2', 'REF']]));
   return ok({ kind: 'ok', affectedRows: 1, insertId: null, durationMs: 1 });
 });
 
 const evaluate = (code) => win.webContents.executeJavaScript(code);
-async function captureReview(name) {
-  if (!process.env.SQLPRO_REVIEW_SCREENSHOT_DIR) return;
+async function captureReview(name, prepare) {
   const { width, height } = win.getContentBounds();
+  await until(`innerWidth===${width} && innerHeight===${height}`);
+  if (!process.env.SQLPRO_REVIEW_SCREENSHOT_DIR) {
+    if (prepare) await prepare();
+    return;
+  }
   win.setContentSize(width + 2, height + 2);
   await new Promise((resolve) => setTimeout(resolve, 120));
   win.setContentSize(width, height);
   await new Promise((resolve) => setTimeout(resolve, 120));
+  if (prepare) {
+    await prepare();
+    win.webContents.invalidate();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+  }
   fs.mkdirSync(process.env.SQLPRO_REVIEW_SCREENSHOT_DIR, { recursive: true });
   fs.writeFileSync(path.join(process.env.SQLPRO_REVIEW_SCREENSHOT_DIR, `${name}.png`), (await win.webContents.capturePage()).toPNG());
 }
@@ -446,12 +481,14 @@ async function captureProductShots() {
 }
 
 app.whenReady().then(async () => {
-  win = new BrowserWindow({ show: false, width: 1360, height: 900, webPreferences: {
+  win = new BrowserWindow({ show: Boolean(process.env.SQLPRO_REVIEW_VISIBLE), width: 1360, height: 900, webPreferences: {
     preload: path.join(root, 'electron/preload.cjs'), contextIsolation: true, backgroundThrottling: false
   } });
   win.webContents.on('preload-error', (_event, _file, error) => errors.push(error.message));
   await win.loadFile(path.join(root, 'index.html'));
-  await until('app.workspaces.length > 0');
+  // Account refresh is the final step of init(). Waiting only for workspaces
+  // races its later view('data'), which can remove the query DOM under a test.
+  await until('app.workspaces.length > 0 && app.account !== null');
   await evaluate("window.addEventListener('error', event => { window.rendererErrors.push(event.message); }); window.addEventListener('unhandledrejection', event => { window.rendererErrors.push(String(event.reason)); }); window.rendererErrors = []; app.connection = {id:'test', name:'Mock', host:'localhost', port:3306, ssh:{enabled:false}}; app.database='test'; table='users'; app.tables=[{name:'users',type:'table'}]; mode='query'; renderQueryView();");
 
   await check('formatter button is bound after rendering', async () => {
@@ -515,6 +552,265 @@ app.whenReady().then(async () => {
     win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Z', modifiers: ['control'] });
     await until("$('#sql').value === 'SELECT A'");
   });
+  await check('autocomplete keeps case-sensitive sources and self-join aliases, caches bounded metadata and accepts columns with keyboard/undo', async () => {
+    autocompleteColumns = new Map([
+      ['Items', [{ name: 'Name', type: 'varchar(50)' }, { name: 'name', type: 'varchar(50)' }, { name: '<img src=x>', type: 'text' }]],
+      ['items', [{ name: 'lower_key', type: 'int' }]]
+    ]);
+    await evaluate("invalidateSqlAutocomplete();app.query.sql='SELECT * FROM Items a JOIN items b ON a.Name=b.lower_key WHERE ';renderQueryView();$('#sql').focus();$('#sql').setSelectionRange($('#sql').value.length,$('#sql').value.length)");
+    const count = calls.filter(call => call.name === 'db:columns').length;
+    await evaluate("refreshSqlSuggestions($('#sql'),true)");
+    assert.equal(calls.filter(call => call.name === 'db:columns').length, count + 2);
+    const labels = await evaluate('sqlAutocomplete.items.map(item=>item.label)');
+    assert.deepEqual(labels, ['a.Name', 'a.name', 'a.<img src=x>', 'b.lower_key']);
+    assert.equal(await evaluate("$('#sqlSuggestions img')===null"), true);
+    await evaluate("refreshSqlSuggestions($('#sql'),true)");
+    assert.equal(calls.filter(call => call.name === 'db:columns').length, count + 2);
+    win.setContentSize(900, 650);
+    win.webContents.focus();
+    await evaluate("$('#sql').style.height='75px';$('#toast').style.display='none';$('#sql').focus();setSqlSuggestionSelection(0)");
+    await captureReview('autocomplete-cache-small', () => evaluate("clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();refreshSqlSuggestions($('#sql'),true)"));
+    assert.equal(await evaluate("$('#sqlSuggestions').classList.contains('hidden')"), false);
+    assert.equal(await evaluate("$('#sqlSuggestions').getBoundingClientRect().right<=innerWidth"), true);
+    assert.equal(await evaluate("$('#sqlSuggestions').getBoundingClientRect().bottom<=innerHeight"), true);
+    win.webContents.focus();
+    for (const type of ['keyDown', 'char', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return' });
+    await until("$('#sql').value.endsWith('WHERE `a`.`Name`')");
+    assert.equal(await evaluate("document.activeElement===$('#sql')"), true);
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Z', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Z', modifiers: ['control'] });
+    await until("$('#sql').value.endsWith('WHERE ')");
+    await evaluate("app.query.sql='SELECT * FROM Items a JOIN Items b ON a.Name=b.Name WHERE ';renderQueryView();$('#sql').setSelectionRange($('#sql').value.length,$('#sql').value.length);refreshSqlSuggestions($('#sql'),true)");
+    assert.equal(calls.filter(call => call.name === 'db:columns').length, count + 2);
+    assert.equal(await evaluate("sqlAutocomplete.items.some(item=>item.label==='b.Name')"), true);
+    await evaluate("invalidateSqlAutocomplete();refreshSqlSuggestions($('#sql'),true)");
+    assert.equal(calls.filter(call => call.name === 'db:columns').length, count + 3);
+    assert.equal(await evaluate('sqlAutocomplete.columnCache.stats().entries'), 1);
+    await evaluate("window.autocompleteSavedTarget={profileId:app.query.profileId,database:app.query.database,connections:app.connections};app.connections=[...app.connections,{id:'autocomplete-bound'}];app.query.profileId='autocomplete-bound';app.query.database='bound-db';refreshSqlSuggestions($('#sql'),true)");
+    assert.deepEqual(calls.filter(call => call.name === 'db:columns').at(-1).args[0], { database: 'bound-db', table: 'Items', profileId: 'autocomplete-bound' });
+    await evaluate("app.query.profileId=autocompleteSavedTarget.profileId;app.query.database=autocompleteSavedTarget.database;app.connections=autocompleteSavedTarget.connections;delete window.autocompleteSavedTarget;invalidateSqlAutocomplete()");
+    await evaluate("closeSqlSuggestions();$('#sql').style.height='';app.query.sql='SELECT 1';renderQueryView()");
+    win.setContentSize(1344, 835); autocompleteColumns = null;
+  });
+  await check('autocomplete isolates nested SELECT blocks and never fetches CTE/derived names as physical tables', async () => {
+    autocompleteColumns = new Map([
+      ['accounts', [{ name: 'outer_key', type: 'int' }]], ['invoices', [{ name: 'inner_key', type: 'int' }]],
+      ['recent', [{ name: 'wrong_physical_key', type: 'int' }]]
+    ]);
+    await evaluate("invalidateSqlAutocomplete();window.autocompleteSavedTables=app.tables;app.tables=[...app.tables,{name:'recent',type:'table'}]");
+    const queries = calls.filter(call => call.name === 'db:query').length;
+    const set = async marked => {
+      const caret = marked.indexOf('|'), sql = marked.replace('|', '');
+      await evaluate(`app.query.sql=${JSON.stringify(sql)};renderQueryView();$('#sql').focus();$('#sql').setSelectionRange(${caret},${caret});refreshSqlSuggestions($('#sql'),true)`);
+    };
+    await set('SELECT * FROM accounts a WHERE EXISTS (SELECT 1 FROM invoices i WHERE i.id=a.id) AND |');
+    assert.equal(calls.filter(call => call.name === 'db:columns').at(-1).args[0].table, 'accounts');
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['outer_key']);
+    const inner = 'SELECT * FROM accounts a WHERE EXISTS (SELECT 1 FROM invoices i WHERE | = a.id)';
+    await set(inner);
+    assert.equal(calls.filter(call => call.name === 'db:columns').at(-1).args[0].table, 'invoices');
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['inner_key']);
+    const count = calls.filter(call => call.name === 'db:columns').length;
+    await set('WITH recent AS (SELECT * FROM invoices) SELECT * FROM recent r WHERE r.|');
+    assert.equal(calls.filter(call => call.name === 'db:columns').length, count);
+    assert.equal(await evaluate('sqlAutocomplete.items.length'), 0);
+    await set('SELECT * FROM (SELECT * FROM invoices) r WHERE r.|');
+    assert.equal(calls.filter(call => call.name === 'db:columns').length, count);
+    assert.equal(await evaluate('sqlAutocomplete.items.length'), 0);
+    await set('WITH recent AS (SELECT * FROM invoices) SELECT * FROM recent r JOIN accounts a ON a.id=r.id WHERE |');
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['a.outer_key']);
+    await set(inner);
+    win.setContentSize(900, 650); win.webContents.focus();
+    await evaluate("$('#sql').style.height='75px';$('#toast').style.display='none'");
+    await captureReview('autocomplete-scope-small', () => evaluate("clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();refreshSqlSuggestions($('#sql'),true)"));
+    if (!process.env.SQLPRO_REVIEW_SCREENSHOT_DIR) {
+      await new Promise(resolve => setTimeout(resolve, 150));
+      await evaluate("clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();refreshSqlSuggestions($('#sql'),true)");
+    }
+    assert.equal(await evaluate("$('#sqlSuggestions').classList.contains('hidden')"), false);
+    assert.equal(await evaluate("$('#sqlSuggestions').getBoundingClientRect().bottom<=innerHeight"), true);
+    for (const type of ['keyDown', 'char', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return' });
+    await until("$('#sql').value.includes('WHERE `inner_key` = a.id)')");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Z', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Z', modifiers: ['control'] });
+    await until(`$('#sql').value===${JSON.stringify(inner.replace('|', ''))}`);
+    assert.equal(calls.filter(call => call.name === 'db:query').length, queries);
+    await evaluate("app.tables=autocompleteSavedTables;delete window.autocompleteSavedTables;invalidateSqlAutocomplete();app.query.sql='SELECT 1';renderQueryView()");
+    win.setContentSize(1344, 835); autocompleteColumns = null;
+  });
+  await check('explicit CTE column suggestions stay local, escape names and support keyboard insertion and undo', async () => {
+    autocompleteColumns = new Map([['recent', [{ name: 'wrong_physical_key', type: 'int' }]]]);
+    await evaluate("invalidateSqlAutocomplete();window.cteSavedTables=app.tables;app.tables=[...app.tables,{name:'recent',type:'table'}]");
+    const columns = calls.filter(call => call.name === 'db:columns').length;
+    const queries = calls.filter(call => call.name === 'db:query').length;
+    const set = async marked => {
+      const caret = marked.indexOf('|'), sql = marked.replace('|', '');
+      await evaluate(`app.query.sql=${JSON.stringify(sql)};renderQueryView();clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();$('#sql').setSelectionRange(${caret},${caret});refreshSqlSuggestions($('#sql'),true)`);
+    };
+    await set('WITH recent(id, `tên cột`, `a``b`, `<img src=x onerror=alert(1)>`) AS (SELECT id,total,memo,extra FROM invoices) SELECT * FROM recent r WHERE r.|');
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['r.id', 'r.tên cột', 'r.a`b', 'r.<img src=x onerror=alert(1)>']);
+    assert.equal(await evaluate("$('#sqlSuggestions img')===null"), true);
+    assert.equal(await evaluate("sqlAutocomplete.items.every(item=>item.detail==='CTE · recent · cột khai báo')"), true);
+    await set('WITH RECURSIVE chain(id,parent_id) AS (SELECT * FROM chain c WHERE c.|) SELECT * FROM chain');
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['c.id', 'c.parent_id']);
+    await set('WITH recent(id) AS (SELECT 1) SELECT * FROM (WITH recent AS (SELECT 2) SELECT * FROM recent r WHERE r.|) d');
+    assert.equal(await evaluate('sqlAutocomplete.items.length'), 0);
+    const marked = 'WITH recent(id, `tên cột`) AS (SELECT id,total FROM invoices)\nSELECT * FROM recent r WHERE r.`tê|n khác`=1';
+    win.setContentSize(900, 650); win.webContents.focus();
+    await until('innerWidth===900 && innerHeight===650');
+    await set(marked);
+    await evaluate("$('#sql').style.height='130px';$('#toast').style.display='none'");
+    await captureReview('autocomplete-cte-small', () => evaluate("clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();refreshSqlSuggestions($('#sql'),true)"));
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['r.tên cột']);
+    assert.equal(await evaluate("$('#sqlSuggestions').getBoundingClientRect().bottom<=innerHeight"), true);
+    for (const type of ['keyDown', 'char', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return' });
+    await until(`$('#sql').value===${JSON.stringify(marked.replace('tê|n khác', 'tên cột'))}`);
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Z', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Z', modifiers: ['control'] });
+    await until(`$('#sql').value===${JSON.stringify(marked.replace('|', ''))} && $('#sql').selectionStart===${marked.indexOf('|')}`);
+    assert.equal(calls.filter(call => call.name === 'db:columns').length, columns);
+    assert.equal(calls.filter(call => call.name === 'db:query').length, queries);
+    await evaluate("app.tables=cteSavedTables;delete window.cteSavedTables;invalidateSqlAutocomplete();app.query.sql='SELECT 1';renderQueryView()");
+    win.setContentSize(1344, 835); autocompleteColumns = null;
+  });
+  await check('SELECT output names for CTE and derived sources need no metadata reads and support keyboard/undo', async () => {
+    autocompleteColumns = new Map([['recent', [{ name: 'wrong_physical_key', type: 'int' }]], ['d', [{ name: 'wrong_derived_key', type: 'int' }]]]);
+    await evaluate("invalidateSqlAutocomplete();window.projectionSavedTables=app.tables;app.tables=[...app.tables,{name:'recent',type:'table'},{name:'d',type:'table'}]");
+    const columns = calls.filter(call => call.name === 'db:columns').length;
+    const queries = calls.filter(call => call.name === 'db:query').length;
+    const set = async marked => {
+      const caret = marked.indexOf('|'), sql = marked.replace('|', '');
+      await evaluate(`app.query.sql=${JSON.stringify(sql)};renderQueryView();clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();$('#sql').setSelectionRange(${caret},${caret});refreshSqlSuggestions($('#sql'),true)`);
+    };
+    await set('WITH recent AS (SELECT i.id, COUNT(*) AS total, i.name AS `<img src=x onerror=alert(1)>` FROM invoices i) SELECT * FROM recent r WHERE r.|');
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['r.id', 'r.total', 'r.<img src=x onerror=alert(1)>']);
+    assert.equal(await evaluate("$('#sqlSuggestions img')===null"), true);
+    assert.equal(await evaluate("sqlAutocomplete.items.every(item=>item.detail==='CTE · recent · tên từ SELECT')"), true);
+    await set('SELECT * FROM (SELECT i.id AS item_id, COUNT(*) AS total FROM invoices i) d WHERE d.|');
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['d.item_id', 'd.total']);
+    assert.equal(await evaluate("sqlAutocomplete.items.every(item=>item.detail==='Derived · d · tên từ SELECT')"), true);
+    for (const marked of [
+      'WITH recent AS (SELECT i.id, i.* FROM invoices i) SELECT * FROM recent r WHERE r.|',
+      'SELECT * FROM (SELECT i.id, i.id AS ID FROM invoices i) d WHERE d.|'
+    ]) { await set(marked); assert.equal(await evaluate('sqlAutocomplete.items.length'), 0); }
+    const marked = 'WITH recent AS (SELECT i.id AS item_id, COUNT(*) AS `tổng` FROM invoices i)\nSELECT * FROM recent r WHERE r.`tổ|ng cũ`>0';
+    win.setContentSize(900, 650); win.webContents.focus();
+    await until('innerWidth===900 && innerHeight===650');
+    await set(marked);
+    await evaluate("$('#sql').style.height='150px';$('#toast').style.display='none'");
+    await captureReview('autocomplete-projection-small', () => evaluate("clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();refreshSqlSuggestions($('#sql'),true)"));
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['r.tổng']);
+    assert.equal(await evaluate("$('#sqlSuggestions').getBoundingClientRect().bottom<=innerHeight"), true);
+    for (const type of ['keyDown', 'char', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return' });
+    await until(`$('#sql').value===${JSON.stringify(marked.replace('tổ|ng cũ', 'tổng'))}`);
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Z', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Z', modifiers: ['control'] });
+    await until(`$('#sql').value===${JSON.stringify(marked.replace('|', ''))} && $('#sql').selectionStart===${marked.indexOf('|')}`);
+    assert.equal(calls.filter(call => call.name === 'db:columns').length, columns);
+    assert.equal(calls.filter(call => call.name === 'db:query').length, queries);
+    await evaluate("app.tables=projectionSavedTables;delete window.projectionSavedTables;invalidateSqlAutocomplete();app.query.sql='SELECT 1';renderQueryView()");
+    win.setContentSize(1344, 835); autocompleteColumns = null;
+  });
+  await check('implicit SELECT aliases stay local, escape names and preserve keyboard insertion/undo', async () => {
+    autocompleteColumns = new Map([['recent', [{ name: 'wrong_physical_key', type: 'int' }]], ['d', [{ name: 'wrong_derived_key', type: 'int' }]]]);
+    await evaluate("invalidateSqlAutocomplete();window.implicitSavedTables=app.tables;app.tables=[...app.tables,{name:'recent',type:'table'},{name:'d',type:'table'}]");
+    const columns = calls.filter(call => call.name === 'db:columns').length;
+    const queries = calls.filter(call => call.name === 'db:query').length;
+    const set = async marked => {
+      const caret = marked.indexOf('|'), sql = marked.replace('|', '');
+      await evaluate(`app.query.sql=${JSON.stringify(sql)};renderQueryView();clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();$('#sql').setSelectionRange(${caret},${caret});refreshSqlSuggestions($('#sql'),true)`);
+    };
+    await set('WITH recent AS (SELECT i.id item_id, COUNT(*) total, i.name `<img src=x onerror=alert(1)>` FROM invoices i) SELECT * FROM recent r WHERE r.|');
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['r.item_id', 'r.total', 'r.<img src=x onerror=alert(1)>']);
+    assert.equal(await evaluate("$('#sqlSuggestions img')===null"), true);
+    await set('SELECT * FROM (SELECT i.id item_id, COUNT(*) total FROM invoices i) d WHERE d.|');
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['d.item_id', 'd.total']);
+    assert.equal(await evaluate("sqlAutocomplete.items.every(item=>item.detail==='Derived · d · tên từ SELECT')"), true);
+    await set('SELECT * FROM (SELECT i.id COLLATE FROM invoices i) d WHERE d.|');
+    assert.equal(await evaluate('sqlAutocomplete.items.length'), 0);
+    const marked = 'WITH recent AS (SELECT i.id item_id, COUNT(*) `tổng` FROM invoices i)\nSELECT * FROM recent r WHERE r.`tổ|ng cũ`>0';
+    win.setContentSize(900, 650); win.webContents.focus();
+    await until('innerWidth===900 && innerHeight===650');
+    await set(marked);
+    await evaluate("$('#sql').style.height='150px';$('#toast').style.display='none'");
+    await captureReview('autocomplete-implicit-small', () => evaluate("clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();refreshSqlSuggestions($('#sql'),true)"));
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['r.tổng']);
+    assert.equal(await evaluate("$('#sqlSuggestions').getBoundingClientRect().bottom<=innerHeight"), true);
+    for (const type of ['keyDown', 'char', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return' });
+    await until(`$('#sql').value===${JSON.stringify(marked.replace('tổ|ng cũ', 'tổng'))}`);
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Z', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Z', modifiers: ['control'] });
+    await until(`$('#sql').value===${JSON.stringify(marked.replace('|', ''))} && $('#sql').selectionStart===${marked.indexOf('|')}`);
+    assert.equal(calls.filter(call => call.name === 'db:columns').length, columns);
+    assert.equal(calls.filter(call => call.name === 'db:query').length, queries);
+    await evaluate("app.tables=implicitSavedTables;delete window.implicitSavedTables;invalidateSqlAutocomplete();app.query.sql='SELECT 1';renderQueryView()");
+    win.setContentSize(1344, 835); autocompleteColumns = null;
+  });
+  await check('autocomplete replaces complete tokens at the caret, supports undo and ignores stale suggestions', async () => {
+    autocompleteColumns = new Map([['users', [{ name: 'name', type: 'text' }]]]);
+    await evaluate('invalidateSqlAutocomplete()');
+    const queries = calls.filter(call => call.name === 'db:query').length;
+    const markedSql = [
+      'SELECT 1; SELECT * FROM users u WHERE u.na|me=1; SELECT 2',
+      'SELECT 1; SELECT * FROM users u WHERE u.`na|mx`=1; SELECT 2',
+      'SELECT 1; SELECT * FROM users u WHERE u.|`namx`=1; SELECT 2'
+    ];
+    win.setContentSize(900, 650); win.webContents.focus();
+    await until('innerWidth===900 && innerHeight===650');
+    for (const [index, marked] of markedSql.entries()) {
+      const caret = marked.indexOf('|'), sql = marked.replace('|', '');
+      await evaluate(`app.query.sql=${JSON.stringify(sql)};renderQueryView();$('#sql').style.height='75px';clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();$('#sql').setSelectionRange(${caret},${caret});refreshSqlSuggestions($('#sql'),true)`);
+      assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['u.name']);
+      if (index === 1) await captureReview('autocomplete-range-small', () => evaluate("clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();refreshSqlSuggestions($('#sql'),true)"));
+      assert.equal(await evaluate("$('#sqlSuggestions').getBoundingClientRect().bottom<=innerHeight"), true);
+      for (const type of ['keyDown', 'char', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return' });
+      await until("$('#sql').value==='SELECT 1; SELECT * FROM users u WHERE u.`name`=1; SELECT 2'");
+      win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Z', modifiers: ['control'] });
+      win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Z', modifiers: ['control'] });
+      await until(`$('#sql').value===${JSON.stringify(sql)}`);
+      assert.deepEqual(await evaluate("[$('#sql').selectionStart,$('#sql').selectionEnd]"), [caret, caret], marked);
+    }
+    await evaluate("clearTimeout(sqlAutocomplete.blurTimer);refreshSqlSuggestions($('#sql'),true)");
+    assert.equal(await evaluate('sqlAutocomplete.items.length'), 1);
+    await evaluate("$('#sql').setSelectionRange(0,0);acceptSqlSuggestion($('#sql'),0)");
+    assert.equal(await evaluate("$('#sql').value"), markedSql.at(-1).replace('|', ''));
+    await evaluate(`$('#sql').setSelectionRange(${markedSql.at(-1).indexOf('|')},${markedSql.at(-1).indexOf('|')});refreshSqlSuggestions($('#sql'),true)`);
+    assert.equal(await evaluate('sqlAutocomplete.items.length'), 1);
+    await evaluate("{const database=app.query.database;app.query.database='changed-autocomplete-target';try{acceptSqlSuggestion($('#sql'),0)}finally{app.query.database=database}}");
+    assert.equal(await evaluate('sqlAutocomplete.context'), null);
+    assert.equal(await evaluate("$('#sql').value"), markedSql.at(-1).replace('|', ''));
+    assert.equal(calls.filter(call => call.name === 'db:query').length, queries);
+    await evaluate("invalidateSqlAutocomplete();app.query.sql='SELECT 1';renderQueryView()");
+    win.setContentSize(1344, 835); autocompleteColumns = null;
+  });
+  await check('review regressions preserve function arguments and block ambiguous qualified owners', async () => {
+    autocompleteColumns = new Map([['accounts', [{ name: 'good_key', type: 'int' }]]]);
+    await evaluate('invalidateSqlAutocomplete()');
+    const columns = calls.filter(call => call.name === 'db:columns').length;
+    const queries = calls.filter(call => call.name === 'db:query').length;
+    const set = async marked => {
+      const caret = marked.indexOf('|'), sql = marked.replace('|', '');
+      await evaluate(`app.query.sql=${JSON.stringify(sql)};renderQueryView();clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();$('#sql').setSelectionRange(${caret},${caret});refreshSqlSuggestions($('#sql'),true)`);
+    };
+    await set('SELECT * FROM accounts x JOIN x ON 1=1 WHERE x.|');
+    assert.equal(await evaluate('sqlAutocomplete.items.length'), 0);
+    await set('WITH c(id) AS (SELECT 1) SELECT * FROM c accounts JOIN accounts ON 1=1 WHERE accounts.|');
+    assert.equal(await evaluate('sqlAutocomplete.items.length'), 0);
+    assert.equal(calls.filter(call => call.name === 'db:columns').length, columns);
+    const marked = 'SELECT COU|NTA(id) FROM users';
+    await set(marked);
+    await evaluate("setSqlSuggestionSelection(sqlAutocomplete.items.findIndex(item=>item.type==='function' && item.insertText==='COUNT()'))");
+    assert.equal(await evaluate('sqlAutocomplete.items[sqlAutocomplete.selected].insertText'), 'COUNT()');
+    win.webContents.focus();
+    for (const type of ['keyDown', 'char', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return' });
+    await until("$('#sql').value==='SELECT COUNT(id) FROM users' && $('#sql').selectionStart===13");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Z', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Z', modifiers: ['control'] });
+    await until(`$('#sql').value===${JSON.stringify(marked.replace('|', ''))} && $('#sql').selectionStart===${marked.indexOf('|')}`);
+    assert.equal(calls.filter(call => call.name === 'db:query').length, queries);
+    await evaluate("invalidateSqlAutocomplete();app.query.sql='SELECT 1';renderQueryView()");
+    autocompleteColumns = null;
+  });
   await check('selected SQL and success/failure history contain strings', async () => {
     await evaluate("$('#sql').value='select 1; select 2;'; $('#sql').setSelectionRange(10,19); runQuery()");
     assert.equal(calls.filter((call) => call.name === 'db:query').at(-1).args[0].sql, 'select 2;');
@@ -538,6 +834,8 @@ app.whenReady().then(async () => {
     assert.equal(calls.filter((call) => call.name === 'db:query').at(-1).args[0].sql, 'EXPLAIN SELECT * FROM users');
     assert.equal(await evaluate("Boolean($('#queryResult .explain-badge.warn'))"), true);
     assert.equal(await evaluate("$('#queryResult').textContent.includes('Cần đánh thêm Index')"), false);
+    assert.equal(await evaluate("$('#toast').textContent.includes('Nên thêm Index')"), false);
+    assert.equal(await evaluate("$('#queryResult .explain-review:not(.explain-comparison)').textContent.includes('Ước lượng')"), true);
     const count = calls.filter((call) => call.name === 'db:query').length;
     await evaluate("$('#sql').select(); runExplainQuery()");
     assert.equal(calls.filter((call) => call.name === 'db:query').length, count);
@@ -551,6 +849,216 @@ app.whenReady().then(async () => {
   });
   await check('duplicate EXPLAIN values use their own column metadata', async () => {
     assert.equal(await evaluate("(singleQueryResultHtml({kind:'rows',isExplain:true,columns:[{name:'table'},{name:'type'}],rows:[['ALL','ALL']],durationMs:1}).match(/explain-badge warn/g)||[]).length"), 1);
+  });
+  await check('EXPLAIN explanations support keyboard, escaped labels and small dark windows without extra queries', async () => {
+    const count = calls.filter(call => call.name === 'db:query').length;
+    await evaluate(`app.query.result={kind:'rows',isExplain:true,durationMs:1,
+      columns:['table','type','key','rows','filtered','Extra'].map(name=>({name,type:'TEXT'})),
+      rows:[['<img src=x onerror=alert(1)>','ALL',null,'5','80.5','Using filesort; Using temporary'],
+        ['items','ref','idx_parent',1200,5,'Using index']]};
+      $('#queryResult').innerHTML=queryResultHtml(); $('#queryResult .explain-review summary').focus()`);
+    win.webContents.focus();
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#queryResult .explain-review details').open");
+    assert.equal(await evaluate("$('#queryResult .explain-review').textContent.includes('<img src=x')"), true);
+    assert.equal(await evaluate("$('#queryResult .explain-review img')===null"), true);
+    assert.equal(await evaluate("$('#queryResult .explain-badge.good')===null"), true);
+    assert.equal(await evaluate("$('#queryResult .explain-extra-warn').title.includes('chưa chứng minh')"), true);
+    await evaluate("$('#toast').style.display='none'");
+    await captureReview('explain-context');
+    win.setContentSize(900, 650);
+    await evaluate("document.body.classList.add('dark-theme'); document.body.classList.remove('light-theme')");
+    await captureReview('explain-context-small-dark');
+    const layout = await evaluate(`(()=>{ const box=$('#queryResult .explain-review');
+      const table=box.querySelector('.explain-review-table');
+      const bounds=box.getBoundingClientRect(), container=$('#queryResult').getBoundingClientRect();
+      return {fits:bounds.right<=innerWidth && bounds.bottom<=container.bottom+1,bounds:bounds.toJSON(),container:container.toJSON(),scrolls:table.scrollWidth>table.clientWidth,
+        vertical:box.scrollHeight>box.clientHeight && getComputedStyle(box).overflowY==='auto',
+        keyboard:document.activeElement===box.querySelector('summary')}; })()`);
+    assert.equal(layout.fits, true, JSON.stringify(layout)); assert.equal(layout.scrolls, true, JSON.stringify(layout));
+    assert.equal(layout.vertical, true, JSON.stringify(layout)); assert.equal(layout.keyboard, true, JSON.stringify(layout));
+    assert.equal(calls.filter(call => call.name === 'db:query').length, count);
+    await evaluate("document.body.classList.remove('dark-theme'); document.body.classList.add('light-theme')");
+    await captureReview('explain-context-small-light');
+    win.setContentSize(1344, 835);
+  });
+  await check('EXPLAIN JSON/TREE selector preserves native text, rejects ANALYZE and never retries unsupported formats', async () => {
+    await evaluate("$('#sql').value='SELECT * FROM users';$('#sql').setSelectionRange(0,0);$('#explainFormat').value='JSON';$('#explainFormat').dispatchEvent(new Event('change'));runExplainQuery()");
+    await until("!app.query.running && Boolean($('#queryResult .explain-document'))");
+    assert.equal(calls.filter(call => call.name === 'db:query').at(-1).args[0].sql, 'EXPLAIN FORMAT=JSON SELECT * FROM users');
+    assert.equal(await evaluate("$('#queryResult .explain-document pre').textContent.includes('90071992547409931234')"), true);
+    assert.equal(await evaluate("$('#queryResult .explain-document img')===null"), true);
+    await evaluate("$('#queryResult .explain-document summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#queryResult .explain-document details').open");
+    win.setContentSize(900, 650);
+    await evaluate("$('#sql').style.height='75px';$('#queryResult .explain-document pre').focus();$('#toast').style.display='none'");
+    await captureReview('explain-json-small');
+    assert.equal(await evaluate("document.activeElement.matches('.explain-document pre')"), true);
+    assert.equal(await evaluate("$('#queryResult .explain-document').getBoundingClientRect().right<=innerWidth"), true);
+    await evaluate("renderQueryView()");
+    assert.equal(await evaluate("$('#explainFormat').value"), 'JSON');
+    await evaluate("$('#explainFormat').value='TREE';$('#explainFormat').dispatchEvent(new Event('change'));runExplainQuery()");
+    await until("!app.query.running && Boolean($('#queryResult .explain-document'))");
+    assert.equal(await evaluate("$('#queryResult .explain-document pre').textContent.startsWith('-> Table scan')"), true);
+    explainTreeUnsupported = true;
+    let count = calls.filter(call => call.name === 'db:query').length;
+    await evaluate('runExplainQuery()');
+    assert.equal(calls.filter(call => call.name === 'db:query').length, count + 1);
+    assert.match(await evaluate("$('#queryResult .errorbox').textContent"), /không hỗ trợ TREE/);
+    assert.equal(await evaluate("$('#explainFormat').value"), 'TREE');
+    count += 1;
+    await evaluate("$('#sql').value='EXPLAIN ANALYZE SELECT * FROM users';runExplainQuery()");
+    assert.equal(calls.filter(call => call.name === 'db:query').length, count);
+    assert.match(await evaluate("$('#toast').textContent"), /ANALYZE thực thi/);
+    explainTreeUnsupported = false;
+    await evaluate("$('#sql').value='SELECT * FROM users';$('#sql').setSelectionRange(0,0);$('#explainFormat').value='DEFAULT';$('#explainFormat').dispatchEvent(new Event('change'));runExplainQuery()");
+    win.setContentSize(1344, 835);
+  });
+  await check('ANALYZE named action preserves cancel output, opens native plan with keyboard and exports cached results without replay', async () => {
+    await evaluate("app.query.sql='SELECT * FROM users';$('#sql').value=app.query.sql;$('#sql').setSelectionRange(0,0)");
+    const prior = await evaluate('app.query.result');
+    delete prior.explainComparison;
+    analyzeCanceled = true;
+    await evaluate("$('#analyzeQueryBtn').click()"); await until('!app.query.running');
+    assert.deepEqual(await evaluate('app.query.result'), prior);
+    analyzeCanceled = false;
+    const queries = calls.filter(call => call.name === 'db:query' || call.name === 'db:export-query').length;
+    await evaluate("$('#analyzeQueryBtn').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("!app.query.running && Boolean($('#queryResult .analyze-review'))");
+    assert.equal(calls.filter(call => call.name === 'db:analyze-query').at(-1).args[0].sql, 'SELECT * FROM users');
+    assert.equal(await evaluate("$('#queryResult .analyze-review img')===null"), true);
+    assert.equal(await evaluate("$('#queryResult .explain-comparison')===null"), true);
+    await evaluate("$('#queryResult .analyze-review summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#queryResult .analyze-review details').open");
+    win.setContentSize(900, 650);
+    await evaluate("$('#sql').style.height='75px';$('#toast').style.display='none';$('#queryResult .analyze-review').scrollTop=0");
+    await captureReview('analyze-summary-small');
+    await evaluate("$('#queryResult .analyze-review pre').focus()");
+    assert.equal(await evaluate("document.activeElement.matches('.analyze-review pre')"), true);
+    assert.equal(await evaluate("$('#queryResult .analyze-review').getBoundingClientRect().right<=innerWidth"), true);
+    await captureReview('analyze-native-small');
+    await evaluate("exportCurrentResult('json')");
+    assert.equal(calls.filter(call => call.name === 'db:query' || call.name === 'db:export-query').length, queries);
+    const saved = calls.filter(call => call.name === 'file:save-text').at(-1).args[0];
+    assert.equal(JSON.parse(saved.contents)[0].ANALYZE.includes('r_rows'), true);
+    win.setContentSize(1344, 835);
+    await evaluate("$('#sql').style.height='';runExplainQuery()");
+    await until('!app.query.running');
+  });
+  await check('EXPLAIN compares consecutive plans with bounded details, keyboard and reconnect/scope resets', async () => {
+    await evaluate("$('#sql').value='SELECT * FROM users';$('#sql').setSelectionRange(0,0)");
+    const run = async () => {
+      await evaluate('runExplainQuery()');
+      await until("!app.query.running && Boolean($('#queryResult .explain-comparison'))");
+    };
+    const status = () => evaluate('app.query.result.explainComparison.status');
+    await evaluate('resetExplainComparisons()'); await run(); assert.equal(await status(), 'baseline');
+    await run(); assert.equal(await status(), 'unchanged');
+    explainAccessMethod = 'ref'; await run(); assert.equal(await status(), 'changed');
+    await evaluate("$('#queryResult .explain-comparison summary').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#queryResult .explain-comparison details').open");
+    assert.match(await evaluate("$('#queryResult .explain-comparison').textContent"), /ALL.*ref/);
+    assert.match(await evaluate("$('#queryResult .explain-comparison').textContent"), /Không xác nhận schema/);
+    win.setContentSize(900, 650);
+    await evaluate("$('#sql').style.height='75px';$('#toast').style.display='none'");
+    await captureReview('explain-comparison-small');
+    assert.equal(await evaluate("$('#queryResult .explain-comparison').getBoundingClientRect().right<=innerWidth"), true);
+    await evaluate("$('#queryResult .explain-comparison .explain-review-table').focus();$('#queryResult .explain-comparison .explain-review-table').scrollIntoView({block:'nearest'})");
+    assert.equal(await evaluate("document.activeElement.getAttribute('aria-label')"), 'Các bước plan thay đổi');
+    await captureReview('explain-comparison-steps-small');
+    await run(); assert.equal(await status(), 'unchanged');
+    explainSessionId = 'smoke-reconnected'; await run(); assert.equal(await status(), 'different-scope');
+    await evaluate("$('#sql').value='SELECT * FROM users WHERE id=2';$('#sql').setSelectionRange(0,0)");
+    await run(); assert.equal(await status(), 'different-scope');
+    await evaluate("$('#explainFormat').value='JSON';$('#explainFormat').dispatchEvent(new Event('change'))");
+    await run(); assert.equal(await status(), 'different-scope');
+    await run(); assert.equal(await status(), 'unchanged');
+    explainAccessMethod = 'ALL';
+    await evaluate("$('#explainFormat').value='DEFAULT';$('#explainFormat').dispatchEvent(new Event('change'));resetExplainComparisons()");
+    win.setContentSize(1344, 835);
+  });
+  await check('EXPLAIN settings opt-in supports keyboard, blocks comparisons after drift/missing evidence and fits small windows', async () => {
+    assert.equal(await evaluate("$('#explainSettings').checked"), false);
+    await evaluate("$('#explainSettings').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+    await until("$('#explainSettings').checked");
+    const run = async () => { await evaluate('runExplainQuery()'); await until('!app.query.running'); };
+    await run(); assert.equal(await evaluate('app.query.result.explainComparison.status'), 'baseline');
+    assert.equal(calls.filter(call => call.name === 'db:query').at(-1).args[0].explainSettings, true);
+    await run(); assert.equal(await evaluate('app.query.result.explainComparison.status'), 'unchanged');
+    explainSettingsDigest = 'b'; await run();
+    assert.equal(await evaluate('app.query.result.explainComparison.status'), 'settings-changed');
+    await evaluate("$('#queryResult .explain-comparison summary').focus()");
+    for (const type of ['keyDown', 'char', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return' });
+    await until("$('#queryResult .explain-comparison details').open");
+    assert.match(await evaluate("$('#queryResult .explain-comparison').textContent"), /time_zone/);
+    assert.equal(await evaluate("$('#queryResult .explain-comparison .explain-review-table')===null"), true);
+    await evaluate("$('#queryResult .explain-settings-review summary').focus()");
+    for (const type of ['keyDown', 'char', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return' });
+    await until("$('#queryResult .explain-settings-review details').open");
+    win.setContentSize(900, 650);
+    await evaluate("$('#sql').style.height='75px';$('#toast').style.display='none'");
+    await evaluate("$('#queryResult .explain-settings-review p').scrollIntoView({block:'nearest'})");
+    await captureReview('explain-settings-small');
+    assert.equal(await evaluate("$('#queryResult .explain-settings-review').getBoundingClientRect().right<=innerWidth"), true);
+    assert.equal(await evaluate("$('#queryResult .explain-settings-review').textContent.includes('bbbbbbbbbbbb')"), false);
+    assert.match(await evaluate("$('#queryResult .explain-settings-review').textContent"), /Chưa xác nhận schema/);
+    explainSettingsMissing = true; await run();
+    assert.equal(await evaluate('app.query.result.explainComparison.status'), 'unknown');
+    assert.match(await evaluate("$('#queryResult .explain-settings-review summary').textContent"), /Chưa đủ thông tin/);
+    explainSettingsMissing = false;
+    await evaluate("$('#explainSettings').click();$('#sql').style.height='';renderQueryView()");
+    assert.equal(await evaluate("$('#explainSettings').checked"), false);
+    win.setContentSize(1344, 835);
+  });
+  await check('EXPLAIN table definition opt-in resets scopes, blocks drift comparisons and keeps metadata escaped and usable with keyboard', async () => {
+    await evaluate("app.query.sql='SELECT * FROM users';$('#sql').value=app.query.sql;$('#sql').setSelectionRange(0,0)");
+    assert.equal(await evaluate("$('#explainSchema').checked"), false);
+    await evaluate("$('#explainSchema').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+    await until("$('#explainSchema').checked");
+    const run = async () => { await evaluate('runExplainQuery()'); await until('!app.query.running'); };
+    await run(); assert.equal(await evaluate('app.query.result.explainComparison.status'), 'baseline');
+    assert.equal(calls.filter(call => call.name === 'db:query').at(-1).args[0].explainSchema, true);
+    assert.equal(calls.filter(call => call.name === 'db:query').at(-1).args[0].sql, 'EXPLAIN SELECT * FROM users');
+    await run(); assert.equal(await evaluate('app.query.result.explainComparison.status'), 'unchanged');
+    explainSchemaDigest = 'b'; await run(); assert.equal(await evaluate('app.query.result.explainComparison.status'), 'schema-changed');
+    await evaluate("$('#queryResult .explain-comparison summary').focus()");
+    for (const type of ['keyDown', 'char', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return' });
+    await until("$('#queryResult .explain-comparison details').open");
+    await evaluate("$('#queryResult .explain-schema-review summary').focus()");
+    for (const type of ['keyDown', 'char', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return' });
+    await until("$('#queryResult .explain-schema-review details').open");
+    assert.equal(await evaluate("$('#queryResult .explain-schema-review img')===null"), true);
+    assert.match(await evaluate("$('#queryResult .explain-schema-review').textContent"), /<img src=table>/);
+    assert.equal(await evaluate("$('#queryResult .explain-comparison .explain-review-table')===null"), true);
+    win.setContentSize(900, 650);
+    await evaluate("$('#sql').style.height='75px';$('#toast').style.display='none';$('#queryResult .explain-comparison').scrollTop=0");
+    await captureReview('explain-schema-summary-small');
+    await evaluate("$('#queryResult .explain-schema-review p').scrollIntoView({block:'nearest'})");
+    await captureReview('explain-schema-small');
+    assert.equal(await evaluate("$('#queryResult .explain-schema-review').getBoundingClientRect().right<=innerWidth"), true);
+    assert.equal(await evaluate("$('#queryResult .explain-schema-review').textContent.includes('bbbbbbbbbbbb')"), false);
+    explainSchemaMissing = true; await run(); assert.equal(await evaluate('app.query.result.explainComparison.status'), 'unknown');
+    explainSchemaMissing = false;
+    await evaluate("$('#explainSchema').click();$('#sql').style.height='';renderQueryView()");
+    assert.equal(await evaluate("$('#explainSchema').checked"), false); win.setContentSize(1344, 835);
   });
   await check('drop actions honor confirmation and use object query payloads', async () => {
     await confirmPending("dropColumnAction('users','name')");
@@ -1801,6 +2309,28 @@ app.whenReady().then(async () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(calls.filter((call) => call.name === 'db:update-row').length, before + 1);
     rowEditorFailure = false;
+  });
+
+  await check('failed or zero-row inline saves never retry on focusout and an explicit retry saves exactly once', async () => {
+    try {
+      for (const variant of ['error', 'zero']) {
+        await setupTypedRows();
+        rowEditorFailure = variant === 'error'; rowEditorResult = { affectedRows: variant === 'zero' ? 0 : 1, changedRows: 0 };
+        const before = calls.filter(call => call.name === 'db:update-row').length;
+        await evaluate("inlineEditCell($('#grid td[data-col=name]'));document.querySelector('.inline-cell-editor').value='Retry allowed';document.querySelector('.sql-inline-actions button').click()");
+        await until("!document.querySelector('.sql-value-error').hidden");
+        await evaluate("document.querySelector('#conflictStay')?.click();$('#treeSearch').focus();document.querySelector('.sql-value-inline').dispatchEvent(new FocusEvent('focusout',{bubbles:true,relatedTarget:$('#treeSearch')}))");
+        await new Promise(resolve => setTimeout(resolve, 40));
+        assert.equal(calls.filter(call => call.name === 'db:update-row').length, before + 1, variant);
+        assert.equal(await evaluate("document.querySelector('.inline-cell-editor').value"), 'Retry allowed');
+        assert.equal(await evaluate('app.rows[0].name'), 'Alice');
+        rowEditorFailure = false; rowEditorResult = { affectedRows: 1, changedRows: 1 };
+        await evaluate("document.querySelector('.sql-inline-actions button').click()");
+        await until("!$('#grid td[data-col=name]').classList.contains('editing-cell')");
+        assert.equal(calls.filter(call => call.name === 'db:update-row').length, before + 2);
+        assert.equal(await evaluate('app.rows[0].name'), 'Retry allowed');
+      }
+    } finally { rowEditorFailure = false; rowEditorResult = { affectedRows: 1, changedRows: 1 }; }
   });
 
   await check('zero-row inline saves retain input and never update the displayed row', async () => {

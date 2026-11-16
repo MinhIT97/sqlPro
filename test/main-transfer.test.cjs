@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }), readOnlyProfiles = [], productionProfiles = [], removedProfiles = [], profiles = {}, scheduleHarness, inspection, trialRecovery, backupCatalog = {}, retentionStore, retentionApply, retentionExport, retentionAuto, onConnect, onRaw, timers, retentionHistory = { read: () => [], begin: () => 'history-fixture', finish() {} } } = {}) {
+function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }), readOnlyProfiles = [], productionProfiles = [], removedProfiles = [], profiles = {}, scheduleHarness, inspection, trialRecovery, backupCatalog = {}, retentionStore, retentionApply, retentionExport, retentionAuto, onConnect, onRaw, timers, now, retentionHistory = { read: () => [], begin: () => 'history-fixture', finish() {} } } = {}) {
   const handlers = new Map(), sessions = [];
   let chooseFile = async () => ({ filePath: '/review/export.json' });
   let chooseOpen = async () => ({ canceled: true, filePaths: [] });
@@ -80,7 +80,8 @@ function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }
       if (id === './backup-inspection.cjs' && inspection) return { BackupInspection: class { constructor() { return inspection; } } };
       if (id === 'node:fs') return { ...fs, mkdirSync() {}, writeFileSync() {}, renameSync() {}, promises: { ...fs.promises, mkdir: async () => {} } };
       return require(id.startsWith('./') ? path.join(root, id) : id);
-    }, __dirname: root, process, Buffer, console, setTimeout: timers?.setTimeout || setTimeout, clearTimeout: timers?.clearTimeout || clearTimeout, AbortController
+    }, __dirname: root, process, Buffer, console, Date: now ? class extends Date { static now() { return now(); } } : Date,
+    setTimeout: timers?.setTimeout || setTimeout, clearTimeout: timers?.clearTimeout || clearTimeout, AbortController
   });
   return {
     call: (name, payload, options) => handlers.get(name)({ sender: null }, payload, options),
@@ -93,6 +94,94 @@ function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }
   };
 }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+async function analyzeFixture(options) {
+  const r = setup(options);
+  await r.call('db:connect', 'p1');
+  const session = r.sessions[0], runs = [], uses = [];
+  Object.assign(session, { version: '8.4.7', autocommit: true, inTransaction: false });
+  session.useDatabase = async database => { uses.push(database); session.database = database; };
+  session.analyzeQuery = async (sql, timeout, taskId, check) => {
+    check(); runs.push({ sql, timeout, taskId }); return { kind: 'rows', isAnalyze: true };
+  };
+  return { ...r, session, runs, uses, request: { profileId: 'p1', database: 'demo', sql: "SELECT * FROM items WHERE name='private-literal'", taskId: 'analyze-1', timeoutMs: 900000 } };
+}
+
+test('ANALYZE always needs native confirmation even with forged confirmed/engine flags, cancel executes no USE or SQL', async () => {
+  const r = await analyzeFixture(); let shown;
+  r.productionDialog(async (_window, options) => { shown = options; return { response: 0 }; });
+  const result = await r.call('db:analyze-query', { ...r.request, confirmed: true, engine: 'MariaDB' });
+  assert.equal(result.data.canceled, true); assert.equal(r.runs.length, 0); assert.equal(r.uses.length, 0);
+  assert.equal(shown.defaultId, 0); assert.equal(shown.cancelId, 0);
+  assert.match(shown.detail, /MySQL TREE/); assert.match(shown.detail, /60 giây/); assert.doesNotMatch(shown.detail, /private-literal/);
+  r.productionDialog(async () => ({ response: 1 }));
+  assert.equal((await r.call('db:analyze-query', r.request)).ok, true);
+  assert.equal(r.runs.length, 1); assert.equal(r.runs[0].timeout, 60000); assert.equal(r.uses[0], 'demo');
+});
+
+test('ANALYZE rejects read-only, unsupported servers, malformed SQL/context and transaction state before dialog', async () => {
+  for (const variant of ['read-only', 'unsupported', 'transaction', 'autocommit', 'batch', 'task', 'database']) {
+    const readOnlyProfiles = [], r = await analyzeFixture({ readOnlyProfiles }); let dialogs = 0;
+    r.productionDialog(async () => { dialogs++; return { response: 1 }; });
+    if (variant === 'read-only') readOnlyProfiles.push('p1');
+    if (variant === 'unsupported') r.session.version = '5.7.44';
+    if (variant === 'transaction') r.session.inTransaction = true;
+    if (variant === 'autocommit') r.session.autocommit = false;
+    const request = { ...r.request, ...(variant === 'batch' ? { sql: 'SELECT 1; DELETE FROM items' } : {}),
+      ...(variant === 'task' ? { taskId: null } : {}), ...(variant === 'database' ? { database: '' } : {}) };
+    assert.equal((await r.call('db:analyze-query', request)).ok, false, variant);
+    assert.equal(dialogs, 0); assert.equal(r.runs.length, 0); assert.equal(r.uses.length, 0);
+  }
+});
+
+test('pending ANALYZE approval holds exclusive lease, keeps other profiles available and captures immutable SQL/database', async () => {
+  const r = await analyzeFixture(); await r.call('db:connect', 'p2');
+  r.sessions[1].runQueryScript = async () => ({ kind: 'ok' });
+  let approve;
+  r.productionDialog(() => new Promise(resolve => { approve = resolve; }));
+  const request = { ...r.request }, pending = r.call('db:analyze-query', request);
+  await waitFor(() => Boolean(approve));
+  request.sql = 'DELETE FROM items'; request.database = 'other';
+  assert.equal((await r.call('db:query', { profileId: 'p1', sql: 'COMMIT' })).error.code, 'SESSION_BUSY');
+  assert.equal((await r.call('db:use-database', { profileId: 'p1', database: 'other' })).error.code, 'SESSION_BUSY');
+  assert.equal((await r.call('db:query', { profileId: 'p2', sql: 'SELECT 1' })).ok, true);
+  approve({ response: 1 }); assert.equal((await pending).ok, true);
+  assert.equal(r.runs[0].sql, r.request.sql); assert.equal(r.uses[0], 'demo');
+});
+
+test('ANALYZE rechecks permission/profile/session/revision/logout after approval and context after USE/preflight; never retries', async () => {
+  for (const variant of ['read-only', 'profile', 'disconnect', 'revision', 'version', 'expired', 'logout', 'use-drift', 'preflight-drift', 'execution-error']) {
+    const readOnlyProfiles = [], profiles = { p1: { host: 'original' } };
+    let clock = Date.now();
+    const r = await analyzeFixture({ readOnlyProfiles, profiles, now: () => clock, sync: { logout: async () => ({}) } });
+    const drift = () => { profiles.p1.environment = 'production'; };
+    r.productionDialog(async () => {
+      if (variant === 'read-only') readOnlyProfiles.push('p1');
+      if (variant === 'profile') drift();
+      if (variant === 'revision') r.session.transactionRevision = 1;
+      if (variant === 'version') r.session.version = '11.4.13-MariaDB-ubu2404';
+      if (variant === 'expired') clock += 120001;
+      if (variant === 'disconnect') await r.call('db:disconnect', 'p1');
+      if (variant === 'logout') await r.call('account:logout');
+      return { response: 1 };
+    });
+    if (variant === 'use-drift') r.session.useDatabase = async () => { drift(); };
+    if (variant === 'preflight-drift') r.session.analyzeQuery = async (_sql, _timeout, _task, check) => { drift(); check(); r.runs.push('unexpected'); };
+    if (variant === 'execution-error') r.session.analyzeQuery = async () => { r.runs.push('once'); throw new Error('unsupported syntax'); };
+    const result = await r.call('db:analyze-query', r.request);
+    assert.equal(result.ok, false, variant); assert.equal(r.runs.length, variant === 'execution-error' ? 1 : 0, variant);
+  }
+});
+
+test('export IPC rejects manual ANALYZE replay before opening a session or save dialog', async () => {
+  const r = setup(); let saves = 0;
+  r.dialog(async () => { saves++; return {}; });
+  for (const sql of ['EXPLAIN ANALYZE SELECT 1', 'DESC ANALYZE SELECT 1', 'ANALYZE FORMAT=JSON SELECT 1']) {
+    const response = await r.call('db:export-query', { profileId: 'p1', sql, taskId: 'export' });
+    assert.equal(response.error.code, 'ANALYZE_EXPORT_REPLAY_BLOCKED');
+  }
+  assert.equal(r.sessions.length, 0); assert.equal(saves, 0);
+});
 
 test('a pending row write excludes SQL and database switches on that session while other profiles remain available', async () => {
   const r = setup();
@@ -124,6 +213,88 @@ test('query database binding is exclusive before the SQL task starts, and errors
   finish(); assert.equal((await first).ok, false); assert.equal(session.database, 'first');
   session.runQueryScript = async () => ({ kind: 'ok' });
   assert.equal((await r.call('db:query', { profileId: 'p1', sql: 'SELECT 3' })).ok, true);
+});
+
+test('EXPLAIN context binds the actual session, SQL and task without another query or renderer-provided identity', async () => {
+  const r = setup(); await r.call('db:connect', 'p1');
+  const session = r.sessions[0]; session.database = 'demo'; let count = 0;
+  session.runQueryScript = async () => { count += 1; return { kind: 'rows', columns: [{ name: 'EXPLAIN' }], rows: [['{}']] }; };
+  session.useDatabase = async database => { session.database = database; };
+  const request = { profileId: 'p1', database: 'demo', sql: 'EXPLAIN SELECT 1', taskId: 'q1',
+    explainContext: { sessionId: 'renderer-forged', sqlHash: 'wrong', password: 'private' } };
+  const first = await r.call('db:query', request), context = first.data.explainContext;
+  assert.equal(first.ok, true); assert.equal(context.profileId, 'p1'); assert.equal(context.database, 'demo');
+  assert.equal(context.taskId, 'q1'); assert.match(context.sessionId, /^[a-f0-9-]{36}$/);
+  assert.equal(context.sqlHash, require('node:crypto').createHash('sha256').update(request.sql).digest('hex'));
+  assert.equal(Object.keys(context).sort().join(','), 'checkedAt,database,profileId,sessionId,sqlHash,taskId,version');
+  assert.equal(JSON.stringify(context).includes('private'), false);
+  const second = await r.call('db:query', { ...request, taskId: 'q2' });
+  assert.equal(second.data.explainContext.sessionId, context.sessionId); assert.equal(second.data.explainContext.sqlHash, context.sqlHash);
+  assert.equal(second.data.explainContext.taskId, 'q2'); assert.equal(count, 2);
+  const changed = await r.call('db:query', { ...request, database: 'other', sql: 'EXPLAIN SELECT 2' });
+  assert.equal(changed.data.explainContext.database, 'other'); assert.notEqual(changed.data.explainContext.sqlHash, context.sqlHash);
+  const ordinary = await r.call('db:query', { ...request, sql: 'SELECT 1' }); assert.equal(ordinary.data.explainContext, undefined);
+  const legacy = await r.call('db:query', { ...request, taskId: null }); assert.equal(legacy.data.explainContext, null);
+  await r.call('db:disconnect', 'p1'); await r.call('db:connect', 'p1');
+  const reopened = r.sessions.at(-1); reopened.database = 'demo'; reopened.runQueryScript = session.runQueryScript;
+  assert.notEqual((await r.call('db:query', request)).data.explainContext.sessionId, context.sessionId);
+});
+
+test('EXPLAIN completed after profile or session drift keeps its result with unknown comparison context', async () => {
+  const profiles = { p1: { host: 'original' } }, r = setup({ profiles }); await r.call('db:connect', 'p1');
+  const session = r.sessions[0]; session.database = 'demo';
+  session.runQueryScript = async () => { profiles.p1.host = 'changed'; return { kind: 'rows', rows: [['{}']] }; };
+  const result = await r.call('db:query', { profileId: 'p1', sql: 'EXPLAIN SELECT 1', taskId: 'q1' });
+  assert.equal(result.ok, true); assert.equal(result.data.explainContext, null); assert.equal(result.data.rows[0][0], '{}');
+});
+
+test('EXPLAIN settings come from the session result, are projected by main and missing or stale evidence stays unknown', async () => {
+  const { explainSettingNames } = require('../query-results.js');
+  const profiles = { p1: { host: 'fixture' } }, r = setup({ profiles }); await r.call('db:connect', 'p1');
+  const session = r.sessions[0]; session.database = 'demo'; let optionsSeen;
+  session.runQueryScript = async (_sql, _timeout, _confirmed, _task, options) => {
+    optionsSeen = options;
+    options.checkExplainContext?.();
+    return { kind: 'rows', rows: [['{}']], explainSettings: { version: 1, status: 'observed', raw: 'private-setting',
+      fields: explainSettingNames.map(name => ({ name, digest: 'a'.repeat(64), value: 'private-setting' })) } };
+  };
+  const request = { profileId: 'p1', sql: 'EXPLAIN SELECT 1', taskId: 'task', explainSettings: true,
+    explainContext: { settings: { version: 1, status: 'observed', raw: 'renderer-forged' } } };
+  const result = await r.call('db:query', request);
+  assert.equal(result.data.explainContext.settings.status, 'observed'); assert.equal(optionsSeen.explainSettings, true);
+  assert.equal(result.data.explainSettings, undefined); assert.doesNotMatch(JSON.stringify(result), /private-setting|renderer-forged/);
+  await r.call('db:query', { ...request, explainSettings: false }); assert.equal(optionsSeen.explainSettings, undefined);
+  session.runQueryScript = async () => ({ kind: 'rows', rows: [['{}']] });
+  assert.equal((await r.call('db:query', request)).data.explainContext.settings.status, 'unknown');
+  session.runQueryScript = async () => { profiles.p1.environment = 'staging'; return { kind: 'rows', rows: [['{}']] }; };
+  const changed = await r.call('db:query', request); assert.equal(changed.ok, true); assert.equal(changed.data.explainContext, null);
+});
+
+test('EXPLAIN settings context invalidation after USE prevents the first metadata/plan query', async () => {
+  const r = setup({ sync: { logout: async () => ({}) } }); await r.call('db:connect', 'p1');
+  let queries = 0;
+  r.sessions[0].useDatabase = async () => { await r.call('account:logout'); };
+  r.sessions[0].runQueryScript = async () => { queries++; return {}; };
+  const result = await r.call('db:query', { profileId: 'p1', database: 'demo', sql: 'EXPLAIN SELECT 1', explainSettings: true });
+  assert.equal(result.ok, false); assert.equal(queries, 0);
+});
+
+test('schema-only EXPLAIN context uses session evidence, strips DDL and guards logout after USE', async () => {
+  const r = setup({ sync: { logout: async () => ({}) } }); await r.call('db:connect', 'p1');
+  const session = r.sessions[0]; session.database = 'demo'; let seen, runs = 0;
+  session.runQueryScript = async (_sql, _timeout, _confirmed, _task, options) => {
+    runs++; seen = options; options.checkExplainContext();
+    return { kind: 'rows', rows: [['{}']], explainSchema: { version: 1, status: 'observed', database: 'demo', table: 'items',
+      digest: 'a'.repeat(64), ddl: 'private-default', password: 'private-password' } };
+  };
+  const request = { profileId: 'p1', sql: 'EXPLAIN SELECT * FROM items', taskId: 'schema', explainSchema: true,
+    explainContext: { schema: { raw: 'renderer-forged' } } };
+  const result = await r.call('db:query', request);
+  assert.equal(result.data.explainContext.schema.status, 'observed'); assert.equal(result.data.explainContext.settings, undefined);
+  assert.equal(seen.explainSchema, true); assert.equal(seen.explainSettings, false);
+  assert.equal(result.data.explainSchema, undefined); assert.doesNotMatch(JSON.stringify(result), /private-|renderer-forged/);
+  session.useDatabase = async () => { await r.call('account:logout'); };
+  const stale = await r.call('db:query', { ...request, database: 'demo' }); assert.equal(stale.ok, false); assert.equal(runs, 1);
 });
 
 test('a synced endpoint change blocks cached-session writes and COMMIT while preserving explicit rollback', async () => {

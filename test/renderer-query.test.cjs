@@ -371,6 +371,147 @@ test('EXPLAIN: an active query prevents a competing request', async () => {
   assert.equal(r.evaluate('app.query.running'), true);
 });
 
+test('EXPLAIN: bounded format selection changes only the generated prefix and respects explicit SQL', async () => {
+  const r = setup();
+  for (const [value, prefix] of [['JSON', 'EXPLAIN FORMAT=JSON '], ['TREE', 'EXPLAIN FORMAT=TREE '],
+    ['TREE;DROP TABLE users', 'EXPLAIN ']]) {
+    r.context.formatValue = value; r.evaluate('app.query.explainFormat=formatValue');
+    await r.evaluate('runExplainQuery()'); assert.equal(r.requests.at(-1).sql, prefix + 'SELECT 1');
+  }
+  r.evaluate("app.query.explainFormat='TREE'");
+  for (const sql of ['EXPLAIN FORMAT=JSON SELECT 1', 'DESC users', 'EXPLAIN SELECT 1']) {
+    r.editor.value = sql;
+    await r.evaluate('runExplainQuery()'); assert.equal(r.requests.at(-1).sql, sql);
+  }
+});
+
+test('EXPLAIN button blocks actual ANALYZE and executable comments before sending any request', async () => {
+  const r = setup();
+  for (const sql of ['EXPLAIN ANALYZE SELECT 1', 'EXPLAIN FORMAT=TREE ANALYZE SELECT 1',
+    'EXPLAIN /* ordinary */ ANALYZE SELECT 1', 'DESC ANALYZE SELECT 1',
+    'EXPLAIN /*!80018 ANALYZE */ SELECT 1', 'EXPLAIN /*M! ANALYZE */ SELECT 1', 'SELECT /*+ hint */ 1']) {
+    r.editor.value = sql; await r.evaluate('runExplainQuery()');
+    assert.equal(r.requests.length, 0, sql);
+    assert.match(r.messages.at(-1).message, /ANALYZE|executable comment/);
+  }
+  r.editor.value = "EXPLAIN SELECT 'ANALYZE'"; await r.evaluate('runExplainQuery()');
+  assert.equal(r.requests.length, 1); assert.equal(r.requests[0].sql, r.editor.value);
+});
+
+test('EXPLAIN format rejection is visible, retains selected format and never retries or runs a fallback', async () => {
+  const r = setup(async () => ({ ok: false, error: { code: 'ER_PARSE_ERROR', message: 'TREE is not supported' } }));
+  r.evaluate("app.query.explainFormat='TREE'");
+  await r.evaluate('runExplainQuery()');
+  assert.equal(r.requests.length, 1); assert.equal(r.requests[0].sql, 'EXPLAIN FORMAT=TREE SELECT 1');
+  assert.equal(r.evaluate('app.query.explainFormat'), 'TREE'); assert.equal(r.evaluate('app.query.error'), 'TREE is not supported');
+  assert.equal(r.evaluate('app.query.running'), false); assert.equal(r.evaluate('app.query.taskId'), null);
+});
+
+test('EXPLAIN snapshots SQL before target await and does not submit after a tab switch or competing operation', async () => {
+  const r = setup(); let release;
+  r.context.holdTarget = () => new Promise(resolve => { release = resolve; });
+  r.evaluate('ensureQueryTarget=holdTarget');
+  let pending = r.evaluate('runExplainQuery()');
+  r.editor.value = 'DELETE FROM users'; release({ profileId: 'test', database: 'captured' }); await pending;
+  assert.equal(r.requests[0].sql, 'EXPLAIN SELECT 1');
+  assert.equal(r.requests[0].database, 'captured'); assert.equal(r.evaluate('app.query.resultContext.database'), 'captured');
+  pending = r.evaluate('runExplainQuery()');
+  r.evaluate("queryTabs.push({sql:'SELECT 2',running:false});activeQuery=queryTabs.length-1;app.query=queryTabs[activeQuery]"); release({ profileId: 'test' }); await pending;
+  assert.equal(r.requests.length, 1);
+  r.evaluate('activeQuery=0;app.query=queryTabs[0]'); pending = r.evaluate('runExplainQuery()');
+  r.evaluate('app.query.running=true'); release({ profileId: 'test' }); await pending;
+  assert.equal(r.requests.length, 1);
+});
+
+test('EXPLAIN comparisons advance per-tab and reset on failure, normal SQL or invalidation during await', async () => {
+  let access = 'ALL', fail = false, session = 'session-1', release;
+  const r = setup(async payload => {
+    if (release) await new Promise(resolve => { release = resolve; });
+    if (fail) return { ok: false, error: { message: 'fixture error', code: 'QUERY_CANCELED' } };
+    return { ok: true, data: { kind: 'rows', columns: ['table', 'type', 'rows'].map(name => ({ name })), rows: [['items', access, 10]],
+      explainContext: { version: 1, profileId: payload.profileId, database: payload.database, taskId: payload.taskId,
+        sessionId: session, sqlHash: require('node:crypto').createHash('sha256').update(payload.sql).digest('hex'), checkedAt: '2026-11-16T00:00:00Z' } } };
+  });
+  const state = () => r.evaluate('app.query.result.explainComparison.status');
+  await r.evaluate('runExplainQuery()'); assert.equal(state(), 'baseline');
+  await r.evaluate('runExplainQuery()'); assert.equal(state(), 'unchanged');
+  access = 'ref'; await r.evaluate('runExplainQuery()'); assert.equal(state(), 'changed');
+  await r.evaluate('runExplainQuery()'); assert.equal(state(), 'unchanged');
+  r.editor.value = 'SELECT 2'; await r.evaluate('runExplainQuery()'); assert.equal(state(), 'different-scope');
+  session = 'reconnected'; await r.evaluate('runExplainQuery()'); assert.equal(state(), 'different-scope');
+  fail = true; await r.evaluate('runExplainQuery()'); fail = false;
+  await r.evaluate('runExplainQuery()'); assert.equal(state(), 'baseline');
+  await r.evaluate('runQuery()'); await r.evaluate('runExplainQuery()'); assert.equal(state(), 'baseline');
+  release = true; const pending = r.evaluate('runExplainQuery()');
+  await new Promise(resolve => setImmediate(resolve)); r.evaluate('resetExplainComparisons()'); release(); release = null; await pending;
+  assert.equal(r.evaluate('app.query.result.explainComparison'), undefined);
+  await r.evaluate('runExplainQuery()'); assert.equal(state(), 'baseline');
+});
+
+test('EXPLAIN ignores late results/errors after invalidation and old finally cannot clear a newer task', async () => {
+  for (const superseded of [false, true]) for (const failed of [false, true]) {
+    let complete;
+    const r = setup(() => new Promise(resolve => { complete = resolve; }));
+    r.evaluate("app.query.result={kind:'rows',columns:[{name:'saved'}],rows:[['kept']]};app.query.explainSchema=true");
+    const pending = r.evaluate('runExplainQuery()');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(typeof complete, 'function');
+    r.evaluate('resetExplainComparisons()');
+    if (superseded) r.evaluate("app.query.taskId='new-task';app.query.running=true;app.query.error='new error'");
+    const messages = r.messages.length;
+    complete(failed ? { ok: false, error: { message: 'stale failure' } } : { ok: true, data: rowResult() });
+    await pending;
+    assert.equal(r.evaluate('app.query.result.rows[0][0]'), 'kept');
+    assert.equal(r.messages.length, messages);
+    assert.equal(r.evaluate('app.query.taskId'), superseded ? 'new-task' : null);
+    assert.equal(r.evaluate('app.query.running'), superseded);
+    if (superseded) assert.equal(r.evaluate('app.query.error'), 'new error');
+  }
+});
+
+test('EXPLAIN settings opt-in is captured before await, requires main evidence and reports changed settings without raw values', async () => {
+  const { explainSettingNames } = require('../query-results.js');
+  let digest = 'a', missing = false;
+  const r = setup(async payload => ({ ok: true, data: { kind: 'rows', columns: [{ name: 'EXPLAIN' }], rows: [['{}']],
+    explainContext: { version: 1, profileId: payload.profileId, database: payload.database, taskId: payload.taskId,
+      sessionId: 'fixture', sqlHash: 'a'.repeat(64), checkedAt: '2026-11-16T00:00:00Z',
+      settings: missing ? null : { version: 1, status: 'observed', fields: explainSettingNames.map(name => ({ name,
+        digest: (name === 'sql_mode' ? digest : 'a').repeat(64) })) } } } }));
+  await r.evaluate('runExplainQuery()'); assert.equal(r.requests[0].explainSettings, undefined);
+  r.evaluate('app.query.explainSettings=true');
+  await r.evaluate('runExplainQuery()'); assert.equal(r.requests[1].explainSettings, true);
+  assert.equal(r.evaluate('app.query.result.explainComparison.status'), 'different-scope');
+  await r.evaluate('runExplainQuery()'); assert.equal(r.evaluate('app.query.result.explainComparison.status'), 'unchanged');
+  digest = 'b'; await r.evaluate('runExplainQuery()');
+  assert.equal(r.evaluate('app.query.result.explainComparison.status'), 'settings-changed');
+  assert.match(r.evaluate('queryResultHtml()'), /sql_mode/); assert.doesNotMatch(r.evaluate('queryResultHtml()'), /bbbbbbbbbbbb/);
+  missing = true; await r.evaluate('runExplainQuery()');
+  assert.equal(r.evaluate('app.query.result.explainComparison.status'), 'unknown');
+  assert.match(r.evaluate('queryResultHtml()'), /Chưa đủ thông tin/);
+  missing = false;
+  r.evaluate('ensureQueryTarget=async()=>{app.query.explainSettings=false;return {profileId:"test",database:"test"}}');
+  await r.evaluate('runExplainQuery()'); assert.equal(r.requests.at(-1).explainSettings, true);
+});
+
+test('EXPLAIN schema opt-in captures mode before await and rejects changed/missing evidence without showing DDL or hashes', async () => {
+  let digest = 'a', missing = false;
+  const r = setup(async payload => ({ ok: true, data: { kind: 'rows', columns: [{ name: 'EXPLAIN' }], rows: [['{}']],
+    explainContext: { version: 1, profileId: payload.profileId, database: payload.database, taskId: payload.taskId,
+      sessionId: 'fixture', sqlHash: 'a'.repeat(64), checkedAt: '2026-11-16T00:00:00Z', schema: missing ? null
+        : { version: 1, status: 'observed', database: 'demo', table: '<img src=x>', digest: digest.repeat(64) } } } }));
+  await r.evaluate('runExplainQuery()'); assert.equal(r.requests[0].explainSchema, undefined);
+  r.evaluate('app.query.explainSchema=true');
+  await r.evaluate('runExplainQuery()'); await r.evaluate('runExplainQuery()');
+  assert.equal(r.requests.at(-1).explainSchema, true); assert.equal(r.evaluate('app.query.result.explainComparison.status'), 'unchanged');
+  digest = 'b'; await r.evaluate('runExplainQuery()');
+  assert.equal(r.evaluate('app.query.result.explainComparison.status'), 'schema-changed');
+  assert.match(r.evaluate('queryResultHtml()'), /&lt;img/); assert.doesNotMatch(r.evaluate('queryResultHtml()'), /<img|bbbbbbbbbbbb/);
+  missing = true; await r.evaluate('runExplainQuery()'); assert.equal(r.evaluate('app.query.result.explainComparison.status'), 'unknown');
+  missing = false;
+  r.evaluate('ensureQueryTarget=async()=>{app.query.explainSchema=false;return {profileId:"test",database:"test"}}');
+  await r.evaluate('runExplainQuery()'); assert.equal(r.requests.at(-1).explainSchema, true);
+});
+
 test('data grid: an older sort response cannot replace the latest data', async () => {
   const pending = [];
   const r = loadRenderer({ desktop: { db: { tableData: () => new Promise((resolve) => pending.push(resolve)) } },

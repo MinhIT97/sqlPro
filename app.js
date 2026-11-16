@@ -70,6 +70,15 @@ let queryTabs = [{
 let activeQuery = 0;
 let queryId = 1;
 let queryTaskSeq = 0;
+let explainObservations = new WeakMap();
+let explainGeneration = 0;
+function resetExplainComparisons() {
+  explainGeneration += 1;
+  explainObservations = new WeakMap();
+  for (const tab of queryTabs) {
+    if (tab.result?.explainComparison) delete tab.result.explainComparison;
+  }
+}
 let dataRequestId = 0;
 app.query = queryTabs[0];
 
@@ -78,7 +87,7 @@ const sqlAutocomplete = {
   selected: 0,
   context: null,
   requestId: 0,
-  columnCache: new Map(),
+  columnCache: window.SqlAutocomplete.createColumnCache(),
   blurTimer: null,
   composing: false
 };
@@ -730,22 +739,17 @@ function invalidateSqlAutocomplete() {
   closeSqlSuggestions();
 }
 
-function autocompleteCacheKey(database, tableName) {
-  return JSON.stringify([app.connection?.id || '', database || '', tableName || '']);
+function loadAutocompleteColumns(database, tableName, profileId = app.connection?.id) {
+  if (!desktop || !profileId || !database || !tableName) return Promise.resolve([]);
+  return sqlAutocomplete.columnCache.load([profileId, database, tableName],
+    () => call(desktop.db.columns(database, tableName, profileId)));
 }
 
-function loadAutocompleteColumns(database, tableName) {
-  if (!desktop || !app.connection || !database || !tableName) return Promise.resolve([]);
-  const key = autocompleteCacheKey(database, tableName);
-  const cached = sqlAutocomplete.columnCache.get(key);
-  if (cached) return cached;
-  const pending = call(desktop.db.columns(database, tableName, app.connection?.id || null))
-    .catch(() => {
-      sqlAutocomplete.columnCache.delete(key);
-      return [];
-    });
-  sqlAutocomplete.columnCache.set(key, pending);
-  return pending;
+function autocompleteTarget() {
+  const tab = app.query;
+  const connection = queryTargetConnection(tab) || (!tab?.profileId ? app.connection : null);
+  return { profileId: connection?.id || null,
+    database: tab?.profileId ? tab.database || null : tab?.database || app.database || null };
 }
 
 function autocompleteTypeLabel(type) {
@@ -836,15 +840,17 @@ function renderSqlSuggestions(editor, context, items) {
   positionSqlSuggestions(editor, host);
 }
 
-function resolveAutocompleteReference(context, qualifier) {
-  const lower = String(qualifier || '').toLocaleLowerCase();
-  const reference = context.references.find((entry) =>
-    String(entry.alias || '').toLocaleLowerCase() === lower
-      || String(entry.table || '').toLocaleLowerCase() === lower
-  );
-  if (reference) return reference;
-  const object = app.tables.find((entry) => entry.name.toLocaleLowerCase() === lower);
-  return object ? { table: object.name } : null;
+function autocompleteReferenceHasColumns(reference) {
+  return !reference.local || Array.isArray(reference.columnNames) && reference.columnNames.length > 0;
+}
+
+function resolveAutocompleteReference(context, qualifier, useCurrentTables = true) {
+  if (context.scopeKnown === false) return null;
+  const references = context.references.filter(entry => (entry.alias || entry.table) === qualifier);
+  if (references.length) return references.length === 1 && autocompleteReferenceHasColumns(references[0]) ? references[0] : null;
+  if (context.references.length || context.allowQualifierCatalog === false || !useCurrentTables) return null;
+  const objects = app.tables.filter(entry => entry.name === qualifier);
+  return objects.length === 1 ? { table: objects[0].name } : null;
 }
 
 function tableAutocompleteItems() {
@@ -863,12 +869,16 @@ async function refreshSqlSuggestions(editor, force = false) {
   const localCaret = editor.selectionStart - context.statementStart;
   const beforeCaret = context.statement.slice(0, Math.max(0, localCaret));
   const expectsTable = /\b(?:FROM|JOIN|UPDATE|INTO|TABLE|DESCRIBE|DESC)\s+(?:`[^`]*|[A-Za-z0-9_$]*)$/i.test(beforeCaret);
-  if (context.disabled || (!force && !context.qualifier && !context.prefix && !expectsTable && !context.expectsColumn)) {
+  if (context.disabled || Number.isFinite(editor.selectionEnd) && editor.selectionEnd !== editor.selectionStart
+      || (!force && !context.qualifier && !context.prefix && !expectsTable && !context.expectsColumn)) {
     closeSqlSuggestions();
     return;
   }
 
   const requestId = ++sqlAutocomplete.requestId;
+  const target = autocompleteTarget();
+  context.tab = app.query;
+  context.target = target;
   const captured = {
     tabId: app.query?.id,
     connectionId: app.connection?.id,
@@ -876,7 +886,8 @@ async function refreshSqlSuggestions(editor, force = false) {
     value: editor.value,
     caret: editor.selectionStart
   };
-  const tables = tableAutocompleteItems();
+  const useCurrentTables = context.scopeKnown !== false && target.profileId === app.connection?.id && target.database === app.database;
+  const tables = useCurrentTables ? tableAutocompleteItems() : [];
   let baseItems;
   if (context.qualifier) {
     baseItems = [];
@@ -892,12 +903,18 @@ async function refreshSqlSuggestions(editor, force = false) {
 
   let targets = [];
   if (context.qualifier) {
-    const reference = resolveAutocompleteReference(context, context.qualifier);
+    const reference = resolveAutocompleteReference(context, context.qualifier, useCurrentTables);
     if (reference) targets = [reference];
   } else if (!expectsTable) {
     const seen = new Set();
+    const owners = new Map();
+    for (const reference of context.references) {
+      const owner = reference.alias || reference.table;
+      owners.set(owner, (owners.get(owner) || 0) + 1);
+    }
     targets = context.references.filter((reference) => {
-      const key = `${reference.database || app.database || ''}\u0000${reference.table}`.toLocaleLowerCase();
+      if (!autocompleteReferenceHasColumns(reference) || owners.get(reference.alias || reference.table) !== 1) return false;
+      const key = JSON.stringify([reference.database || target.database || '', reference.table, reference.alias || null]);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -907,7 +924,8 @@ async function refreshSqlSuggestions(editor, force = false) {
 
   const columnGroups = await Promise.all(targets.map(async (reference) => ({
     reference,
-    columns: await loadAutocompleteColumns(reference.database || app.database, reference.table)
+    columns: reference.local ? reference.columnNames.map(name => ({ name, type: '' }))
+      : await loadAutocompleteColumns(reference.database || target.database, reference.table, target.profileId)
   })));
   if (requestId !== sqlAutocomplete.requestId
       || editor !== $('#sql')
@@ -916,8 +934,11 @@ async function refreshSqlSuggestions(editor, force = false) {
       || app.query?.id !== captured.tabId
       || app.connection?.id !== captured.connectionId
       || app.database !== captured.database
+      || autocompleteTarget().profileId !== target.profileId
+      || autocompleteTarget().database !== target.database
       || editor.value !== captured.value
-      || editor.selectionStart !== captured.caret) return;
+      || editor.selectionStart !== captured.caret
+      || Number.isFinite(editor.selectionEnd) && editor.selectionEnd !== captured.caret) return;
 
   const multipleReferences = context.references.length > 1;
   const columnItems = columnGroups.flatMap(({ reference, columns }) => columns.map((column) => {
@@ -929,7 +950,9 @@ async function refreshSqlSuggestions(editor, force = false) {
         ? quoteId(column.name)
         : (qualified ? `${quoteId(owner)}.${quoteId(column.name)}` : quoteId(column.name)),
       type: 'column',
-      detail: `${reference.table} · ${column.type || 'column'}`
+      detail: reference.local
+        ? `${reference.columnSource === 'derived-select' ? 'Derived' : 'CTE'} · ${reference.table} · ${reference.columnSource ? 'tên từ SELECT' : 'cột khai báo'}`
+        : `${reference.table} · ${column.type || 'column'}`
     };
   }));
   renderSqlSuggestions(editor, context, api.rankSuggestions([...columnItems, ...baseItems], context.prefix, 60));
@@ -939,11 +962,25 @@ function acceptSqlSuggestion(editor, index = sqlAutocomplete.selected) {
   const item = sqlAutocomplete.items[index];
   const context = sqlAutocomplete.context;
   if (!editor || !item || !context) return;
+  const target = autocompleteTarget();
+  if (context.disabled || sqlAutocomplete.composing || editor !== $('#sql') || !editor.isConnected || mode !== 'query'
+      || context.tab !== app.query || context.target?.profileId !== target.profileId || context.target?.database !== target.database
+      || editor.value !== context.value || editor.selectionStart !== context.caret
+      || editor.selectionEnd !== context.caret
+      || !Number.isInteger(context.start) || !Number.isInteger(context.end)
+      || context.start < 0 || context.start > context.caret || context.end < context.caret
+      || context.end > editor.value.length) {
+    closeSqlSuggestions();
+    return;
+  }
   const before = sqlEditorSnapshot(editor);
-  const insertText = String(item.insertText ?? item.label);
+  let insertText = String(item.insertText ?? item.label);
+  const existingCall = item.type === 'function' && /\(\)$/.test(insertText)
+    ? /^[ \t\n\r\f]*\(/.exec(editor.value.slice(context.end)) : null;
+  if (existingCall) insertText = insertText.slice(0, -2);
   editor.setRangeText(insertText, context.start, context.end, 'end');
-  if (/\(\)$/.test(insertText)) {
-    const caret = editor.selectionStart - 1;
+  if (existingCall || /\(\)$/.test(insertText)) {
+    const caret = existingCall ? editor.selectionStart + existingCall[0].length : editor.selectionStart - 1;
     editor.setSelectionRange(caret, caret);
   }
   recordSqlEditorChange(editor, { before });
@@ -1466,6 +1503,7 @@ async function switchWorkspace(workspaceId) {
 }
 
 async function refreshConnections() {
+  invalidateSqlAutocomplete();
   if (!desktop) {
     app.connections = [];
     ensureDefaultWorkspace();
@@ -1480,6 +1518,7 @@ async function refreshConnections() {
     for (const id of ids) openConnectionIds.add(id);
   }
   ensureDefaultWorkspace();
+  invalidateSqlAutocomplete();
   if (app.connection) {
     const current = app.connections.find((connection) => connection.id === app.connection.id);
     if (current) app.connection = current;
@@ -1987,7 +2026,7 @@ async function exportCurrentResult(format) {
     toast('Không tìm thấy dữ liệu dòng để xuất.', 'error');
     return;
   }
-  if (targetSql && typeof desktop.db?.exportQuery === 'function') {
+  if (!target.isAnalyze && targetSql && typeof desktop.db?.exportQuery === 'function') {
     const taskId = newTransferTaskId('export');
     const profileId = query.resultContext?.profileId || query.profileId || app.connection?.id || null;
     const database = targetDatabase !== undefined ? targetDatabase : (query.resultContext ? query.resultContext.database : (query.database || null));
@@ -2016,7 +2055,8 @@ async function exportCurrentResult(format) {
   if (target.truncated || target.rows.some((row) => row.some((value, index) =>
     /^(?:tinyblob|blob|mediumblob|longblob|binary|varbinary|bit)\b/i.test(target.columns[index]?.type || '')
       && typeof value === 'string' && value.includes('…')))) {
-    toast('Kết quả chỉ có bản xem trước. Hãy chạy lại SQL để xuất dữ liệu đầy đủ.', 'error');
+    toast(target.isAnalyze ? 'Kết quả ANALYZE bị cắt, chưa đủ để xuất đầy đủ. Có thể sao chép phần đã nhận; thao tác xuất không tự chạy lại truy vấn.'
+      : 'Kết quả chỉ có bản xem trước. Hãy chạy lại SQL để xuất dữ liệu đầy đủ.', 'error');
     return;
   }
   const cols = target.columns.map((c) => c.name);
@@ -3582,6 +3622,7 @@ async function connectTo(id, options = {}) {
   if (connectionSwitching) return;
   const profile = app.connections.find((connection) => connection.id === id);
   if (!profile) return;
+  invalidateSqlAutocomplete();
   if (app.connection?.id && app.connection.id !== id && app.database) {
     connectionLocations.set(app.connection.id, { database: app.database, table, mode });
     connectionViews.set(app.connection.id, {
@@ -5288,6 +5329,7 @@ function closeQueryTab(index) {
     return;
   }
   const wasActive = index === activeQuery;
+  explainObservations.delete(tab);
   if (mode === 'query' && wasActive) syncActiveQuery();
   queryTabs.splice(index, 1);
   if (!queryTabs.length) {
@@ -5666,15 +5708,16 @@ function startInlineValueEdit({ td, column, value, save, onSaved, next, reload }
   actions.append(saveButton, cancelButton); editor.element.appendChild(actions);
   let finished = false;
   let saving = false;
+  let automaticSaveBlocked = false;
   const cancel = () => {
     if (finished || saving) return;
     finished = true; td.classList.remove('editing-cell'); td.innerHTML = originalDisplay;
   };
-  const commit = async () => {
-    if (finished || saving) return false;
+  const commit = async (automatic = false) => {
+    if (finished || saving || automatic && automaticSaveBlocked) return false;
     let change;
     try { change = editor.read(); }
-    catch (error) { editor.showError(error.message); return false; }
+    catch (error) { automaticSaveBlocked = true; editor.showError(error.message); return false; }
     if (!change.changed) { cancel(); return true; }
     saving = true; editor.setBusy(true); saveButton.disabled = true; cancelButton.disabled = true;
     try {
@@ -5690,6 +5733,7 @@ function startInlineValueEdit({ td, column, value, save, onSaved, next, reload }
       toast(`Đã lưu cột "${column.name}"`, 'success');
       return true;
     } catch (error) {
+      automaticSaveBlocked = true;
       editor.showError(error.message || 'Không lưu được dữ liệu.');
       if (error.code === 'ROW_CONFLICT' || error.code === 'ROW_NOT_FOUND') {
         showRowConflict(error, { reload: reload ? () => reload() : undefined });
@@ -5712,7 +5756,8 @@ function startInlineValueEdit({ td, column, value, save, onSaved, next, reload }
     }
   });
   editor.element.addEventListener('focusout', () => {
-    setTimeout(() => { if (!editor.element.contains(document.activeElement)) void commit(); }, 0);
+    if (finished || saving || automaticSaveBlocked) return;
+    setTimeout(() => { if (!editor.element.contains(document.activeElement)) void commit(true); }, 0);
   });
   editor.focus();
 }
@@ -6675,6 +6720,63 @@ function formatCurrentSql() {
   }
 }
 
+async function runAnalyzeQuery() {
+  if (!desktop?.db?.analyzeQuery) { toast('Phiên bản desktop này chưa hỗ trợ ANALYZE.', 'error'); return; }
+  if (activeTransfer || queryTabs.some(tab => tab.running)) { toast('Một tác vụ đang chạy. Hãy đợi hoặc hủy trước.', 'error'); return; }
+  const tab = app.query;
+  if (!tab) return;
+  const editor = $('#sql');
+  const rawSql = editor ? editor.value : (tab.sql || '');
+  const start = editor?.selectionStart ?? 0, end = editor?.selectionEnd ?? start;
+  const sql = start !== end ? rawSql.slice(start, end).trim() : window.SqlAutocomplete.getContext(rawSql, start).statement.trim();
+  const generation = explainGeneration;
+  const target = await ensureQueryTarget(tab);
+  if (!target || generation !== explainGeneration || app.query !== tab || !queryTabs.includes(tab)
+      || activeTransfer || queryTabs.some(item => item.running)) return;
+  if (target.connection?.readOnly) { toast('Kết nối chỉ đọc không cho phép ANALYZE.', 'error'); return; }
+  const database = target.database || null;
+  explainObservations.delete(tab);
+  if (tab.result?.explainComparison) delete tab.result.explainComparison;
+  tab.running = true;
+  tab.taskId = newQueryTaskId();
+  const ownedTaskId = tab.taskId;
+  tab.error = null;
+  closeSqlSuggestions();
+  updateQueryButtons();
+  renderQueryTabs();
+  setStatus('Đang chờ xác nhận ANALYZE; thao tác sẽ thực thi SELECT…');
+  try {
+    const result = await call(desktop.db.analyzeQuery({ sql, database, profileId: target.profileId,
+      timeoutMs: Math.min(60000, queryTimeoutMs(tab)), taskId: ownedTaskId }));
+    if (generation !== explainGeneration || !queryTabs.includes(tab) || tab.taskId !== ownedTaskId || !tab.running) return;
+    if (result.canceled) { setStatus('Đã hủy ANALYZE'); return; }
+    tab.result = result;
+    tab.lastSql = null;
+    tab.resultContext = { profileId: target.profileId, database };
+    tab.resultTab = null;
+    tab.resultView = 'data';
+    tab.sortCol = null;
+    tab.sortDir = 'ASC';
+    toast('Đã nhận ANALYZE. Truy vấn đã được thực thi; xem thống kê do server trả về.');
+    setStatus('Hoàn tất ANALYZE');
+  } catch (error) {
+    if (generation !== explainGeneration || !queryTabs.includes(tab) || tab.taskId !== ownedTaskId || !tab.running) return;
+    tab.error = error.message || 'Lỗi ANALYZE';
+    toast(error.message || 'Lỗi ANALYZE', 'error');
+    setStatus('Lỗi ANALYZE; không tự chạy lại');
+  } finally {
+    if (tab.taskId === ownedTaskId) {
+      tab.running = false;
+      tab.taskId = null;
+      updateQueryButtons();
+      renderQueryTabs();
+      const output = $('#queryResult');
+      if (app.query === tab && output) output.innerHTML = queryResultHtml();
+      if (generation === explainGeneration && queryTabs.includes(tab)) void refreshSessionState(target.profileId);
+    }
+  }
+}
+
 async function runExplainQuery() {
   if (!desktop) {
     toast('Ứng dụng desktop chưa sẵn sàng.', 'error');
@@ -6685,18 +6787,25 @@ async function runExplainQuery() {
     return;
   }
   const tab = app.query;
+  const editor = $('#sql');
+  const rawSql = editor ? editor.value : (tab.sql || '');
+  const format = window.SqlQueryResults.explainFormat(tab.explainFormat);
+  const explainSettings = tab.explainSettings === true;
+  const explainSchema = tab.explainSchema === true;
+  const generation = explainGeneration;
+  const start = editor?.selectionStart ?? 0, end = editor?.selectionEnd ?? start;
   const target = await ensureQueryTarget(tab);
   if (!target) return;
+  if (generation !== explainGeneration || app.query !== tab || !queryTabs.includes(tab) || queryTabs.some(item => item.running)) return;
+  const database = target.database || null;
+  let ownedTaskId = null;
   try {
-    const editor = $('#sql');
-    const rawSql = editor ? editor.value : (tab.sql || '');
-    let sqlToRun;
-    if (editor && editor.selectionStart !== editor.selectionEnd) {
-      sqlToRun = rawSql.slice(editor.selectionStart, editor.selectionEnd).trim();
-    } else {
-      sqlToRun = window.SqlAutocomplete.getContext(rawSql, editor?.selectionStart ?? 0).statement.trim();
-    }
+    const sqlToRun = start !== end ? rawSql.slice(start, end).trim()
+      : window.SqlAutocomplete.getContext(rawSql, start).statement.trim();
     const tokens = tokenizeSql(sqlToRun);
+    if (tokens.some(token => token.type === 'comment' && /^\/\*(?:[!+]|M!)/i.test(token.text))) {
+      throw new Error('Nút EXPLAIN chưa hỗ trợ executable comment/optimizer hint. Hãy xem xét SQL và chạy riêng trong Editor.');
+    }
     const meaningful = tokens.filter((token) => !['space', 'comment', 'lineComment'].includes(token.type));
     while (meaningful.at(-1)?.text === ';') meaningful.pop();
     if (!meaningful.length) throw new Error('Vui lòng nhập câu lệnh SQL để EXPLAIN.');
@@ -6707,61 +6816,67 @@ async function runExplainQuery() {
     if (!['SELECT', 'WITH', 'INSERT', 'UPDATE', 'DELETE', 'REPLACE', 'EXPLAIN', 'DESCRIBE', 'DESC'].includes(firstWord)) {
       throw new Error('Câu lệnh này không hỗ trợ EXPLAIN.');
     }
-    const explainSql = ['EXPLAIN', 'DESCRIBE', 'DESC'].includes(firstWord) ? sqlToRun : 'EXPLAIN ' + sqlToRun;
+    if (['EXPLAIN', 'DESCRIBE', 'DESC'].includes(firstWord)) {
+      for (const token of meaningful.slice(1)) {
+        const word = token.text.toUpperCase();
+        if (['SELECT', 'WITH', 'INSERT', 'UPDATE', 'DELETE', 'REPLACE'].includes(word)) break;
+        if (word === 'ANALYZE') throw new Error('ANALYZE thực thi truy vấn. Hãy chạy riêng trong SQL Editor sau khi xem xét tác động; nút EXPLAIN chỉ xem kế hoạch.');
+      }
+    }
+    const explainSql = ['EXPLAIN', 'DESCRIBE', 'DESC'].includes(firstWord) ? sqlToRun
+      : `EXPLAIN ${format === 'DEFAULT' ? '' : `FORMAT=${format} `}${sqlToRun}`;
     tab.running = true;
     tab.taskId = newQueryTaskId();
+    ownedTaskId = tab.taskId;
     tab.error = null;
     closeSqlSuggestions();
     updateQueryButtons();
     renderQueryTabs();
     setStatus('Đang phân tích kế hoạch thực thi (EXPLAIN)...');
-    const result = await call(desktop.db.query({
+    const request = {
       sql: explainSql,
       timeoutMs: queryTimeoutMs(tab),
       profileId: target.profileId,
-      database: tab.database || null,
+      database,
       taskId: tab.taskId
-    }));
+    };
+    if (explainSettings) request.explainSettings = true;
+    if (explainSchema) request.explainSchema = true;
+    const result = await call(desktop.db.query(request));
+    if (generation !== explainGeneration || !queryTabs.includes(tab) || tab.taskId !== ownedTaskId || !tab.running) return;
     result.isExplain = true;
+    result.explainFormat = format;
+    result.explainSettingsRequested = explainSettings;
+    result.explainSchemaRequested = explainSchema;
+    const observation = window.SqlQueryResults.captureExplain(result, { ...request, explainFormat: format });
+    result.explainComparison = window.SqlQueryResults.compareExplain(explainObservations.get(tab), observation);
+    if (observation) explainObservations.set(tab, observation);
+    else explainObservations.delete(tab);
     tab.result = result;
     tab.lastSql = explainSql;
-    tab.resultContext = { profileId: target.profileId, database: tab.database || null };
+    tab.resultContext = { profileId: target.profileId, database };
     tab.resultTab = null;
     tab.resultView = 'data';
     tab.sortCol = null;
     tab.sortDir = 'ASC';
-    let hasFullScan = false;
-    let fullScanTable = '';
-    if (result.kind === 'rows') {
-      const typeColIdx = result.columns.findIndex((c) => c.name.toLowerCase() === 'type');
-      const tableColIdx = result.columns.findIndex((c) => c.name.toLowerCase() === 'table');
-      if (typeColIdx !== -1) {
-        for (const row of result.rows) {
-          if (String(row[typeColIdx]).toUpperCase() === 'ALL') {
-            hasFullScan = true;
-            if (tableColIdx !== -1) fullScanTable = row[tableColIdx];
-            break;
-          }
-        }
-      }
-    }
-
-    if (hasFullScan) {
-      toast(`⚠️ Cảnh báo: Full Table Scan trên bảng "${fullScanTable}". Nên thêm Index!`, 'error');
-    } else {
-      toast('Đã phân tích kế hoạch thực thi (EXPLAIN) thành công!', 'success');
-    }
+    toast('Đã nhận kết quả EXPLAIN. Xem giải thích cùng kế hoạch bên dưới.', 'success');
     setStatus('Hoàn tất EXPLAIN');
   } catch (error) {
+    if (generation !== explainGeneration || !queryTabs.includes(tab) || ownedTaskId !== null && tab.taskId !== ownedTaskId) return;
+    explainObservations.delete(tab);
+    if (tab.result?.explainComparison) tab.result.explainComparison = { version: 1, status: 'unknown' };
+    if (tab.running) tab.error = error.message || 'Không nhận được plan. Server có thể không hỗ trợ định dạng đã chọn.';
     toast(error.message || 'Lỗi khi chạy EXPLAIN', 'error');
     setStatus('Lỗi EXPLAIN');
   } finally {
-    tab.running = false;
-    tab.taskId = null;
-    updateQueryButtons();
-    renderQueryTabs();
-    const output = $('#queryResult');
-    if (app.query === tab && output) output.innerHTML = queryResultHtml();
+    if (ownedTaskId !== null && tab.taskId === ownedTaskId) {
+      tab.running = false;
+      tab.taskId = null;
+      updateQueryButtons();
+      renderQueryTabs();
+      const output = $('#queryResult');
+      if (app.query === tab && output) output.innerHTML = queryResultHtml();
+    }
   }
 }
 
@@ -6856,6 +6971,12 @@ function renderQueryView() {
     <div class="toolbar">
       <button class="primary" id="runQueryBtn">▷ Chạy (F5)</button>
       <button id="explainQueryBtn" title="Phân tích kế hoạch thực thi (Ctrl+E)">⚡ EXPLAIN</button>
+      <button id="analyzeQueryBtn" title="Thực thi một SELECT/CTE để đo kế hoạch thực tế; luôn xác nhận, tối đa 60 giây, không dùng trong transaction hoặc chế độ chỉ đọc.">ANALYZE…</button>
+      <select id="explainFormat" aria-label="Định dạng EXPLAIN" title="Chọn định dạng cho SQL chưa có EXPLAIN. Khả năng hỗ trợ do server quyết định; không tự thử lại hoặc chạy ANALYZE.">
+        ${[['DEFAULT', 'Plan: Mặc định'], ['JSON', 'Plan: JSON'], ['TREE', 'Plan: TREE']].map(([value, label]) => `<option value="${value}" ${window.SqlQueryResults.explainFormat(app.query.explainFormat) === value ? 'selected' : ''}>${label}</option>`).join('')}
+      </select>
+      <label class="explain-settings-option" title="Đọc một danh sách thiết lập trước/sau EXPLAIN SELECT để kiểm tra ngữ cảnh khi so sánh. Thêm tối đa hai SELECT metadata; chưa kiểm chứng schema hoặc mọi thiết lập."><input id="explainSettings" type="checkbox" ${app.query.explainSettings === true ? 'checked' : ''}> Kèm thiết lập phiên</label>
+      <label class="explain-settings-option" title="Đọc SHOW CREATE TABLE trước/sau cho SELECT trên một bảng trực tiếp. Chưa hỗ trợ JOIN/CTE/subquery/view hoặc chứng nhận toàn schema."><input id="explainSchema" type="checkbox" ${app.query.explainSchema === true ? 'checked' : ''}> Kèm định nghĩa bảng</label>
       <button id="formatSqlBtn" title="Định dạng SQL chuẩn đẹp (Ctrl+Shift+F)">🪄 Định dạng</button>
       <button id="saveQueryBtn">⌑ Lưu</button>
       <select id="queryTimeout" aria-label="Thời gian chờ truy vấn" title="Giới hạn cho toàn bộ lượt chạy, gồm thực thi và nhận dữ liệu">
@@ -6967,6 +7088,20 @@ function renderQueryView() {
   });
   $('#runQueryBtn').addEventListener('click', runQuery);
   $('#explainQueryBtn').addEventListener('click', runExplainQuery);
+  $('#explainSettings').addEventListener('change', (event) => {
+    app.query.explainSettings = event.target.checked;
+    explainObservations.delete(app.query);
+    if (app.query.result?.explainComparison) delete app.query.result.explainComparison;
+  });
+  $('#explainSchema').addEventListener('change', (event) => {
+    app.query.explainSchema = event.target.checked;
+    explainObservations.delete(app.query);
+    if (app.query.result?.explainComparison) delete app.query.result.explainComparison;
+  });
+  $('#analyzeQueryBtn').addEventListener('click', runAnalyzeQuery);
+  $('#explainFormat').addEventListener('change', event => {
+    app.query.explainFormat = window.SqlQueryResults.explainFormat(event.target.value);
+  });
   $('#formatSqlBtn').addEventListener('click', formatCurrentSql);
   $('#saveQueryBtn').addEventListener('click', saveQuery);
   $('#queryTimeout').addEventListener('change', (event) => {
@@ -7389,21 +7524,112 @@ function queryGridBodyHtml(result, start = 0) {
           const colMeta = result.columns[colIdx];
           const colName = colMeta ? colMeta.name.toLowerCase() : '';
           if (result.isExplain && colName === 'type' && !isNull) {
-            const uType = String(value).toUpperCase();
-            if (uType === 'ALL') cellDisplay = '<span class="explain-badge warn" title="Quét toàn bộ bảng. Đánh giá cùng số dòng ước lượng, bộ lọc và index hiện có; đây có thể là kế hoạch phù hợp.">ALL</span>';
-            else if (uType === 'INDEX') cellDisplay = '<span class="explain-badge warn" title="Quét toàn bộ chỉ mục">index</span>';
-            else if (uType === 'RANGE') cellDisplay = '<span class="explain-badge info" title="Quét trong khoảng">range</span>';
-            else if (['CONST', 'EQ_REF', 'REF'].includes(uType)) cellDisplay = `<span class="explain-badge good">${esc(value)} ✓</span>`;
+            const access = window.SqlQueryResults.explainAccess(value);
+            if (access) cellDisplay = `<span class="explain-badge ${access.tone}" title="${esc(access.description)}">${esc(shown)}</span>`;
           } else if (result.isExplain && colName === 'extra' && !isNull) {
             cellDisplay = cellDisplay
-              .replace(/Using filesort/g, '<span class="explain-extra-warn">Using filesort</span>')
-              .replace(/Using temporary/g, '<span class="explain-extra-warn">Using temporary</span>');
+              .replace(/\bUsing filesort\b/gi, '<span class="explain-extra-warn" title="Có bước sắp xếp riêng; chưa chứng minh phải ghi tệp ra đĩa.">$&</span>')
+              .replace(/\bUsing temporary\b/gi, '<span class="explain-extra-warn" title="Có bảng tạm; chưa xác định nằm trong RAM hay trên đĩa.">$&</span>');
           }
           return `<td class="${isNull ? 'nullcell' : ''}" data-col="${esc(colMeta?.name || '')}" data-col-idx="${colIdx}" title="${esc(text.slice(0, 500))}">${cellDisplay}</td>`;
         }).join('')}
       </tr>`;
   }).join('') + (virtual ? spacer(Math.max(0, rows.length - start - visible.length)) : '')
     || `<tr><td colspan="${result.columns.length + 1}" class="empty">Không có dòng nào.</td></tr>`;
+}
+
+function explainReviewHtml(result) {
+  const document = window.SqlQueryResults.explainDocument(result);
+  if (result.isAnalyze === true) return `<section class="explain-review explain-document analyze-review" aria-label="Kết quả ANALYZE đã thực thi">
+    <p><strong>ANALYZE đã thực thi SELECT</strong> · ${esc(result.analysis?.engine || 'Server')} · ${esc(document?.format || 'Văn bản server')}</p>
+    <p>Thống kê thực tế nằm trong plan gốc của server. Thời gian nhận kết quả của ứng dụng gồm thực thi và truyền dữ liệu; không cộng thời gian/dòng của các bước hoặc suy nhanh hơn từ một lần đo.</p>
+    <p>Xuất CSV/JSON chỉ lưu kết quả đã nhận, không chạy lại ANALYZE. Không dùng kết quả này làm mốc so sánh EXPLAIN.</p>
+    ${document ? `<details><summary>Xem plan ANALYZE ${esc(document.format)}</summary>
+      ${document.truncated ? '<p>Nội dung viewer bị giới hạn; chưa đại diện toàn bộ plan đã nhận.</p>' : ''}
+      ${document.status === 'invalid-json' ? '<p>JSON chưa hợp lệ; giữ văn bản server.</p>' : ''}
+      <pre tabindex="0" aria-label="Plan ANALYZE thực tế">${esc(document.text)}</pre></details>` : '<p>Chưa nhận diện định dạng; xem bảng kết quả gốc bên dưới.</p>'}
+    ${result.truncated ? '<p>Kết quả server bị cắt theo giới hạn nhận; không thể xuất bản đầy đủ từ lần chạy này.</p>' : ''}
+  </section>`;
+  if (document) return `<section class="explain-review explain-document" aria-label="Nội dung plan EXPLAIN">
+    <details><summary>Xem plan ${esc(document.format)} · ${document.status === 'formatted' ? 'Đã thụt lề' : 'Văn bản server'}</summary>
+      <p>Định dạng được nhận từ server; nội dung có thể chứa điều kiện và giá trị của truy vấn. Không quy đổi plan giữa MySQL/MariaDB hoặc kết luận thời gian chạy thực tế.</p>
+      ${document.status === 'invalid-json' ? '<p>Không đọc được JSON hợp lệ; giữ văn bản đã nhận.</p>' : ''}
+      ${document.truncated ? '<p>Đã giới hạn dung lượng/độ sâu/số phần tử hoặc kết quả server bị cắt. Nội dung chưa được xác nhận đầy đủ; dùng xuất kết quả để lấy dữ liệu.</p>' : ''}
+      <pre tabindex="0" aria-label="Văn bản plan EXPLAIN">${esc(document.text)}</pre>
+    </details></section>`;
+  const review = window.SqlQueryResults.reviewExplain(result);
+  if (!review) return '';
+  const labels = {
+    FULL_TABLE_SCAN: 'ALL: quét toàn bảng có thể phù hợp với bảng nhỏ hoặc khi cần phần lớn dữ liệu. Xem điều kiện lọc và index hiện có trước khi cân nhắc thay đổi.',
+    FULL_INDEX_SCAN: 'index: quét toàn chỉ mục; có dùng index vẫn chưa chứng minh truy vấn nhanh.',
+    FILESORT: 'Using filesort: có bước sắp xếp riêng; có thể thực hiện trong RAM, không tự chứng minh ghi ra đĩa.',
+    TEMPORARY_TABLE: 'Using temporary: có bảng tạm để xử lý kết quả; chưa cho biết dùng RAM hay đĩa.'
+  };
+  const signals = [...new Set(review.rows.flatMap(row => row.signals))];
+  const shown = review.rows.slice(0, 50);
+  return `<section class="explain-review" aria-label="Giải thích EXPLAIN">
+    <details><summary>Đọc kế hoạch EXPLAIN · Ước lượng · ${shown.length} bước</summary>
+      <p>rows và filtered là ước lượng của optimizer. Thời gian nhận EXPLAIN không phải thời gian chạy truy vấn gốc.</p>
+      <p>Đọc cùng điều kiện WHERE/JOIN/ORDER BY, lượng dữ liệu và thống kê hiện có. Không cộng rows của các bước JOIN thành tổng dòng thực tế; filtered không phải tỷ lệ hoàn thành.</p>
+      <ul>${signals.map(code => `<li>${esc(labels[code])}</li>`).join('') || '<li>Chưa thấy ALL/index/filesort/temporary trong phần đã đọc; chưa đủ để kết luận kế hoạch tối ưu.</li>'}</ul>
+      <div class="explain-review-table"><table><thead><tr><th>Bước</th><th>Bảng</th><th>Truy cập</th><th>Index đã chọn</th><th>rows ước lượng</th><th>filtered ước lượng</th></tr></thead><tbody>${shown.map(row => `<tr><td>${row.number}</td><td>${esc(row.table ?? 'Chưa xác định')}</td><td>${esc(row.access ?? 'Chưa xác định')}</td><td>${esc(row.key ?? 'Chưa xác định')}</td><td>${row.estimatedRows ?? 'Chưa xác định'}</td><td>${row.filteredPercent === null ? 'Chưa xác định' : `${row.filteredPercent}%`}</td></tr>`).join('')}</tbody></table></div>
+      ${review.truncated || review.rows.length > shown.length ? '<p>Phần giải thích đã giới hạn; không đại diện toàn bộ kế hoạch. Bảng kết quả gốc bên dưới vẫn giữ dữ liệu đã nhận.</p>' : ''}
+      <p>ALL/filesort/temporary là tín hiệu cần xem xét. Chỉ quyết định thêm index sau khi đối chiếu workload và đo kiểm; các kiểu truy cập khác cũng không bảo đảm nhanh.</p>
+    </details></section>`;
+}
+
+function explainComparisonHtml(comparison, settingsContent = '') {
+  if (comparison?.version !== 1) return settingsContent ? `<section class="explain-review">${settingsContent}</section>` : '';
+  const labels = { unknown: 'Chưa đủ bằng chứng để so sánh', baseline: 'Đã tạo mốc đầu',
+    'different-scope': 'Ngữ cảnh đổi · Đã tạo mốc mới', 'settings-changed': 'Thiết lập đã đổi · Không so plan · Đã tạo mốc mới',
+    'schema-changed': 'Định nghĩa bảng đã nhận đổi · Không so plan · Đã tạo mốc mới',
+    changed: 'Nội dung plan đã thay đổi', unchanged: 'Nội dung plan đã nhận giống nhau' };
+  if (!Object.hasOwn(labels, comparison.status)) return '';
+  const cell = row => row ? `${row.table ?? '?'} · ${row.access ?? '?'} · index ${row.key ?? '?'} · rows ${row.estimatedRows ?? '?'} · filtered ${row.filteredPercent ?? '?'}% · Extra ${row.extra ?? '?'}` : 'Không có bước này';
+  return `<section class="explain-review explain-comparison" aria-label="So sánh EXPLAIN liên tiếp"><details>
+    <summary>So sánh hai lần EXPLAIN · ${esc(labels[comparison.status])}</summary>
+    <p>Chỉ so hai kết quả liên tiếp có cùng SQL chính xác (gồm literal), profile, database, phiên và lựa chọn định dạng. Không xác nhận schema, thống kê, thiết lập phiên hoặc dữ liệu không đổi; không kết luận nhanh/chậm hơn từ khác biệt plan.</p>
+    ${comparison.currentAt ? `<p>Mốc trước: ${esc(comparison.previousAt || 'Chưa có')} · Lần này: ${esc(comparison.currentAt)}</p>` : ''}
+    ${comparison.status === 'unknown' ? '<p>Kết quả cũ/thiếu context/sai định dạng/quá giới hạn/bị cắt không được dùng làm mốc. Chạy EXPLAIN hợp lệ để tạo mốc mới.</p>' : ''}
+    ${comparison.status === 'settings-changed' ? `<p>Thiết lập quan sát khác nhau: ${esc((comparison.changedFields || []).filter(name => window.SqlQueryResults.explainSettingNames.includes(name)).join(', '))}. Không đối chiếu nội dung plan giữa hai ngữ cảnh này.</p>` : ''}
+    ${comparison.status === 'schema-changed' ? '<p>Văn bản SHOW CREATE TABLE đã nhận khác nhau. Không đối chiếu nội dung plan giữa hai quan sát này; chưa kết luận nguyên nhân hoặc tác động hiệu năng.</p>' : ''}
+    ${settingsContent}
+    ${comparison.changes?.length ? `<div class="explain-review-table" tabindex="0" role="region" aria-label="Các bước plan thay đổi"><table><thead><tr><th>Bước theo thứ tự kết quả</th><th>Trước</th><th>Sau</th></tr></thead><tbody>${comparison.changes.map(change => `<tr><td>${Number(change.number)}</td><td>${esc(cell(change.before))}</td><td>${esc(cell(change.after))}</td></tr>`).join('')}</tbody></table></div>` : ''}
+    ${comparison.status === 'changed' && comparison.format === 'TRADITIONAL' ? '<p>Các cột ngoài phần tóm tắt cũng có thể đổi; Extra hiện tối đa 4.096 ký tự mỗi bước. Ghép bước theo vị trí, chưa đối chiếu ngữ nghĩa JOIN hoặc chứng minh các bước tương đương.</p>' : ''}
+    ${comparison.beforeText !== null && typeof comparison.beforeText === 'string' ? `<p>Plan trước</p><pre tabindex="0" aria-label="Plan trước">${esc(comparison.beforeText)}</pre><p>Plan sau</p><pre tabindex="0" aria-label="Plan sau">${esc(comparison.afterText || '')}</pre>` : ''}
+    ${comparison.rowsLimited ? '<p>Hiện tối đa 50 bước khác biệt; kết luận dựa trên kết quả trong giới hạn quan sát.</p>' : ''}
+    <p>Mốc chỉ nằm trong bộ nhớ tab; mỗi lần thành công thay mốc bằng kết quả mới. Lỗi/hủy, chạy SQL thường hoặc đóng tab xóa mốc. Không lưu thêm plan vào workspace/log. Chỉ khi bật các tùy chọn ngữ cảnh mới đọc thêm metadata trước/sau.</p>
+    </details></section>`;
+}
+
+function explainSettingsHtml(result) {
+  if (result.isAnalyze || !result.explainSettingsRequested) return '';
+  const settings = window.SqlQueryResults.explainSettings(result.explainContext?.settings);
+  const label = settings.status === 'observed' ? 'Khớp ở hai lần đọc trước/sau'
+    : settings.status === 'changed-during-run' ? 'Phát hiện thay đổi trong lượt chạy · Bỏ mốc so sánh' : 'Chưa đủ thông tin · Bỏ mốc so sánh';
+  return `<section class="explain-settings-review" aria-label="Thiết lập phiên của EXPLAIN"><details>
+    <summary>Thiết lập phiên · ${esc(label)}</summary>
+    <p>Đọc tối đa hai SELECT metadata trên cùng phiên với EXPLAIN. Chỉ đối chiếu danh sách: ${esc(window.SqlQueryResults.explainSettingNames.join(', '))}.</p>
+    ${settings.status === 'changed-during-run' ? `<p>Thuộc tính đã đổi: ${esc(settings.changedFields.join(', '))}.</p>` : ''}
+    <p>Hai lần đọc giống nhau không chứng minh thiết lập không đổi giữa chừng. Chưa xác nhận schema, thống kê, dữ liệu, mọi thiết lập riêng của engine hoặc ngữ cảnh bind parameter; không suy nhanh/chậm hơn.</p>
+    <p>Chỉ giữ dấu vân tay tạm trong bộ nhớ, không hiển thị hoặc lưu thêm giá trị thiết lập. Lỗi metadata giữ kết quả EXPLAIN đã hoàn tất; không tự thử lại hoặc thay cấu hình phiên.</p>
+    <p>Hủy/timeout trong lúc đọc metadata đóng phiên như truy vấn thường; transaction chưa commit có thể bị server rollback khi mất kết nối.</p>
+    </details></section>`;
+}
+
+function explainSchemaHtml(result) {
+  if (result.isAnalyze || !result.explainSchemaRequested) return '';
+  const schema = window.SqlQueryResults.explainSchema(result.explainContext?.schema);
+  const label = schema.status === 'observed' ? 'Văn bản khớp ở hai lần đọc trước/sau'
+    : schema.status === 'changed-during-run' ? 'Văn bản đổi trong lượt chạy · Bỏ mốc' : 'Chưa đủ thông tin · Bỏ mốc';
+  return `<section class="explain-schema-review" aria-label="Định nghĩa bảng của EXPLAIN"><details>
+    <summary>Định nghĩa bảng · ${esc(label)}</summary>
+    ${schema.status !== 'unknown' ? `<p>Bảng đã quan sát: ${esc(schema.database)} · ${esc(schema.table)}.</p>` : ''}
+    <p>Chỉ nhận SELECT trên một bảng trực tiếp. JOIN/CTE/subquery/view, nguồn chưa nhận diện, thiếu quyền, binary hoặc quá giới hạn chưa đủ để tạo mốc; kết quả EXPLAIN vẫn được giữ.</p>
+    <p>Đọc tối đa hai SHOW CREATE TABLE trên cùng phiên, tối đa 2 giây/1 dòng/512 KiB mỗi lần trong hạn chờ chung. Chỉ giữ dấu vân tay trong bộ nhớ; không hiển thị hoặc lưu thêm DDL/default/comment.</p>
+    <p>Đây là văn bản server trả về, không phải snapshot nguyên tử hoặc xác minh toàn schema. SQL mode có thể ẩn thuộc tính; AUTO_INCREMENT và định dạng cũng có thể làm văn bản đổi. Chưa kiểm chứng dependency, trigger/routine, thống kê, dữ liệu hoặc đầy đủ thiết lập phiên. Hai quan sát khớp không chứng minh không đổi giữa chừng.</p>
+    <p>Không tự SET, Commit/Rollback, sửa bảng hoặc chạy ANALYZE. Hủy/timeout có thể đóng phiên và rollback transaction chưa commit như truy vấn thường.</p>
+    </details></section>`;
 }
 
 function singleQueryResultHtml(result, compact = false) {
@@ -7450,6 +7676,8 @@ function singleQueryResultHtml(result, compact = false) {
 
   return `
     ${compact ? '' : exportToolbar}
+    ${result.isExplain && !result.isAnalyze ? explainComparisonHtml(result.explainComparison, explainSettingsHtml(result) + explainSchemaHtml(result)) : ''}
+    ${explainReviewHtml(result)}
     <div class="tablebox query-selectable-grid${virtual ? ' query-virtual-grid' : ''}" data-query-grid tabindex="0" role="region" aria-label="Kết quả SQL. Ctrl+A chọn tất cả dòng, Ctrl+C sao chép, Shift và nhấp để chọn một khoảng."><table ${virtual ? `style="width:${48 + result.columns.length * 170}px"` : ''} role="grid" aria-rowcount="${result.rows.length}" aria-multiselectable="true" aria-label="Dữ liệu kết quả SQL">${colgroup}<thead>${header}</thead><tbody>${body}</tbody></table></div>
     <div class="query-selection-status"><span data-query-selection-count aria-live="polite">${selection.rows.size.toLocaleString()} dòng đã chọn</span><span>Kéo chuột / Shift+nhấp · Ctrl+A chọn tất cả · Ctrl+C sao chép</span></div>
     ${compact ? `<div class="query-grid-status">${result.rows.length} dòng · ${result.durationMs} ms${result.truncated ? ' · đã giới hạn dữ liệu hiển thị' : ''}</div>` : ''}
@@ -7610,6 +7838,14 @@ function updateQueryButtons() {
   if (run) run.disabled = running;
   const explain = $('#explainQueryBtn');
   if (explain) explain.disabled = running;
+  const analyze = $('#analyzeQueryBtn');
+  if (analyze) analyze.disabled = running || Boolean(activeTransfer) || connectionIsReadOnly(app.query?.profileId);
+  const format = $('#explainFormat');
+  if (format) format.disabled = running;
+  const settings = $('#explainSettings');
+  if (settings) settings.disabled = running;
+  const schema = $('#explainSchema');
+  if (schema) schema.disabled = running;
   const timeout = $('#queryTimeout');
   if (timeout) timeout.disabled = Boolean(app.query?.running);
   const rowLimit = $('#queryRowLimit');
@@ -7638,6 +7874,7 @@ async function runQuery() {
     toast('Một truy vấn khác đang chạy. Hãy chờ hoặc hủy trước.', 'error');
     return;
   }
+  explainObservations.delete(tab);
   const editor = $('#sql');
   const rawSql = (editor?.value || tab.sql || '').trim();
   if (!rawSql) {
@@ -8375,6 +8612,8 @@ async function resetLocalAccountData(prefill) {
     return;
   }
   try {
+    resetExplainComparisons();
+    invalidateSqlAutocomplete();
     await disconnect();
     const result = await call(desktop.account.resetLocal());
     app.activeWorkspaceId = DEFAULT_WORKSPACE_ID;
@@ -8610,6 +8849,8 @@ async function renderAccountPanel(status) {
   });
   $('#accountLogout').addEventListener('click', async () => {
     try {
+      resetExplainComparisons();
+      invalidateSqlAutocomplete();
       await call(desktop.account.logout());
       closeModal();
       await refreshAccountStatus();
@@ -9124,6 +9365,7 @@ async function refreshSessionState(profileId = transactionProfileId() || app.con
 
 async function disconnect() {
   if (!desktop) return;
+  invalidateSqlAutocomplete();
   const profileId = app.connection?.id || null;
   let result = null;
   try {

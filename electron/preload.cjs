@@ -60,6 +60,7 @@ const db = Object.freeze({
   tableData: (payload) => ipcRenderer.invoke('db:table-data', payload),
   tableCount: (payload) => ipcRenderer.invoke('db:table-count', payload),
   query: (payload) => ipcRenderer.invoke('db:query', payload),
+  analyzeQuery: (payload) => ipcRenderer.invoke('db:analyze-query', payload),
   confirmProduction: (token) => ipcRenderer.invoke('db:confirm-production', token),
   cancelProduction: (token) => ipcRenderer.invoke('db:cancel-production', token),
   cancelQuery: (profileId, taskId) => ipcRenderer.invoke('db:cancel-query', { profileId, taskId }),

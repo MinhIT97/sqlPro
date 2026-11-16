@@ -14,6 +14,8 @@ Phạm vi gồm Electron, renderer, lưu trữ cấu hình, backup, SQL, test, C
 
 Chỉ lập kế hoạch trong thay đổi này. Không tự chạy migration, sửa database thật, lên lịch backup thật hoặc phát hành bộ cài.
 
+Cập nhật 16/11/2026: G5.1 đã triển khai và qua kiểm thử logic/Electron cho phần diễn giải EXPLAIN dạng bảng; G3–G9 còn **35 đầu việc lớn chưa hoàn tất**. Phần sau `81d0228` được review/chốt đợt 8; bằng chứng và giới hạn ở [ROADMAP_PROGRESS.md](ROADMAP_PROGRESS.md). Đã thêm các phần G5.2: chọn/xem JSON/TREE, so sánh quan sát có binding SQL/database/phiên, tùy chọn đọc một danh sách thiết lập phiên và SHOW CREATE TABLE cho một bảng trực tiếp trước/sau, cùng ANALYZE riêng có xác nhận thực thi. Còn schema context đầy đủ (JOIN/CTE/view/dependency), bind context, toàn bộ thiết lập riêng theo engine và diễn giải/đối chiếu semantics plan. SHOW CREATE chỉ đối chiếu văn bản server trả về, không chứng nhận toàn schema. Đây không phải nghiệm thu toàn G5 hoặc phát hành.
+
 ## 2. Hiện trạng cần bảo toàn
 
 | Khu vực | Đã quan sát trong code | Công việc tiếp theo |
@@ -104,7 +106,9 @@ Nghiệm thu dự kiến: UI p95 dưới 200 ms trên cấu hình chốt ở G0;
 
 ## 9. G5 — SQL Editor, bộ lọc và chẩn đoán
 
-- [ ] G5.1 Sửa lời khuyên EXPLAIN: ALL/filesort/temporary là tín hiệu cần xem xét, không tự kết luận phải thêm index. Thêm mô tả có ngữ cảnh, phân biệt estimate với actual.
+Tiếp tục 16/11: G5.3 đã có cache metadata cột hữu hạn/TTL/single-flight/generation, metadata theo đích tab, giữ alias self-JOIN/tên khác hoa-thường và tách bảng vật lý theo khối SELECT/nhánh set tại caret. CTE/derived là nguồn local không đọc nhầm tên như bảng thật; CTE có danh sách cột tường minh được gợi ý trực tiếp từ declaration, gồm scope lồng nhau/đệ quy. CTE thiếu declaration và derived table nhận toàn danh sách tên trực tiếp/AS và alias ngầm dạng atom từ SELECT đã đóng, không lookup bảng nguồn hoặc suy kiểu. Chọn gợi ý giữa identifier thay toàn token ASCII/backtick, giữ SQL xung quanh và Undo; kiểm tra snapshot editor/tab/đích trước chèn. Còn mở rộng star/alias ngầm ngoài grammar/set output/correlation, dialect/SQL-mode/parser fixture và nghiệm thu đầy đủ; G5.3 vẫn chưa đánh dấu hoàn tất, tổng G3–G9 vẫn 35 đầu việc lớn chưa hoàn tất.
+
+- [x] G5.1 Sửa lời khuyên EXPLAIN: ALL/filesort/temporary là tín hiệu cần xem xét, không tự kết luận phải thêm index. Thêm mô tả có ngữ cảnh, phân biệt estimate với actual.
 - [ ] G5.2 EXPLAIN JSON/tree theo server capability; so sánh hai plan cùng query/parameter/schema context. EXPLAIN ANALYZE là hành động riêng có cảnh báo thực thi; không chạy tự động.
 - [ ] G5.3 Autocomplete theo scope: alias/JOIN, tên quote/database, subquery/CTE, derived table, nhiều statement và caret ở giữa câu; không gợi ý trong string/comment. Metadata cache hữu hạn và kết quả cũ bị vô hiệu hóa. Chọn parser theo thử nghiệm fixture/khả năng đóng gói thay vì thay dependency ngay.
 - [ ] G5.4 Bộ lọc AND/OR có nhóm, toán tử theo kiểu, NULL/range/date, chọn cột hiển thị, sort nhiều cột; lưu cấu hình theo profile/database/table. Preview điều kiện và đặt lại; không tải toàn bảng để lọc ở renderer.

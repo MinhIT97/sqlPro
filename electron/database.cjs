@@ -12,6 +12,8 @@ const { SqlScriptParser, splitSqlStatements, stripLeadingComments, createTarget,
 const { analyzeCreateObject, buildRestorePreflight } = require('./restore-preflight.cjs');
 const { RestoreSelectionInventory } = require('./restore-selection.cjs');
 const { assertWritable, assertReadOnlySql } = require('./connection-policy.cjs');
+const { buildAnalyzeQuery, assertAnalyzeSession, assertPlanExport } = require('./query-analyze.cjs');
+const { canObserveExplainSettings, runExplainWithContext } = require('./explain-session.cjs');
 const { CsvStreamParser } = require('./csv-stream.cjs');
 const { JsonArrayStreamParser, isJsonNumber, stringifyJsonValue } = require('./json-array-stream.cjs');
 const RowValues = require('../row-values.js');
@@ -20,6 +22,7 @@ const { ResultBudget } = require('./result-budget.cjs');
 const { TableDataService } = require('./table-data.cjs');
 
 const MAX_QUERY_ROWS = 100000;
+const ANALYZE_ROWS = Symbol('validated-analyze-rows');
 const MAX_QUERY_BATCH_ROWS = 100000;
 const MAX_QUERY_BYTES = 32 * 1024 * 1024;
 const MAX_QUERY_BATCH_BYTES = 64 * 1024 * 1024;
@@ -1394,13 +1397,13 @@ class DatabaseSession {
     } finally { await control.close(); }
   }
 
-  async runQuery(sql, timeoutMs = 30000, rowLimit = 5000, byteLimit = MAX_QUERY_BYTES) {
+  async runQuery(sql, timeoutMs = 30000, rowLimit = 5000, byteLimit = MAX_QUERY_BYTES, resultMode) {
     this.ensureOpen();
     const statement = String(sql || '').trim();
     if (!statement) throw fail('Câu lệnh SQL đang trống.', 'EMPTY_QUERY');
     if (statement.length > 1024 * 1024) throw fail('Câu lệnh SQL vượt quá 1 MB.', 'QUERY_TOO_LARGE');
     const startedAt = Date.now();
-    if (!isReadStatement(statement)) {
+    if (!isReadStatement(statement) && resultMode !== ANALYZE_ROWS) {
       return new Promise((resolve, reject) => {
         const connection = this.connection;
         let settled = false;
@@ -1529,6 +1532,35 @@ class DatabaseSession {
     });
   }
 
+  // Only the named, natively confirmed IPC action calls this method. Ordinary
+  // ANALYZE scripts do not gain read-result handling or read-only permission.
+  async analyzeQuery(sql, timeoutMs = 30000, taskId = null, beforeExecute) {
+    assertWritable(this.profile);
+    this.ensureOpen();
+    assertAnalyzeSession(this);
+    const plan = buildAnalyzeQuery(sql, this.version);
+    const timeout = Math.min(60000, Math.max(1000, Number(timeoutMs) || 30000));
+    const started = Date.now();
+    this.transactionRevision = (this.transactionRevision || 0) + 1;
+    const task = this.setActiveTask(taskId, () => this.cancelQuery?.());
+    try {
+      // Check actual autocommit as connect-time server defaults can differ from
+      // the tracked flag. This read does not change transaction/session settings.
+      // Use the cancellable/bounded reader for this check as well as the plan.
+      const state = await this.runQuery('SELECT @@SESSION.autocommit AS value', timeout, 1, 1024);
+      if (task.canceled) throw fail('Đã hủy ANALYZE.', 'QUERY_CANCELED');
+      if (state.truncated || ![1, '1'].includes(state.rows?.[0]?.[0])) throw fail('Server đang tắt autocommit hoặc chưa xác minh được trạng thái. Không chạy ANALYZE.', 'ANALYZE_TRANSACTION_ACTIVE');
+      assertWritable(this.profile);
+      assertAnalyzeSession(this, task);
+      beforeExecute?.(task);
+      const remaining = timeout - (Date.now() - started);
+      if (remaining <= 0) throw fail('Đã hết thời gian chờ trước khi chạy ANALYZE.', 'QUERY_TIMEOUT');
+      const result = await this.runQuery(plan.sql, remaining, 100, 1024 * 1024, ANALYZE_ROWS);
+      return { ...result, isAnalyze: true, isExplain: true, explainFormat: plan.format,
+        analysis: { version: 1, executed: true, engine: plan.engine } };
+    } finally { this.clearActiveTask(task); }
+  }
+
   async runQueryScript(sql, timeoutMs = 30000, confirmed = false, taskId = null, options = {}) {
     assertReadOnlySql(this.profile, sql);
     const requestedRows = Number(options?.rowLimit);
@@ -1566,7 +1598,23 @@ class DatabaseSession {
     });
     try {
       if (statements.length === 1) {
+        if ((options.explainSettings === true || options.explainSchema === true) && canObserveExplainSettings(source)) {
+          const connection = this.connection, database = this.database;
+          return await runExplainWithContext({ sql: statements[0], timeoutMs, rowLimit, database,
+            settingsRequested: options.explainSettings === true, schemaRequested: options.explainSchema === true,
+            read: (...args) => this.runQuery(...args), isDead: () => this.dead,
+            check: () => {
+              this.ensureOpen();
+              if (this.connection !== connection || this.database !== database) throw fail('Phiên hoặc database của EXPLAIN đã đổi.', 'EXPLAIN_CONTEXT_CHANGED');
+              if (task.canceled) throw fail('Đã hủy EXPLAIN.', 'QUERY_CANCELED');
+              assertReadOnlySql(this.profile, source);
+              options.checkExplainContext?.();
+            }
+          });
+        }
         const result = await this.runQuery(statements[0], timeoutMs, rowLimit);
+        if (options.explainSettings === true) result.explainSettings = { version: 1, status: 'unknown', reason: 'unsupported-sql' };
+        if (options.explainSchema === true) result.explainSchema = { version: 1, status: 'unknown', reason: 'unsupported-sql' };
         if (statementCommand(statements[0]) === 'USE') {
           try {
             const current = await this.raw('SELECT DATABASE() AS value');
@@ -2013,6 +2061,7 @@ class DatabaseSession {
   }
 
   async exportQueryFile(options, write, onProgress) {
+    assertPlanExport(options?.sql);
     assertReadOnlySql(this.profile, options?.sql);
     this.ensureOpen();
     const settings = options && typeof options === 'object' ? options : {};

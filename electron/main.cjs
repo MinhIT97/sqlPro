@@ -31,6 +31,9 @@ const { previewRestoreSelection } = require('./restore-selection.cjs');
 const { collectSelectionTargetFacts, buildSelectionTargetPreview } = require('./restore-selection-target.cjs');
 const { buildSelectionDraft } = require('./restore-selection-plan.cjs');
 const { normalizeConflictPolicy } = require('./restore-selection-policy.cjs');
+const { stripLeadingComments } = require('./sql-script.cjs');
+const { validateAnalyzeSource, buildAnalyzeQuery, assertAnalyzeSession, assertPlanExport } = require('./query-analyze.cjs');
+const { explainSettings, explainSchema } = require('../query-results.js');
 let scheduleServices;
 let schedulerReady = false;
 let backupContextGeneration = 0;
@@ -1170,18 +1173,98 @@ handle('db:query', (payload) => {
   if (!payload || typeof payload.sql !== 'string') throw new Error('Câu lệnh SQL không hợp lệ.');
   const profileId = checkConnectionPolicy(payload.profileId, payload.sql);
   return withWriteReview(profileId,'query',payload, async (session,request) => {
+    const requestedSettings = request.explainSettings === true;
+    const requestedSchema = request.explainSchema === true;
+    const requestedContext = requestedSettings || requestedSchema;
+    const generation = backupContextGeneration;
+    const contextEntry = openSessions.get(profileId);
+    const contextFingerprint = requestedContext ? productionProfileFingerprint(store.getWithSecrets(profileId)) : null;
+    const checkExplainContext = () => {
+      if (!contextEntry || contextEntry.session !== session || openSessions.get(profileId) !== contextEntry || session.dead
+          || generation !== backupContextGeneration || productionProfileFingerprint(store.getWithSecrets(profileId)) !== contextFingerprint) {
+        throw Object.assign(new Error('Ngữ cảnh EXPLAIN đã thay đổi. Hãy thực hiện lại.'), { code: 'EXPLAIN_CONTEXT_CHANGED' });
+      }
+      assertSessionProfile(contextEntry);
+      checkConnectionPolicy(profileId, request.sql);
+    };
     const database = typeof request.database === 'string' && request.database ? request.database : null;
+    if (requestedContext) checkExplainContext();
     checkConnectionPolicy(profileId, request.sql);
     if (database) await session.useDatabase(database);
+    if (requestedContext) checkExplainContext();
     checkConnectionPolicy(profileId, request.sql);
-    return session.runQueryScript(
+    const observedEntry = openSessions.get(profileId);
+    const result = await session.runQueryScript(
       request.sql,
       Math.min(900000, Math.max(1000, Number(request.timeoutMs) || 300000)),
       request.confirmed === true,
       typeof request.taskId === 'string' ? request.taskId : null,
-      { rowLimit: request.rowLimit }
+      { rowLimit: request.rowLimit, ...(requestedContext ? { explainSettings: requestedSettings, explainSchema: requestedSchema, checkExplainContext } : {}) }
     );
+    const settings = requestedSettings ? explainSettings(result?.explainSettings) : null;
+    const schema = requestedSchema ? explainSchema(result?.explainSchema) : null;
+    if (result) { delete result.explainSettings; delete result.explainSchema; }
+    if (result?.kind === 'rows' && /^EXPLAIN\b/i.test(stripLeadingComments(request.sql))) {
+      result.explainContext = null;
+      // Identity and optional metadata observations of this completed plan;
+      // never execution permission or renderer-provided evidence.
+      if (observedEntry?.session === session && openSessions.get(profileId) === observedEntry && !session.dead
+          && typeof request.taskId === 'string' && request.taskId.length > 0 && request.taskId.length <= 160
+          && (session.database === null || typeof session.database === 'string' && session.database.length <= 64)) {
+        try {
+          assertSessionProfile(observedEntry);
+          if (requestedContext) checkExplainContext();
+          result.explainContext = { version: 1, profileId, sessionId: observedEntry.sessionId, database: session.database,
+            sqlHash: crypto.createHash('sha256').update(request.sql).digest('hex'), taskId: request.taskId,
+            checkedAt: new Date().toISOString(), ...(requestedSettings ? { settings } : {}), ...(requestedSchema ? { schema } : {}) };
+        } catch { /* Keep the result, but do not compare a stale target. */ }
+      }
+    }
+    return result;
   });
+});
+
+handle('db:analyze-query', (payload) => {
+  const sql = validateAnalyzeSource(payload?.sql);
+  const database = payload?.database;
+  const taskId = payload?.taskId;
+  if (typeof database !== 'string' || !database || database.length > 64 || database.includes('\0')
+      || typeof taskId !== 'string' || !taskId || taskId.length > 160 || taskId.includes('\0')) throw new Error('Chọn database và mã tác vụ hợp lệ để ANALYZE.');
+  const timeoutMs = Math.min(60000, Math.max(1000, Number(payload.timeoutMs) || 30000));
+  const profileId = checkConnectionPolicy(payload.profileId);
+  const generation = backupContextGeneration;
+  return withSessionFor(profileId, async session => {
+    const current = openSessions.get(profileId);
+    const profile = store.getWithSecrets(profileId);
+    const fingerprint = productionProfileFingerprint(profile);
+    const revision = session.transactionRevision || 0;
+    const serverVersion = session.version;
+    const started = Date.now();
+    const check = (ownedTask = null) => {
+      checkConnectionPolicy(profileId);
+      if (!current || openSessions.get(profileId) !== current || current.session !== session || session.dead
+          || generation !== backupContextGeneration || session.version !== serverVersion || Date.now() - started > 120000
+          || productionProfileFingerprint(store.getWithSecrets(profileId)) !== fingerprint) {
+        throw Object.assign(new Error('Phiên, tài khoản hoặc cấu hình đã đổi, hoặc xác nhận quá 2 phút. Hãy chạy lại từ đầu.'), { code: 'ANALYZE_CONTEXT_CHANGED' });
+      }
+      assertSessionProfile(current);
+      assertAnalyzeSession(session, ownedTask);
+    };
+    check();
+    const plan = buildAnalyzeQuery(sql, session.version);
+    const preview = redactSql(sql);
+    const response = await dialog.showMessageBox(mainWindow, {
+      type: 'warning', title: 'ANALYZE thực thi truy vấn', message: 'Chạy SELECT để đo kế hoạch thực tế?',
+      detail: `Kết nối: ${profile.name || profileId}\nMôi trường: ${profile.environment || 'local'}\nMáy chủ: ${profile.user || ''}@${profile.host || ''}:${profile.port || 3306}\nDatabase: ${database}\nServer: ${session.version}\nĐịnh dạng: ${plan.engine} ${plan.format}\nThời gian chờ: ${Math.ceil(timeoutMs / 1000)} giây\n\nANALYZE thực sự chạy SELECT, có thể tốn CPU/I/O và chờ hoặc giữ khóa. View/hàm phía server có thể có tác động gián tiếp. Bộ kiểm tra SQL không thay thế tài khoản database có quyền tối thiểu. Hủy/timeout đóng phiên; không tự thử lại.\n\nSQL đã che giá trị${preview.length > 12000 ? ' (đã rút gọn)' : ''}:\n${preview.slice(0, 12000)}`,
+      buttons: ['Hủy', 'Chạy ANALYZE'], defaultId: 0, cancelId: 0, noLink: true
+    });
+    if (response.response !== 1) return { canceled: true };
+    check();
+    if ((session.transactionRevision || 0) !== revision) throw Object.assign(new Error('Trạng thái phiên đã đổi. Hãy xác nhận ANALYZE lại.'), { code: 'ANALYZE_CONTEXT_CHANGED' });
+    await session.useDatabase(database);
+    check();
+    return session.analyzeQuery(sql, timeoutMs, taskId, check);
+  }, { exclusive: true });
 });
 
 handle('db:cancel-query', (payload) => {
@@ -1316,6 +1399,7 @@ handle('db:export-file', async (payload) => {
 handle('db:export-query', async (payload) => {
   if (!payload || typeof payload !== 'object') throw new Error('Tham số không hợp lệ.');
   if (typeof payload.sql !== 'string' || !payload.sql.trim()) throw new Error('Câu lệnh SQL không hợp lệ.');
+  assertPlanExport(payload.sql);
   const checkedProfileId = checkConnectionPolicy(payload.profileId, payload.sql);
   // Export owns a file stream: never defer its execution into an approval whose
   // stream would already be closed. Unclassified production SQL uses the editor.

@@ -780,6 +780,7 @@ dialog:has(#backupSelectionEditor){overflow:hidden}
 .query-mode #workspace>.toolbar{padding:6px 0;flex-shrink:0}
 .query-mode .sql-editor-wrap{flex-shrink:0;position:relative}
 .query-mode .editor{height:160px;min-height:75px;max-height:40vh;resize:vertical;padding:12px 14px}
+@media(max-height:740px){.query-mode .editor{height:100px}}
 .query-mode .resulttitle{padding:6px 0;flex-shrink:0}
 .query-mode #queryResult{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;margin-top:4px}
 .query-mode #queryResult>.tablebox{flex:1;min-height:0;max-height:none;overflow:auto;overscroll-behavior:contain}
@@ -1391,6 +1392,23 @@ body.light-theme textarea.inline-cell-editor:focus {
 
 
 /* Module 2: EXPLAIN badges, SQL formatter & Shortcuts modal */
+.explain-review { padding: 5px 12px; border-bottom: 1px solid #e4e9ed; font-size: 12px; line-height: 1.5; overflow: auto; min-height: 0; max-height: 45%; flex: 0 1 auto; }
+.explain-review p { margin: 4px 0; }
+.explain-settings-option { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; margin: 0; }
+.explain-settings-option input { width: auto; margin: 0; }
+.explain-review summary { cursor: pointer; padding: 4px 0; }
+.explain-review summary:focus-visible { outline: 2px solid #008a80; outline-offset: 2px; }
+.explain-review ul { margin: 6px 0; padding-left: 20px; }
+.explain-review-table { overflow: auto; max-height: 220px; }
+.explain-review-table table { min-width: 640px; }
+.explain-review-table th, .explain-review-table td { padding: 5px 8px; }
+.explain-review-table:focus-visible { outline: 2px solid #008a80; outline-offset: -2px; }
+.explain-document pre, .explain-comparison pre { margin: 6px 0; padding: 8px; white-space: pre; overflow: auto; max-height: 320px; font-size: 12px; }
+.explain-document pre:focus-visible, .explain-comparison pre:focus-visible { outline: 2px solid #008a80; outline-offset: -2px; }
+body.dark-theme .explain-review { background: #15212e; border-bottom-color: #344454; color: #d4e2ed; }
+body.dark-theme .explain-review p { color: #b5c5d5; }
+body.dark-theme .explain-review-table th { background: #203040; color: #d4e2ed; }
+body.dark-theme .explain-review-table td { color: #b5c5d5; border-bottom-color: #344454; }
 .explain-badge {
   display: inline-block;
   padding: 1px 6px;

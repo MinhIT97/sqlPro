@@ -557,87 +557,6 @@ app.whenReady().then(async () => {
     win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Z', modifiers: ['control'] });
     await until("$('#sql').value === 'SELECT A'");
   });
-  await check('query snippets modal opens, filters by search, and inserts into editor at caret with undo', async () => {
-    await evaluate(`(() => {
-      app.query.sql = 'SELECT 1;';
-      renderQueryView();
-      $('#snippetsBtn').click();
-    })()`);
-    await until("Boolean($('#modal .snippets-modal-card'))");
-    assert.equal(await evaluate("Boolean($('#snippetSearchInput'))"), true);
-    assert.ok(await evaluate("document.querySelectorAll('.snippet-card').length >= 4"));
-
-    // Filter snippets
-    await evaluate(`(() => {
-      const input = $('#snippetSearchInput');
-      input.value = 'CTE';
-      input.dispatchEvent(new Event('input'));
-    })()`);
-    await until("document.querySelectorAll('.snippet-card').length === 1");
-    assert.match(await evaluate("document.querySelector('.snippet-title').textContent"), /CTE/);
-
-    // Insert snippet into editor
-    await evaluate("document.querySelector('[data-snippet-action=\"insert\"]').click()");
-    await until("!$('#modal').open");
-    assert.match(await evaluate("$('#sql').value"), /WITH cte AS/);
-
-    // Test undo reverts insertion
-    win.webContents.focus();
-    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Z', modifiers: ['control'] });
-    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Z', modifiers: ['control'] });
-    await until("$('#sql').value === 'SELECT 1;'");
-  });
-  await check('query history view searches queries, scrubs sensitive SQL and prunes history', async () => {
-    await evaluate(`(() => {
-      historyRows = [
-        normalizeHistory({ sql: 'SELECT * FROM users;', ok: true, durationMs: 12 }),
-        normalizeHistory({ sql: 'CREATE USER test IDENTIFIED BY \\'secret_pass\\';', ok: true, durationMs: 45 }),
-        normalizeHistory({ sql: 'SELECT * FROM missing_table;', ok: false, durationMs: null, message: 'Table not found' })
-      ];
-      mode = 'history';
-      renderHistoryView();
-    })()`);
-    assert.equal(await evaluate("document.querySelectorAll('.historyrow').length"), 3);
-
-    // Filter by search query
-    await evaluate(`(() => {
-      const input = $('#historySearchInput');
-      input.value = 'users';
-      input.dispatchEvent(new Event('input'));
-    })()`);
-    await until("document.querySelectorAll('.historyrow').length === 1");
-
-    // Status filter
-    await evaluate(`(() => {
-      $('#historySearchInput').value = '';
-      $('#historySearchInput').dispatchEvent(new Event('input'));
-      $('#historyStatusFilter').value = 'error';
-      $('#historyStatusFilter').dispatchEvent(new Event('change'));
-    })()`);
-    await until("document.querySelectorAll('.historyrow').length === 1");
-    assert.match(await evaluate("document.querySelector('.history-sql').textContent"), /missing_table/);
-
-    // Reset status filter and test sensitive scrub
-    await evaluate(`(() => {
-      $('#historyStatusFilter').value = 'all';
-      $('#historyStatusFilter').dispatchEvent(new Event('change'));
-      const scrubCheckbox = $('#scrubSensitiveCheckbox');
-      scrubCheckbox.checked = true;
-      scrubCheckbox.dispatchEvent(new Event('change'));
-    })()`);
-    await until("document.querySelectorAll('.historyrow').length === 3");
-    const historyText = await evaluate("document.querySelector('.history-list').textContent");
-    assert.ok(historyText.includes("***"));
-    assert.ok(!historyText.includes("secret_pass"));
-
-    // Clear history
-    await evaluate("$('#clearHistory').click()");
-    await until("document.querySelectorAll('.historyrow').length === 0");
-    assert.equal(await evaluate("historyRows.length"), 0);
-
-    // Return to query view
-    await evaluate("mode = 'query'; renderQueryView();");
-  });
   await check('autocomplete keeps case-sensitive sources and self-join aliases, caches bounded metadata and accepts columns with keyboard/undo', async () => {
     autocompleteColumns = new Map([
       ['Items', [{ name: 'Name', type: 'varchar(50)' }, { name: 'name', type: 'varchar(50)' }, { name: '<img src=x>', type: 'text' }]],
@@ -1696,6 +1615,115 @@ app.whenReady().then(async () => {
     await evaluate("$('#confirmOk').click()");
     await until("Boolean($('.kill-btn'))");
     assert.ok(calls.some((call) => call.name === 'db:query' && call.args[0].sql === 'KILL 42' && call.args[0].confirmed));
+  });
+  await check('diagnostic dashboard switches between processlist, locks and slow queries tabs', async () => {
+    await evaluate('showProcesslistModal()');
+    await until("Boolean($('.diag-tabs'))");
+    assert.equal(await evaluate("Boolean($('#diagAutoRefreshSelect'))"), true);
+
+    // Switch to Locks tab
+    await evaluate("document.querySelector('[data-diag-tab=\"locks\"]').click()");
+    await until("document.querySelector('[data-diag-tab=\"locks\"]').classList.contains('active')");
+    await until("!$('#diagTabContent').textContent.includes('Đang phân tích')");
+    assert.match(await evaluate("$('#diagTabContent').textContent"), /Khóa & Giao dịch|Active Transactions/i);
+
+    // Switch to Slow Queries tab
+    await evaluate("document.querySelector('[data-diag-tab=\"slow\"]').click()");
+    await until("document.querySelector('[data-diag-tab=\"slow\"]').classList.contains('active')");
+    await until("!$('#diagTabContent').textContent.includes('Đang đọc')");
+    assert.match(await evaluate("$('#diagTabContent').textContent"), /Slow Query Log/i);
+
+    // Switch back to processlist and test safe kill query button
+    await evaluate("document.querySelector('[data-diag-tab=\"processlist\"]').click()");
+    await until("Boolean($('.kill-query-btn'))");
+    await evaluate("$('.kill-query-btn').click()");
+    await until("Boolean($('#confirmOk'))");
+    await evaluate("$('#confirmOk').click()");
+    assert.ok(calls.some((call) => call.name === 'db:query' && call.args[0].sql === 'KILL QUERY 42' && call.args[0].confirmed));
+
+    await evaluate('closeModal()');
+  });
+  await check('query snippets modal opens, filters by search, and inserts into editor at caret with undo', async () => {
+    await evaluate(`(() => {
+      mode = 'query';
+      app.query.sql = 'SELECT 1;';
+      renderQueryView();
+      $('#snippetsBtn').click();
+    })()`);
+    await until("Boolean($('#modal .snippets-modal-card'))");
+    assert.equal(await evaluate("Boolean($('#snippetSearchInput'))"), true);
+    assert.ok(await evaluate("document.querySelectorAll('.snippet-card').length >= 4"));
+
+    // Filter snippets
+    await evaluate(`(() => {
+      const input = $('#snippetSearchInput');
+      input.value = 'CTE';
+      input.dispatchEvent(new Event('input'));
+    })()`);
+    await until("document.querySelectorAll('.snippet-card').length === 1");
+    assert.match(await evaluate("document.querySelector('.snippet-title').textContent"), /CTE/);
+
+    // Insert snippet into editor
+    await evaluate("document.querySelector('[data-snippet-action=\"insert\"]').click()");
+    await until("!$('#modal').open");
+    assert.match(await evaluate("$('#sql').value"), /WITH cte AS/);
+
+    // Test undo reverts insertion
+    win.webContents.focus();
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Z', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Z', modifiers: ['control'] });
+    await until("$('#sql').value === 'SELECT 1;'");
+  });
+  await check('query history view searches queries, scrubs sensitive SQL and prunes history', async () => {
+    await evaluate(`(() => {
+      historyRows = [
+        normalizeHistory({ sql: 'SELECT * FROM users;', ok: true, durationMs: 12 }),
+        normalizeHistory({ sql: 'CREATE USER test IDENTIFIED BY \\'secret_pass\\';', ok: true, durationMs: 45 }),
+        normalizeHistory({ sql: 'SELECT * FROM missing_table;', ok: false, durationMs: null, message: 'Table not found' })
+      ];
+      mode = 'history';
+      renderHistoryView();
+    })()`);
+    assert.equal(await evaluate("document.querySelectorAll('.historyrow').length"), 3);
+
+    // Filter by search query
+    await evaluate(`(() => {
+      const input = $('#historySearchInput');
+      input.value = 'users';
+      input.dispatchEvent(new Event('input'));
+    })()`);
+    await until("document.querySelectorAll('.historyrow').length === 1");
+
+    // Status filter
+    await evaluate(`(() => {
+      $('#historySearchInput').value = '';
+      $('#historySearchInput').dispatchEvent(new Event('input'));
+      $('#historyStatusFilter').value = 'error';
+      $('#historyStatusFilter').dispatchEvent(new Event('change'));
+    })()`);
+    await until("document.querySelectorAll('.historyrow').length === 1");
+    assert.match(await evaluate("document.querySelector('.history-sql').textContent"), /missing_table/);
+
+    // Reset status filter and test sensitive scrub
+    await evaluate(`(() => {
+      $('#historyStatusFilter').value = 'all';
+      $('#historyStatusFilter').dispatchEvent(new Event('change'));
+      const scrubCheckbox = $('#scrubSensitiveCheckbox');
+      scrubCheckbox.checked = true;
+      scrubCheckbox.dispatchEvent(new Event('change'));
+    })()`);
+    await until("document.querySelectorAll('.historyrow').length === 3");
+    const historyText = await evaluate("document.querySelector('.history-list').textContent");
+    assert.ok(historyText.includes("***"));
+    assert.ok(!historyText.includes("secret_pass"));
+
+    // Clear history
+    await evaluate("$('#clearHistory').click()");
+    await until("document.querySelectorAll('.historyrow').length === 0");
+    assert.equal(await evaluate("historyRows.length"), 0);
+
+    // Return to previous view
+    await evaluate("view('data')");
   });
   await check('maintenance renders server response', async () => {
     await evaluate("runTableMaintenance('users','CHECK')");

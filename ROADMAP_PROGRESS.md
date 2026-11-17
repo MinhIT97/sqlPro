@@ -1,6 +1,23 @@
 # Tiến độ roadmap SqlPro
 
-Cập nhật: 17/11/2026. Đối chiếu `DATABASE_PRODUCT_ROADMAP.md`. Đợt 1–6 và CHECK đã có commit local; phần sau `4330f56` được rà soát, sửa và chốt trong commit đợt 7. Các mục bên dưới là nhật ký tại thời điểm triển khai; xem mục mới nhất, git log và [CODE_REVIEW_BATCH_7.md](CODE_REVIEW_BATCH_7.md) để xác định hiện trạng. Phần sau `81d0228` gồm G5.1, các phần G5.2 (JSON/TREE, so sánh quan sát, thiết lập phiên/định nghĩa một bảng opt-in, ANALYZE riêng), phần cache/scope/CTE/projection/alias G5.3 và fix blur retry khi sửa ô đã chốt `56dfe51`; xem [CODE_REVIEW_BATCH_8.md](CODE_REVIEW_BATCH_8.md). Set output chốt `99dbee3`; phần local star 17/11 được rà soát/chốt đợt 9 tại `f2f42f4`, xem [CODE_REVIEW_BATCH_9.md](CODE_REVIEW_BATCH_9.md). Phần IN/NOT IN và prepared reads được rà soát/chốt đợt 10 tại [CODE_REVIEW_BATCH_10.md](CODE_REVIEW_BATCH_10.md). Các ghi chú chưa commit cũ là lịch sử theo từng lượt.
+Cập nhật: 17/11/2026. Đối chiếu `DATABASE_PRODUCT_ROADMAP.md`. Đợt 1–6 và CHECK đã có commit local; phần sau `4330f56` được rà soát, sửa và chốt trong commit đợt 7. Các mục bên dưới là nhật ký tại thời điểm triển khai; xem mục mới nhất, git log và [CODE_REVIEW_BATCH_7.md](CODE_REVIEW_BATCH_7.md) để xác định hiện trạng. Phần sau `81d0228` gồm G5.1, các phần G5.2 (JSON/TREE, so sánh quan sát, thiết lập phiên/định nghĩa một bảng opt-in, ANALYZE riêng), phần cache/scope/CTE/projection/alias G5.3 và fix blur retry khi sửa ô đã chốt `56dfe51`; xem [CODE_REVIEW_BATCH_8.md](CODE_REVIEW_BATCH_8.md). Set output chốt `99dbee3`; phần local star 17/11 được rà soát/chốt đợt 9 tại `f2f42f4`, xem [CODE_REVIEW_BATCH_9.md](CODE_REVIEW_BATCH_9.md). Phần IN/NOT IN và prepared reads được rà soát/chốt đợt 10 tại [CODE_REVIEW_BATCH_10.md](CODE_REVIEW_BATCH_10.md). Prepared statements ghi/import/metadata chốt đợt 11 tại [CODE_REVIEW_BATCH_11.md](CODE_REVIEW_BATCH_11.md). Query Snippets & History nâng cao chốt đợt 12 tại [CODE_REVIEW_BATCH_12.md](CODE_REVIEW_BATCH_12.md). Diagnostic Dashboard & Processlist chốt đợt 13 tại [CODE_REVIEW_BATCH_13.md](CODE_REVIEW_BATCH_13.md). Các ghi chú chưa commit cũ là lịch sử theo từng lượt.
+
+## 17/11 — G5.6: Bảng điều khiển chẩn đoán server, tiến trình, khóa/giao dịch và safe kill
+
+- Triển khai **G5.6 (Diagnostic Dashboard & Server Process Management)**:
+  - Xây dựng module thuần UMD `diagnostics.js` quản lý chuẩn hóa dữ liệu tiến trình (`parseProcesslistRow`), tìm kiếm lọc loại lệnh (`filterProcesses`: All, Query, Sleep, Slow, Locked), định dạng thời lượng (`formatDuration`), nhận diện thread hệ thống (`isSystemThread`) và phiên kết nối của chính người dùng (`isMyConnection`).
+  - Tự động rẽ nhánh nhận diện engine MySQL vs MariaDB (`detectServerEngine`) và truy vấn bảng khóa phù hợp: MySQL 8.0+ dùng `performance_schema.data_lock_waits`, còn MySQL 5.7 / MariaDB dùng `information_schema.innodb_lock_waits`.
+  - Phân tách an toàn giữa hủy câu lệnh đang chạy (`KILL QUERY <id>`) và ngắt toàn bộ kết nối (`KILL <id>`); cảnh báo xác nhận rõ ràng khi nhắm vào thread hệ thống hoặc chính session hiện tại.
+  - Tích hợp giao diện Dashboard 3 tab trong `app.js`: Tab 1 Tiến trình (Processlist) có auto-refresh (Tắt, 3s, 5s, 10s) và tự tạm dừng khi `document.hidden`; Tab 2 Khóa & Giao dịch (Locks & Transactions) phát hiện giao dịch treo và trực tiếp ngắt blocker; Tab 3 Truy vấn chậm (Slow Queries) đọc `mysql.slow_log` an toàn và quan sát biến toàn cục (`slow_query_log`, `long_query_time`, `Slow_queries`).
+- Kiểm tra toàn bộ: unit test `test/diagnostics.test.cjs` đạt **8/8 pass**; `npm run check` đạt **915/915 pass / 0 fail / 13 skip**; Electron smoke **90/90 pass**; website smoke **14/14 pass**; server test **17/17 pass**; `git diff --check` qua.
+
+## 17/11 — G5.5: Thư viện mẫu truy vấn (Query Snippets) và lịch sử truy vấn nâng cao
+
+- Triển khai **G5.5 (Query Snippets & Advanced History)**:
+  - Xây dựng module thuần UMD `query-snippets.js` quản lý chuẩn hóa snippet (`normalizeSnippet`), tìm kiếm theo tiêu đề/nội dung/tag/shortcut (`searchSnippets`), bộ mẫu mặc định (`defaultSnippets`), che giấu thông tin nhạy cảm (`scrubSensitiveSql`, `hasSensitiveSql`), chuẩn hóa lịch sử (`normalizeHistoryEntry`), tìm kiếm/lọc lịch sử (`searchHistory`), và dọn dẹp lịch sử theo giới hạn (`pruneHistory`).
+  - Hộp thoại Snippets Modal trong `app.js` hỗ trợ phím tắt F2, tìm kiếm thời gian thực, lọc theo tag, chèn vào SQL Editor tại vị trí con trỏ và bảo toàn ngăn xếp Undo/Redo qua `recordSqlEditorChange`.
+  - Nâng cấp giao diện Lịch sử truy vấn trong `renderHistoryView()`: tìm kiếm theo từ khóa, lọc theo trạng thái (tất cả / thành công / lỗi), checkbox che giấu mật khẩu, dọn dẹp lịch sử (>7 ngày, >30 ngày, xóa hết), và các nút thao tác nhanh (Mở lại, Sao chép, Lưu thành Snippet).
+- Kiểm tra toàn bộ: unit test `test/query-snippets.test.cjs` đạt **7/7 pass**.
 
 ## 17/11 — G5.4/G4.2: prepared statements cho ghi, import và metadata
 

@@ -22,6 +22,7 @@ const RowValues = window.SqlRowValues;
 const ExportValues = window.SqlExportValues;
 const QueryResults = window.SqlQueryResults;
 const QuerySnippets = window.QuerySnippets;
+const SqlDiagnostics = window.SqlDiagnostics;
 
 const DEFAULT_WORKSPACE_ID = 'ws-personal';
 const openTreeGroups = new Set(['tables']);
@@ -2429,26 +2430,27 @@ async function showProcesslistModal() {
     <div class="modal-card processlist-card">
       <div class="modal-header">
         <div class="modal-header-left">
-          <h3>🖥️ Quản Lý Tiến Trình <span class="modal-title-tag">Processlist</span></h3>
-          <button class="refresh-header-btn" id="refreshProcesslistBtn" title="Làm mới danh sách tiến trình">↻ Làm mới</button>
+          <h3>🖥️ Bảng Điều Khiển Chẩn Đoán <span class="modal-title-tag">Diagnostics</span></h3>
+          <div class="diag-tabs" role="tablist">
+            <button class="diag-tab-btn active" data-diag-tab="processlist">🖥️ Tiến trình</button>
+            <button class="diag-tab-btn" data-diag-tab="locks">🔒 Khóa & Giao dịch</button>
+            <button class="diag-tab-btn" data-diag-tab="slow">🐢 Truy vấn chậm</button>
+          </div>
         </div>
-        <button class="close-btn" data-click="close-modal" title="Đóng (Esc)" aria-label="Đóng">✕</button>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <select id="diagAutoRefreshSelect" class="diag-auto-refresh-select" aria-label="Tự động làm mới" title="Tự động làm mới dữ liệu chẩn đoán">
+            <option value="0">Tự động: Tắt</option>
+            <option value="3">Tự động: 3s</option>
+            <option value="5">Tự động: 5s</option>
+            <option value="10">Tự động: 10s</option>
+          </select>
+          <button class="refresh-header-btn" id="refreshDiagBtn" title="Làm mới dữ liệu chẩn đoán">↻ Làm mới</button>
+          <button class="close-btn" data-click="close-modal" title="Đóng (Esc)" aria-label="Đóng">✕</button>
+        </div>
       </div>
-      <div class="modal-body">
-        <div class="processlist-toolbar">
-          <div class="processlist-search-wrap">
-            <span class="processlist-search-icon">🔍</span>
-            <input type="search" id="processlistFilter" class="processlist-search-input" placeholder="Lọc theo ID, user, host, database, lệnh, câu lệnh SQL..." autocomplete="off">
-          </div>
-          <div class="processlist-metrics" id="processlistMetrics">
-            <button type="button" class="metric-chip active" data-filter="all">Tất cả <strong id="metricTotal">0</strong></button>
-            <button type="button" class="metric-chip chip-query" data-filter="query">Đang chạy <strong id="metricQuery">0</strong></button>
-            <button type="button" class="metric-chip chip-sleep" data-filter="sleep">Đang chờ <strong id="metricSleep">0</strong></button>
-            <button type="button" class="metric-chip chip-slow" data-filter="slow">Chậm (>5s) <strong id="metricSlow">0</strong></button>
-          </div>
-        </div>
-        <div id="processlistContainer" class="processlist-table-container">
-          <div class="processlist-loading">Đang truy vấn SHOW FULL PROCESSLIST...</div>
+      <div class="modal-body" id="diagModalBody">
+        <div id="diagTabContent">
+          <div class="processlist-loading">Đang tải dữ liệu chẩn đoán...</div>
         </div>
       </div>
       <div class="modal-footer">
@@ -2460,168 +2462,556 @@ async function showProcesslistModal() {
     </div>
   `);
 
+  let currentTab = 'processlist';
   let activeQuickFilter = 'all';
+  let autoRefreshTimer = null;
+  let currentConnectionId = null;
+  let serverEngine = null;
+  let isFetching = false;
+  let processFilterVal = '';
+
+  const dialog = $('#modal');
+  const onModalClose = () => {
+    if (autoRefreshTimer) {
+      clearInterval(autoRefreshTimer);
+      autoRefreshTimer = null;
+    }
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+  };
+  dialog.addEventListener('close', onModalClose, { once: true });
+
+  const onVisibilityChange = () => {
+    if (document.hidden) {
+      if (autoRefreshTimer) {
+        clearInterval(autoRefreshTimer);
+        autoRefreshTimer = null;
+      }
+    } else {
+      setupAutoRefresh();
+    }
+  };
+  document.addEventListener('visibilitychange', onVisibilityChange);
+
+  function setupAutoRefresh() {
+    if (autoRefreshTimer) {
+      clearInterval(autoRefreshTimer);
+      autoRefreshTimer = null;
+    }
+    const select = $('#diagAutoRefreshSelect');
+    const intervalSec = Number(select?.value) || 0;
+    if (intervalSec > 0) {
+      autoRefreshTimer = setInterval(() => {
+        if (!document.hidden && !isFetching && $('#modal').open) {
+          void refreshCurrentTab();
+        }
+      }, intervalSec * 1000);
+    }
+  }
+
+  $('#diagAutoRefreshSelect')?.addEventListener('change', () => {
+    setupAutoRefresh();
+  });
+
+  async function ensureServerInfo() {
+    if (currentConnectionId !== null && serverEngine !== null) return;
+    try {
+      const res = await call(desktop.db.query({ ...activeQueryTarget(), sql: 'SELECT CONNECTION_ID() AS my_id, VERSION() AS ver' }));
+      if (res && Array.isArray(res.rows) && res.rows.length) {
+        currentConnectionId = String(res.rows[0][0]);
+        if (typeof SqlDiagnostics !== 'undefined') {
+          serverEngine = SqlDiagnostics.detectServerEngine(res.rows[0][1]);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function refreshCurrentTab() {
+    if (currentTab === 'processlist') await loadProcesslist();
+    else if (currentTab === 'locks') await loadLocksAndTransactions();
+    else if (currentTab === 'slow') await loadSlowQueries();
+  }
 
   async function loadProcesslist() {
-    const container = $('#processlistContainer');
-    if (!container) return;
+    const container = $('#diagTabContent');
+    if (!container || isFetching) return;
+    isFetching = true;
     try {
+      await ensureServerInfo();
       const res = await call(desktop.db.query({ ...activeQueryTarget(), sql: 'SHOW FULL PROCESSLIST' }));
-      if (container !== $('#processlistContainer')) return;
-      const rows = res.rows || [];
-      const filterVal = ($('#processlistFilter')?.value || '').toLowerCase().trim();
+      if (container !== $('#diagTabContent') || currentTab !== 'processlist') return;
+
+      const rawRows = res.rows || [];
+      const processes = rawRows.map((r) => {
+        if (typeof SqlDiagnostics !== 'undefined') {
+          return SqlDiagnostics.parseProcesslistRow(r, currentConnectionId);
+        }
+        return {
+          id: String(r[0]),
+          user: String(r[1] || ''),
+          host: String(r[2] || ''),
+          db: String(r[3] || ''),
+          command: String(r[4] || ''),
+          timeSec: Number(r[5]) || 0,
+          timeFormatted: `${r[5]}s`,
+          state: String(r[6] || ''),
+          info: String(r[7] || ''),
+          isSystem: false,
+          isSelf: String(r[0]) === String(currentConnectionId),
+          isSlow: Number(r[5]) > 5 && r[4] === 'Query',
+          isLocked: /lock/i.test(r[6] || '')
+        };
+      });
 
       let queryCount = 0;
       let sleepCount = 0;
       let slowCount = 0;
-      for (const r of rows) {
-        const cmd = String(r[4] || '');
-        const timeSec = Number(r[5] || 0);
-        if (cmd === 'Query') queryCount++;
-        else if (cmd === 'Sleep') sleepCount++;
-        if (timeSec > 5 && cmd === 'Query') slowCount++;
+      let lockedCount = 0;
+      for (const p of processes) {
+        if (p.command.toLowerCase() === 'query') queryCount++;
+        else if (p.command.toLowerCase() === 'sleep') sleepCount++;
+        if (p.isSlow) slowCount++;
+        if (p.isLocked) lockedCount++;
       }
 
-      const totalEl = $('#metricTotal');
-      const queryEl = $('#metricQuery');
-      const sleepEl = $('#metricSleep');
-      const slowEl = $('#metricSlow');
-      if (totalEl) totalEl.textContent = rows.length;
-      if (queryEl) queryEl.textContent = queryCount;
-      if (sleepEl) sleepEl.textContent = sleepCount;
-      if (slowEl) slowEl.textContent = slowCount;
-
-      const filtered = rows.filter((r) => {
-        const cmd = String(r[4] || '');
-        const timeSec = Number(r[5] || 0);
-
-        if (activeQuickFilter === 'query' && cmd !== 'Query') return false;
-        if (activeQuickFilter === 'sleep' && cmd !== 'Sleep') return false;
-        if (activeQuickFilter === 'slow' && !(timeSec > 5 && cmd === 'Query')) return false;
-
-        if (!filterVal) return true;
-        const id = String(r[0] || '').toLowerCase();
-        const user = String(r[1] || '').toLowerCase();
-        const host = String(r[2] || '').toLowerCase();
-        const db = String(r[3] || '').toLowerCase();
-        const state = String(r[6] || '').toLowerCase();
-        const info = String(r[7] || '').toLowerCase();
-        return id.includes(filterVal) || user.includes(filterVal) || host.includes(filterVal) ||
-               db.includes(filterVal) || cmd.toLowerCase().includes(filterVal) ||
-               state.includes(filterVal) || info.includes(filterVal);
-      });
-
-      if (!filtered.length) {
-        container.innerHTML = '<div class="processlist-empty">Không có tiến trình nào phù hợp với bộ lọc.</div>';
-        return;
-      }
+      const filtered = typeof SqlDiagnostics !== 'undefined'
+        ? SqlDiagnostics.filterProcesses(processes, { query: processFilterVal, filterType: activeQuickFilter })
+        : processes;
 
       container.innerHTML = `
-        <table class="processlist-table">
-          <thead>
-            <tr>
-              <th style="width:75px;">ID</th>
-              <th style="width:130px;">User</th>
-              <th style="width:130px;">Host</th>
-              <th style="width:120px;">Database</th>
-              <th style="width:90px;">Lệnh</th>
-              <th style="width:110px;">Thời gian</th>
-              <th style="width:120px;">Trạng thái</th>
-              <th>Câu lệnh SQL</th>
-              <th style="width:80px; text-align:center;">Thao tác</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${filtered.map((r) => {
-              const id = r[0];
-              const user = r[1] || '';
-              const host = r[2] || '';
-              const dbName = r[3] || '';
-              const command = r[4] || '';
-              const timeSec = Number(r[5] || 0);
-              const state = r[6] || '';
-              const info = r[7] || '';
-              const isSlow = timeSec > 5 && command === 'Query';
-
-              let timeFormatted = `${timeSec}s`;
-              if (timeSec >= 60) {
-                const mins = Math.floor(timeSec / 60);
-                const secs = timeSec % 60;
-                timeFormatted = `${timeSec}s (${mins}m ${secs}s)`;
-              }
-
-              const cmdClass = command === 'Query' ? 'active' : (command === 'Sleep' ? 'sleep' : '');
-
-              return `
-                <tr class="${isSlow ? 'slow-process-row' : ''}">
-                  <td class="proc-id mono">#${esc(String(id))}</td>
-                  <td class="proc-user" title="${esc(user)}"><strong>${esc(user)}</strong></td>
-                  <td class="proc-host mono" title="${esc(host)}">${esc(host.length > 20 ? host.slice(0, 20) + '…' : host)}</td>
-                  <td class="proc-db" title="${esc(dbName || '—')}">${dbName ? `<span class="proc-db-badge">${esc(dbName)}</span>` : '<span class="muted">—</span>'}</td>
-                  <td><span class="command-badge ${cmdClass}">${esc(command)}</span></td>
-                  <td>
-                    <span class="time-badge ${isSlow ? 'time-warn' : ''}">
-                      ${isSlow ? '⚠️ ' : ''}${timeFormatted}
-                    </span>
-                  </td>
-                  <td class="proc-state" title="${esc(state || '—')}"><small>${esc(state || '—')}</small></td>
-                  <td class="proc-sql-cell" title="${esc(info ? `${info}\n\n(Nhấp chuột để sao chép SQL)` : 'Không có câu lệnh thực thi')}">
-                    ${info ? `<code class="process-sql" data-full-sql="${esc(info)}">${esc(info.length > 85 ? info.slice(0, 85) + '…' : info)}</code>` : '<span class="muted">—</span>'}
-                  </td>
-                  <td style="text-align:center;">
-                    <button class="danger kill-btn" data-kill-id="${id}" title="Hủy tiến trình #${id}">✕ Kill</button>
-                  </td>
+        <div class="processlist-toolbar">
+          <div class="processlist-search-wrap">
+            <span class="processlist-search-icon">🔍</span>
+            <input type="search" id="processlistFilter" class="processlist-search-input" placeholder="Lọc theo ID, user, host, database, lệnh, câu lệnh SQL..." value="${esc(processFilterVal)}" autocomplete="off">
+          </div>
+          <div class="processlist-metrics" id="processlistMetrics">
+            <button type="button" class="metric-chip ${activeQuickFilter === 'all' ? 'active' : ''}" data-filter="all">Tất cả <strong>${processes.length}</strong></button>
+            <button type="button" class="metric-chip chip-query ${activeQuickFilter === 'query' ? 'active' : ''}" data-filter="query">Đang chạy <strong>${queryCount}</strong></button>
+            <button type="button" class="metric-chip chip-sleep ${activeQuickFilter === 'sleep' ? 'active' : ''}" data-filter="sleep">Đang chờ <strong>${sleepCount}</strong></button>
+            <button type="button" class="metric-chip chip-slow ${activeQuickFilter === 'slow' ? 'active' : ''}" data-filter="slow">Chậm (>5s) <strong>${slowCount}</strong></button>
+            <button type="button" class="metric-chip ${activeQuickFilter === 'locked' ? 'active' : ''}" data-filter="locked">Chờ khóa <strong>${lockedCount}</strong></button>
+          </div>
+        </div>
+        <div class="processlist-table-container">
+          ${filtered.length > 0 ? `
+            <table class="processlist-table">
+              <thead>
+                <tr>
+                  <th style="width:110px;">ID</th>
+                  <th style="width:130px;">User</th>
+                  <th style="width:130px;">Host</th>
+                  <th style="width:120px;">Database</th>
+                  <th style="width:90px;">Lệnh</th>
+                  <th style="width:110px;">Thời gian</th>
+                  <th style="width:120px;">Trạng thái</th>
+                  <th>Câu lệnh SQL</th>
+                  <th style="width:160px; text-align:center;">Thao tác an toàn</th>
                 </tr>
-              `;
-            }).join('')}
-          </tbody>
-        </table>
+              </thead>
+              <tbody>
+                ${filtered.map((p) => {
+                  const cmdClass = p.command === 'Query' ? 'active' : (p.command === 'Sleep' ? 'sleep' : '');
+                  return `
+                    <tr class="${p.isSlow ? 'slow-process-row' : ''}">
+                      <td class="proc-id mono">
+                        #${esc(p.id)}
+                        ${p.isSelf ? '<span class="badge self-badge">Phiên của bạn</span>' : ''}
+                        ${p.isSystem ? '<span class="badge system-badge">Hệ thống</span>' : ''}
+                      </td>
+                      <td class="proc-user" title="${esc(p.user)}"><strong>${esc(p.user)}</strong></td>
+                      <td class="proc-host mono" title="${esc(p.host)}">${esc(p.host.length > 20 ? p.host.slice(0, 20) + '…' : p.host)}</td>
+                      <td class="proc-db" title="${esc(p.db || '—')}">${p.db ? `<span class="proc-db-badge">${esc(p.db)}</span>` : '<span class="muted">—</span>'}</td>
+                      <td><span class="command-badge ${cmdClass}">${esc(p.command)}</span></td>
+                      <td>
+                        <span class="time-badge ${p.isSlow ? 'time-warn' : ''}">
+                          ${p.isSlow ? '⚠️ ' : ''}${p.timeFormatted}
+                        </span>
+                      </td>
+                      <td class="proc-state" title="${esc(p.state || '—')}"><small>${esc(p.state || '—')}</small></td>
+                      <td class="proc-sql-cell" title="${esc(p.info ? `${p.info}\n\n(Nhấp chuột để sao chép SQL)` : 'Không có câu lệnh thực thi')}">
+                        ${p.info ? `<code class="process-sql" data-full-sql="${esc(p.info)}">${esc(p.info.length > 80 ? p.info.slice(0, 80) + '…' : p.info)}</code>` : '<span class="muted">—</span>'}
+                      </td>
+                      <td style="text-align:center;">
+                        <button class="small-btn kill-query-btn" data-kill-query="${esc(p.id)}" title="Chỉ hủy câu lệnh đang chạy (KILL QUERY), giữ kết nối mở">Dừng SQL</button>
+                        <button class="danger small-btn kill-conn-btn kill-btn" data-kill-id="${esc(p.id)}" data-kill-conn="${esc(p.id)}" title="Ngắt kết nối hoàn toàn (KILL CONNECTION)">✕ Kill</button>
+                      </td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          ` : `
+            <div class="processlist-empty">Không có tiến trình nào phù hợp với bộ lọc.</div>
+          `}
+        </div>
       `;
+
+      const searchInput = $('#processlistFilter');
+      if (searchInput) {
+        searchInput.addEventListener('input', (e) => {
+          processFilterVal = e.target.value;
+          loadProcesslist();
+          const nextInput = $('#processlistFilter');
+          if (nextInput) {
+            nextInput.focus();
+            nextInput.setSelectionRange(processFilterVal.length, processFilterVal.length);
+          }
+        });
+      }
+
+      $('#processlistMetrics')?.addEventListener('click', (e) => {
+        const chip = e.target.closest('.metric-chip');
+        if (!chip) return;
+        activeQuickFilter = chip.dataset.filter || 'all';
+        loadProcesslist();
+      });
 
       container.querySelectorAll('.process-sql').forEach((codeEl) => {
         codeEl.addEventListener('click', async (e) => {
           e.stopPropagation();
           const sql = codeEl.dataset.fullSql;
           if (sql) {
-            try {
-              await writeClipboardText(sql);
-              toast('Đã sao chép câu lệnh SQL vào bộ nhớ tạm', 'success');
-            } catch {}
+            if (navigator.clipboard?.writeText) {
+              navigator.clipboard.writeText(sql);
+            }
+            toast('Đã sao chép câu lệnh SQL vào bộ nhớ tạm', 'info');
           }
         });
       });
 
-      container.querySelectorAll('.kill-btn').forEach((btn) => {
-        btn.addEventListener('click', async () => {
-          const killId = btn.dataset.killId;
-          if (!/^\d+$/.test(killId)) return;
-          const confirmed = await confirmAction(`Hủy tiến trình #${killId}?`, 'Kết nối hoặc truy vấn của tiến trình này sẽ bị dừng.', 'Hủy tiến trình');
+      container.querySelectorAll('.kill-query-btn').forEach((btn) => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const killId = btn.dataset.killQuery;
+          const p = processes.find((item) => item.id === killId);
+          if (!p) return;
+
+          let msg = `Bạn có chắc muốn dừng câu lệnh SQL đang chạy của tiến trình #${killId}?\n` +
+            `• User: ${p.user} | Host: ${p.host} | DB: ${p.db || '—'}\n` +
+            `• SQL: ${(p.info || '').slice(0, 100) || '—'}`;
+          if (p.isSelf) msg += '\n\n⚠️ Chú ý: Đây là phiên SqlPro hiện tại của bạn.';
+          if (p.isSystem) msg += '\n\n⚠️ CẢNH BÁO: Đây là tiến trình hệ thống MySQL!';
+
+          const confirmed = await confirmAction(`Dừng câu lệnh SQL #${killId}?`, msg, 'Dừng SQL (KILL QUERY)', { separate: true });
           if (!confirmed) return;
+
           try {
-            await call(desktop.db.query({ ...activeQueryTarget(), sql: `KILL ${killId}`, confirmed: true }));
+            const sql = typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.safeKillQuerySql(killId) : `KILL QUERY ${killId}`;
+            await call(desktop.db.query({ ...activeQueryTarget(), sql, confirmed: true }));
+            toast(`Đã gửi lệnh dừng SQL cho tiến trình #${killId}`, 'success');
+            await loadProcesslist();
+          } catch (err) {
+            toast(err.message || 'Lỗi khi dừng câu lệnh SQL', 'error');
+          }
+        });
+      });
+
+      container.querySelectorAll('.kill-conn-btn').forEach((btn) => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const killId = btn.dataset.killConn || btn.dataset.killId;
+          const p = processes.find((item) => item.id === killId);
+          if (!p) return;
+
+          let msg = `Đóng kết nối của tiến trình #${killId}?\n` +
+            `• User: ${p.user} | Host: ${p.host} | DB: ${p.db || '—'}\n` +
+            `• SQL: ${(p.info || '').slice(0, 100) || '—'}`;
+          if (p.isSelf) msg += '\n\n⚠️ CẢNH BÁO: Đây là phiên kết nối SqlPro hiện tại của bạn! Ngắt kết nối sẽ làm ngắt phiên làm việc đang mở.';
+          if (p.isSystem) msg += '\n\n⚠️ CẢNH BÁO NGUY HIỂM: Đây là tiến trình nội bộ hệ thống MySQL (replication/scheduler)! Hủy tiến trình này có thể gây lỗi hệ thống.';
+
+          const confirmed = await confirmAction(`Hủy kết nối #${killId}?`, msg, 'Đóng kết nối (KILL)', { separate: true });
+          if (!confirmed) return;
+
+          try {
+            const sql = typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.safeKillConnectionSql(killId) : `KILL ${killId}`;
+            await call(desktop.db.query({ ...activeQueryTarget(), sql, confirmed: true }));
             toast(`Đã hủy tiến trình #${killId}`, 'success');
-            await showProcesslistModal();
+            await loadProcesslist();
           } catch (err) {
             toast(err.message || 'Lỗi khi hủy tiến trình', 'error');
           }
         });
       });
     } catch (err) {
-      container.innerHTML = `<div class="processlist-error">Lỗi: ${esc(err.message)}</div>`;
+      container.innerHTML = `<div class="processlist-error">Lỗi khi đọc Processlist: ${esc(err.message)}</div>`;
+    } finally {
+      isFetching = false;
     }
   }
 
-  loadProcesslist();
-  $('#refreshProcesslistBtn')?.addEventListener('click', loadProcesslist);
-  $('#processlistFilter')?.addEventListener('input', debounce(loadProcesslist, 300));
-  $('#processlistMetrics')?.addEventListener('click', (e) => {
-    const chip = e.target.closest('.metric-chip');
-    if (!chip) return;
-    $('#processlistMetrics').querySelectorAll('.metric-chip').forEach((c) => c.classList.remove('active'));
-    chip.classList.add('active');
-    activeQuickFilter = chip.dataset.filter || 'all';
-    loadProcesslist();
+  async function loadLocksAndTransactions() {
+    const container = $('#diagTabContent');
+    if (!container || isFetching) return;
+    isFetching = true;
+    container.innerHTML = '<div class="processlist-loading">Đang phân tích giao dịch và khóa InnoDB...</div>';
+
+    try {
+      await ensureServerInfo();
+      let trxRows = [];
+      try {
+        const trxSql = typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.getLongTransactionsQuery() : 'SELECT * FROM information_schema.innodb_trx LIMIT 100';
+        const resTrx = await call(desktop.db.query({ ...activeQueryTarget(), sql: trxSql }));
+        trxRows = (resTrx.rows || []).map((r) => (typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.parseTransactionRow(r) : r));
+      } catch {
+        // ignore
+      }
+
+      let lockRows = [];
+      let lockError = null;
+      try {
+        const lockSql = typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.getLockWaitersQuery(serverEngine) : '';
+        if (lockSql) {
+          const resLock = await call(desktop.db.query({ ...activeQueryTarget(), sql: lockSql }));
+          lockRows = (resLock.rows || []).map((r) => (typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.parseLockWaiterRow(r) : r));
+        }
+      } catch (err) {
+        lockError = err.message;
+      }
+
+      if (container !== $('#diagTabContent') || currentTab !== 'locks') return;
+
+      container.innerHTML = `
+        <div class="diag-section">
+          <div class="diag-section-header">
+            <h4>🔒 Hàng đợi khóa & Tiến trình chặn (Lock Waiters & Blockers)</h4>
+            <span class="subtle">${lockRows.length} xung đột khóa</span>
+          </div>
+          ${lockError ? `
+            <div class="diag-notice-box">
+              ⚠️ Không thể truy vấn bảng khóa InnoDB (${esc(lockError)}). Tài khoản kết nối hiện tại cần có quyền <code>PROCESS</code> hoặc quyền <code>SELECT</code> trên schema <code>information_schema</code> / <code>performance_schema</code> để xem thông tin khóa.
+            </div>
+          ` : (lockRows.length > 0 ? `
+            <div class="diag-blocker-list">
+              ${lockRows.map((w) => `
+                <div class="diag-blocker-card">
+                  <div class="diag-blocker-header">
+                    <strong>⚠️ Tiến trình #${esc(w.blockingThreadId)} đang chặn Tiến trình #${esc(w.waitingThreadId)}</strong>
+                    <span class="time-badge time-warn">Đã chờ: ${esc(w.waitTimeFormatted)}</span>
+                    <button class="danger small-btn" data-kill-blocker="${esc(w.blockingThreadId)}" title="Dừng tiến trình đang giữ khóa">✕ Kill Blocker #${esc(w.blockingThreadId)}</button>
+                  </div>
+                  <div style="font-size: 11px; margin-top: 4px;">
+                    <div><strong>Câu lệnh đang chờ (Waiter):</strong> <code class="mono">${esc(w.waitingQuery || '(không rõ query)')}</code></div>
+                    <div style="margin-top: 2px;"><strong>Câu lệnh đang chặn (Blocker):</strong> <code class="mono">${esc(w.blockingQuery || '(đang giữ transaction / rảnh)')}</code></div>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          ` : `
+            <div class="diag-notice-box" style="border-left: 3px solid #10b981; background: #ecfdf5; color: #065f46;">
+              ✓ Hệ thống đang hoạt động ổn định. Không phát hiện xung đột khóa (Lock Waits) giữa các tiến trình.
+            </div>
+          `)}
+        </div>
+
+        <div class="diag-section">
+          <div class="diag-section-header">
+            <h4>⏱️ Giao dịch InnoDB đang hoạt động (Active Transactions)</h4>
+            <span class="subtle">${trxRows.length} giao dịch</span>
+          </div>
+          ${trxRows.length > 0 ? `
+            <div class="processlist-table-container" style="max-height: 280px;">
+              <table class="processlist-table">
+                <thead>
+                  <tr>
+                    <th style="width:100px;">Trx ID</th>
+                    <th style="width:90px;">Thread ID</th>
+                    <th style="width:110px;">Trạng thái</th>
+                    <th style="width:100px;">Thời gian</th>
+                    <th style="width:90px;">Dòng khóa</th>
+                    <th style="width:90px;">Dòng sửa</th>
+                    <th>Câu lệnh SQL</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${trxRows.map((t) => `
+                    <tr>
+                      <td class="mono">#${esc(t.trxId)}</td>
+                      <td class="mono">#${esc(t.threadId)}</td>
+                      <td><span class="badge ${t.state === 'RUNNING' ? '' : 'pending'}">${esc(t.state)}</span></td>
+                      <td><span class="time-badge">${esc(t.durationFormatted)}</span></td>
+                      <td class="mono">${esc(String(t.rowsLocked))}</td>
+                      <td class="mono">${esc(String(t.rowsModified))}</td>
+                      <td class="proc-sql-cell"><code class="process-sql mono">${esc(t.query || '(không có active SQL)')}</code></td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          ` : `
+            <div class="processlist-empty">Không có giao dịch InnoDB nào đang hoạt động.</div>
+          `}
+        </div>
+      `;
+
+      container.querySelectorAll('[data-kill-blocker]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const blockerId = btn.dataset.killBlocker;
+          const confirmed = await confirmAction(`Hủy tiến trình chặn #${blockerId}?`, `Tiến trình #${blockerId} đang giữ khóa khiến các truy vấn khác phải chờ. Hủy tiến trình này sẽ giải phóng khóa.`, 'Hủy Blocker', { separate: true });
+          if (!confirmed) return;
+
+          try {
+            const sql = typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.safeKillConnectionSql(blockerId) : `KILL ${blockerId}`;
+            await call(desktop.db.query({ ...activeQueryTarget(), sql, confirmed: true }));
+            toast(`Đã hủy tiến trình blocker #${blockerId}`, 'success');
+            await loadLocksAndTransactions();
+          } catch (err) {
+            toast(err.message || 'Lỗi khi hủy tiến trình blocker', 'error');
+          }
+        });
+      });
+    } catch (err) {
+      container.innerHTML = `<div class="processlist-error">Lỗi khi phân tích khóa: ${esc(err.message)}</div>`;
+    } finally {
+      isFetching = false;
+    }
+  }
+
+  async function loadSlowQueries() {
+    const container = $('#diagTabContent');
+    if (!container || isFetching) return;
+    isFetching = true;
+    container.innerHTML = '<div class="processlist-loading">Đang đọc cấu hình và lịch sử truy vấn chậm...</div>';
+
+    try {
+      let slowLogEnabled = 'OFF';
+      let longQueryTime = '—';
+      let slowQueriesCount = '0';
+      let uptime = '—';
+
+      try {
+        const resVars = await call(desktop.db.query({ ...activeQueryTarget(), sql: "SHOW GLOBAL VARIABLES WHERE Variable_name IN ('slow_query_log', 'long_query_time', 'log_output', 'slow_query_log_file')" }));
+        for (const r of (resVars.rows || [])) {
+          const key = String(r[0]).toLowerCase();
+          const val = String(r[1]);
+          if (key === 'slow_query_log') slowLogEnabled = val.toUpperCase();
+          else if (key === 'long_query_time') longQueryTime = `${val}s`;
+        }
+      } catch {}
+
+      try {
+        const resStatus = await call(desktop.db.query({ ...activeQueryTarget(), sql: "SHOW GLOBAL STATUS WHERE Variable_name IN ('Slow_queries', 'Uptime')" }));
+        for (const r of (resStatus.rows || [])) {
+          const key = String(r[0]).toLowerCase();
+          const val = String(r[1]);
+          if (key === 'slow_queries') slowQueriesCount = val;
+          else if (key === 'uptime' && typeof SqlDiagnostics !== 'undefined') uptime = SqlDiagnostics.formatDuration(val);
+        }
+      } catch {}
+
+      let slowLogRows = [];
+      let slowLogError = null;
+      try {
+        const slowSql = typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.getSlowQueriesQuery() : 'SELECT * FROM mysql.slow_log ORDER BY start_time DESC LIMIT 50';
+        const resSlow = await call(desktop.db.query({ ...activeQueryTarget(), sql: slowSql }));
+        slowLogRows = (resSlow.rows || []).map((r) => (typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.parseSlowQueryRow(r) : r));
+      } catch (err) {
+        slowLogError = err.message;
+      }
+
+      if (container !== $('#diagTabContent') || currentTab !== 'slow') return;
+
+      container.innerHTML = `
+        <div class="diag-stat-grid">
+          <div class="diag-stat-card">
+            <div class="diag-stat-label">Slow Query Log</div>
+            <div class="diag-stat-value" style="color: ${slowLogEnabled === 'ON' ? '#10b981' : '#f59e0b'};">${esc(slowLogEnabled)}</div>
+          </div>
+          <div class="diag-stat-card">
+            <div class="diag-stat-label">Ngưỡng thời gian (long_query_time)</div>
+            <div class="diag-stat-value">${esc(longQueryTime)}</div>
+          </div>
+          <div class="diag-stat-card">
+            <div class="diag-stat-label">Tổng số truy vấn chậm ghi nhận</div>
+            <div class="diag-stat-value">${esc(slowQueriesCount)}</div>
+          </div>
+          <div class="diag-stat-card">
+            <div class="diag-stat-label">Thời gian máy chủ chạy (Uptime)</div>
+            <div class="diag-stat-value" style="font-size:14px; font-weight:600;">${esc(uptime)}</div>
+          </div>
+        </div>
+
+        <div class="diag-section">
+          <div class="diag-section-header">
+            <h4>📋 Nhật ký truy vấn chậm gần đây (mysql.slow_log)</h4>
+            <span class="subtle">${slowLogRows.length} câu lệnh</span>
+          </div>
+          ${slowLogRows.length > 0 ? `
+            <div class="processlist-table-container" style="max-height: 320px;">
+              <table class="processlist-table">
+                <thead>
+                  <tr>
+                    <th style="width:140px;">Thời gian bắt đầu</th>
+                    <th style="width:130px;">User & Host</th>
+                    <th style="width:100px;">Query Time</th>
+                    <th style="width:90px;">Lock Time</th>
+                    <th style="width:90px;">Dòng gửi</th>
+                    <th style="width:90px;">Dòng quét</th>
+                    <th>Câu lệnh SQL</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${slowLogRows.map((s) => `
+                    <tr>
+                      <td class="mono"><small>${esc(s.startTime)}</small></td>
+                      <td title="${esc(s.userHost)}"><small>${esc(s.userHost)}</small></td>
+                      <td><span class="time-badge time-warn">${esc(s.queryTime)}</span></td>
+                      <td class="mono"><small>${esc(s.lockTime)}</small></td>
+                      <td class="mono">${esc(String(s.rowsSent))}</td>
+                      <td class="mono">${esc(String(s.rowsExamined))}</td>
+                      <td class="proc-sql-cell"><code class="process-sql mono" data-full-sql="${esc(s.sql)}">${esc(s.sql.length > 80 ? s.sql.slice(0, 80) + '…' : s.sql)}</code></td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          ` : `
+            <div class="diag-notice-box">
+              ${slowLogEnabled === 'OFF' ? `
+                <p><strong>ℹ️ Slow Query Log hiện đang TẮT (OFF) trên máy chủ MySQL.</strong></p>
+                <p>Để lưu nhật ký truy vấn chậm vào bảng, quản trị viên máy chủ có thể cấu hình:<br>
+                <code>SET GLOBAL slow_query_log = 'ON';</code><br>
+                <code>SET GLOBAL log_output = 'TABLE';</code><br>
+                <code>SET GLOBAL long_query_time = 2.0;</code></p>
+                <p class="muted"><em>Lưu ý: SqlPro không tự ý thay đổi cấu hình global của máy chủ để đảm bảo an toàn cho môi trường production.</em></p>
+              ` : `
+                <p>Chưa có bản ghi truy vấn chậm nào trong bảng <code>mysql.slow_log</code>${slowLogError ? ` (Lỗi: ${esc(slowLogError)})` : ''}.</p>
+              `}
+            </div>
+          `}
+        </div>
+      `;
+
+      container.querySelectorAll('.process-sql').forEach((codeEl) => {
+        codeEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const sql = codeEl.dataset.fullSql;
+          if (sql && navigator.clipboard?.writeText) {
+            navigator.clipboard.writeText(sql);
+            toast('Đã sao chép SQL', 'info');
+          }
+        });
+      });
+    } catch (err) {
+      container.innerHTML = `<div class="processlist-error">Lỗi khi đọc nhật ký truy vấn chậm: ${esc(err.message)}</div>`;
+    } finally {
+      isFetching = false;
+    }
+  }
+
+  $('#modal').querySelectorAll('[data-diag-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      $('#modal').querySelectorAll('[data-diag-tab]').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentTab = btn.dataset.diagTab;
+      void refreshCurrentTab();
+    });
   });
+
+  $('#refreshDiagBtn')?.addEventListener('click', refreshCurrentTab);
+
+  await loadProcesslist();
+  setupAutoRefresh();
 }
 
 async function showServerVarsModal(defaultTab = 'variables') {

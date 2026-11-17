@@ -27,6 +27,63 @@ test('grid, COUNT and column metadata use server-side parameters; generic raw ca
   await session.raw('SELECT 1'); assert.equal(calls.at(-1).protocol, 'query');
   assert.equal(session.buildMysqlOptions().maxPreparedStatements, 64);
 });
+test('insertRow, updateRow, deleteRows, listTables and listIndexes use prepared execution protocol', async () => {
+  const session = new DatabaseSession({}), calls = [];
+  const metadata = [
+    { name: 'id', type: 'int', nullable: 'NO', keyType: 'PRI', extra: '', position: 1 },
+    { name: 'label', type: 'text', keyType: '', position: 2 }
+  ];
+  session.connection = {
+    execute(sql, params, callback) {
+      calls.push({ protocol: 'execute', sql, params });
+      if (/information_schema\.COLUMNS/.test(sql)) callback(null, metadata);
+      else if (/information_schema\.TABLES/.test(sql)) callback(null, [{ name: 't', type: 'BASE TABLE', engine: 'InnoDB', rowEstimate: 1, comment: '' }]);
+      else if (/information_schema\.STATISTICS/.test(sql)) callback(null, [{ name: 'PRIMARY', nonUnique: 0, sequence: 1, columnName: 'id', type: 'BTREE', cardinality: 1 }]);
+      else if (/SELECT 1 AS present/.test(sql)) callback(null, [{ present: 1 }]);
+      else if (/SELECT \* FROM/.test(sql)) callback(null, [{ id: 1, label: "a\\b'" }]);
+      else callback(null, { insertId: 10, affectedRows: 1, changedRows: 1 });
+    },
+    query(sql, params, callback) {
+      calls.push({ protocol: 'query', sql, params });
+      callback(null, []);
+    }
+  };
+
+  const tables = await session.listTables("db'\\");
+  assert.equal(tables.length, 1);
+  assert.equal(calls.at(-1).protocol, 'execute');
+  assert.deepEqual(calls.at(-1).params, ["db'\\"]);
+
+  const indexes = await session.listIndexes("db'\\", 't');
+  assert.equal(indexes.length, 1);
+  assert.equal(calls.at(-1).protocol, 'execute');
+  assert.deepEqual(calls.at(-1).params, ["db'\\", 't']);
+
+  const insert = await session.insertRow({ database: "db'\\", table: 't', values: { id: 1, label: "val'\\\"quote" } });
+  assert.equal(insert.affectedRows, 1);
+  assert.equal(calls.at(-1).protocol, 'execute');
+  assert.deepEqual(calls.at(-1).params, ['1', "val'\\\"quote"]);
+
+  const update = await session.updateRow({
+    database: "db'\\",
+    table: 't',
+    keys: { id: 1 },
+    values: { label: "updated'\\\"" },
+    original: { id: 1, label: "val'\\\"quote" }
+  });
+  assert.equal(update.status, 'updated');
+  assert.equal(calls.at(-1).protocol, 'execute');
+  assert.deepEqual(calls.at(-1).params, ["updated'\\\"", 1, '1', "val'\\\"quote"]);
+
+  const remove = await session.deleteRows({
+    database: "db'\\",
+    table: 't',
+    keysList: [{ id: 1 }]
+  });
+  assert.equal(remove.affectedRows, 1);
+  assert.equal(calls.at(-1).protocol, 'execute');
+  assert.deepEqual(calls.at(-1).params, [1]);
+});
 test('paging reads immediately, counts only on request and caches count across sort changes', async () => {
   const { session, calls } = setup(); const options = { database: 'd', table: 't', pageSize: 2 };
   const first = await session.tableData(options);

@@ -31,7 +31,13 @@ function createSession(columns, rows = [], insertResult = () => ({ affectedRows:
   const calls = { inserts: [], queries: [], prepared: [], meta: [], transactions: [], destroyed: 0 };
   session.listColumns = async () => columns;
   session.connection = {
-    execute(config) {
+    execute(config, params, callback) {
+      if (typeof callback === 'function') {
+        calls.prepared.push({ sql: config, params });
+        calls.inserts.push({ sql: config, params });
+        callback(null, insertResult(config, params));
+        return;
+      }
       calls.queries.push(config);
       calls.prepared.push(config);
       return { async *stream() { for (const row of rows) yield row; } };

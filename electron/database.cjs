@@ -1198,7 +1198,9 @@ class DatabaseSession {
          FROM information_schema.TABLES
         WHERE TABLE_SCHEMA = ?
         ORDER BY TABLE_NAME`,
-      [database]
+      [database],
+      null,
+      { prepared: true }
     );
     return result.map((row) => ({
       name: row.name,
@@ -1218,7 +1220,9 @@ class DatabaseSession {
          FROM information_schema.ROUTINES
         WHERE ROUTINE_SCHEMA = ?
         ORDER BY ROUTINE_TYPE, ROUTINE_NAME`,
-      [database]
+      [database],
+      null,
+      { prepared: true }
     );
     return result.map((row) => ({
       name: row.name,
@@ -1242,7 +1246,9 @@ class DatabaseSession {
          FROM information_schema.EVENTS
         WHERE EVENT_SCHEMA = ?
         ORDER BY EVENT_NAME`,
-      [database]
+      [database],
+      null,
+      { prepared: true }
     );
     return result.map((row) => ({
       name: row.name,
@@ -1312,7 +1318,9 @@ class DatabaseSession {
          FROM information_schema.STATISTICS
         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
         ORDER BY INDEX_NAME, SEQ_IN_INDEX`,
-      [database, table]
+      [database, table],
+      null,
+      { prepared: true }
     );
     const indexes = new Map();
     for (const row of result) {
@@ -1341,7 +1349,7 @@ class DatabaseSession {
                             ${table ? 'AND TABLE_NAME = ?' : ''}
                           ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION`;
     const outboundParams = table ? [database, table] : [database];
-    const { result } = await this.raw(outboundSql, outboundParams);
+    const { result } = await this.raw(outboundSql, outboundParams, null, { prepared: true });
     let inbound = [];
     if (table) {
       const inboundResult = await this.raw(
@@ -1351,7 +1359,9 @@ class DatabaseSession {
            FROM information_schema.KEY_COLUMN_USAGE
           WHERE TABLE_SCHEMA = ? AND REFERENCED_TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME = ?
           ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION`,
-        [database, database, table]
+        [database, database, table],
+        null,
+        { prepared: true }
       );
       inbound = inboundResult.result;
     }
@@ -1706,7 +1716,7 @@ class DatabaseSession {
   async insertRow(payload) {
     assertWritable(this.profile);
     const plan = await this.planInsertRow(payload);
-    const { result } = await this.raw(plan.sql,plan.params);
+    const { result } = await this.raw(plan.sql, plan.params, null, { prepared: true });
     return { insertId: String(result.insertId), affectedRows: result.affectedRows };
   }
 
@@ -1741,7 +1751,7 @@ class DatabaseSession {
     assertWritable(this.profile);
     const {database,table,original} = payload;
     const {sql,params,pkColumns,pkParams,guard} = await this.planUpdateRow(payload);
-    const { result } = await this.raw(sql,params);
+    const { result } = await this.raw(sql, params, null, { prepared: true });
     if (Number(result.affectedRows) !== 1) {
       if (!guard.sql) {
         throw fail('Bản ghi không còn tồn tại hoặc khóa chính đã thay đổi. Nội dung đang sửa được giữ lại; hãy hủy chỉnh sửa và tải lại dữ liệu để kiểm tra.', 'ROW_NOT_FOUND');
@@ -1749,14 +1759,18 @@ class DatabaseSession {
       const wherePk = pkColumns.map((name) => `${quoteId(name)} <=> ?`).join(' AND ');
       const exists = await this.raw(
         `SELECT 1 AS present FROM ${tableRef(database, table)} WHERE ${wherePk} LIMIT 1`,
-        pkParams
+        pkParams,
+        null,
+        { prepared: true }
       );
       if (!(exists.rows || []).length) {
         throw fail('Bản ghi đã bị xóa bởi kết nối khác. Nội dung đang sửa được giữ lại; hãy hủy chỉnh sửa và tải lại dữ liệu.', 'ROW_NOT_FOUND');
       }
       const current = await this.raw(
         `SELECT * FROM ${tableRef(database, table)} WHERE ${wherePk} LIMIT 1`,
-        pkParams
+        pkParams,
+        null,
+        { prepared: true }
       );
       const columnNames = new Set(guard.names);
       const details = Object.fromEntries(Object.entries(original || {}).filter(([name]) => columnNames.has(name)));
@@ -1826,7 +1840,9 @@ class DatabaseSession {
     if (!guarded) {
       const { result } = await this.raw(
         `DELETE FROM ${tableRef(database, table)} WHERE ${groups.join(' OR ')}`,
-        params
+        params,
+        null,
+        { prepared: true }
       );
       return { affectedRows: result.affectedRows, guardedBy: 'primary-key' };
     }
@@ -1872,7 +1888,7 @@ class DatabaseSession {
         await this.raw(`SAVEPOINT ${savepoint}`);
         savepointOpen = true;
       }
-      const rows = (await this.raw(selectSql, [...aliasParams, ...whereParams])).rows || [];
+      const rows = (await this.raw(selectSql, [...aliasParams, ...whereParams], null, { prepared: true })).rows || [];
       this.inTransaction = true;
       const bySignature = new Map();
       for (const row of rows) {
@@ -1901,11 +1917,13 @@ class DatabaseSession {
       }
       // Check under the transaction's table metadata lock, after FOR UPDATE.
       // Nontransactional engines cannot uphold this path's guard/rollback contract.
-      const engine = (await this.raw('SELECT ENGINE AS engine FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 1', [database, table])).rows?.[0]?.engine;
+      const engine = (await this.raw('SELECT ENGINE AS engine FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 1', [database, table], null, { prepared: true })).rows?.[0]?.engine;
       if (typeof engine !== 'string' || engine.toLowerCase() !== 'innodb') throw fail('Xóa có kiểm tra dữ liệu gốc hiện chỉ hỗ trợ bảng InnoDB. Chưa gửi DELETE; hãy kiểm tra engine và tải lại dữ liệu.', 'ROW_GUARD_ENGINE_UNSUPPORTED');
       const { result } = await this.raw(
         `DELETE FROM ${tableRef(database, table)} WHERE ${uniqueGroups.join(' OR ')}`,
-        whereParams
+        whereParams,
+        null,
+        { prepared: true }
       );
       if (Number(result.affectedRows) !== expected.length) {
         const error = fail('Số bản ghi xóa không khớp với dữ liệu đã kiểm tra; thao tác đã dừng.', 'ROW_CONFLICT');
@@ -2325,7 +2343,7 @@ class DatabaseSession {
           await begin();
           transactionOpen = true;
         }
-        const { result } = await this.raw(sql, params);
+        const { result } = await this.raw(sql, params, null, { prepared: true });
         const warningStatus = Number(result.warningStatus || 0);
         if (warningStatus > 0) {
           warningCount += warningStatus;
@@ -3158,7 +3176,9 @@ class DatabaseSession {
     try {
       const result = await this.raw(
         'SELECT SCHEMA_NAME AS name FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?',
-        [database]
+        [database],
+        null,
+        { prepared: true }
       );
       facts.databaseExists = (result.rows || []).length > 0;
     } catch (error) {
@@ -3172,7 +3192,9 @@ class DatabaseSession {
            FROM information_schema.TABLES
           WHERE TABLE_SCHEMA = ?
           LIMIT ${objectLimit + 1}`,
-        [database]
+        [database],
+        null,
+        { prepared: true }
       );
       appendObjects(result.rows, (row) => (/view/i.test(String(row.type || '')) ? 'view' : 'table'));
     } catch (error) {
@@ -3185,7 +3207,9 @@ class DatabaseSession {
            FROM information_schema.ROUTINES
           WHERE ROUTINE_SCHEMA = ?
           LIMIT ${objectLimit + 1}`,
-        [database]
+        [database],
+        null,
+        { prepared: true }
       );
       appendObjects(result.rows, (row) => (String(row.type || '').toUpperCase() === 'FUNCTION' ? 'function' : 'procedure'));
     } catch (error) {
@@ -3198,7 +3222,9 @@ class DatabaseSession {
            FROM information_schema.EVENTS
           WHERE EVENT_SCHEMA = ?
           LIMIT ${objectLimit + 1}`,
-        [database]
+        [database],
+        null,
+        { prepared: true }
       );
       appendObjects(result.rows, () => 'event');
     } catch (error) {
@@ -3211,7 +3237,9 @@ class DatabaseSession {
            FROM information_schema.TRIGGERS
           WHERE TRIGGER_SCHEMA = ?
           LIMIT ${objectLimit + 1}`,
-        [database]
+        [database],
+        null,
+        { prepared: true }
       );
       appendObjects(result.rows, () => 'trigger');
     } catch (error) {
@@ -3240,7 +3268,9 @@ class DatabaseSession {
            FROM information_schema.KEY_COLUMN_USAGE k
           WHERE k.TABLE_SCHEMA = ? AND k.REFERENCED_TABLE_NAME IS NOT NULL
           ORDER BY k.TABLE_NAME, k.CONSTRAINT_NAME, k.ORDINAL_POSITION`,
-        [database]
+        [database],
+        null,
+        { prepared: true }
       );
       const groups = new Map();
       for (const row of result.rows || []) {

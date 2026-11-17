@@ -2,6 +2,14 @@
 
 Cập nhật: 17/11/2026. Đối chiếu `DATABASE_PRODUCT_ROADMAP.md`. Đợt 1–6 và CHECK đã có commit local; phần sau `4330f56` được rà soát, sửa và chốt trong commit đợt 7. Các mục bên dưới là nhật ký tại thời điểm triển khai; xem mục mới nhất, git log và [CODE_REVIEW_BATCH_7.md](CODE_REVIEW_BATCH_7.md) để xác định hiện trạng. Phần sau `81d0228` gồm G5.1, các phần G5.2 (JSON/TREE, so sánh quan sát, thiết lập phiên/định nghĩa một bảng opt-in, ANALYZE riêng), phần cache/scope/CTE/projection/alias G5.3 và fix blur retry khi sửa ô đã chốt `56dfe51`; xem [CODE_REVIEW_BATCH_8.md](CODE_REVIEW_BATCH_8.md). Set output chốt `99dbee3`; phần local star 17/11 được rà soát/chốt đợt 9 tại `f2f42f4`, xem [CODE_REVIEW_BATCH_9.md](CODE_REVIEW_BATCH_9.md). Phần IN/NOT IN và prepared reads được rà soát/chốt đợt 10 tại [CODE_REVIEW_BATCH_10.md](CODE_REVIEW_BATCH_10.md). Các ghi chú chưa commit cũ là lịch sử theo từng lượt.
 
+## 17/11 — G5.4/G4.2: prepared statements cho ghi, import và metadata
+
+- Tiếp sau `b2b36d4`, mở rộng giao thức binary prepared statements (`COM_STMT_PREPARE`/`COM_STMT_EXECUTE`) cho toàn bộ các luồng có tham số còn lại: `insertRow`, `updateRow` (gồm cả truy vấn kiểm tra xung đột bản ghi/FOR UPDATE), `deleteRows` (cả kiểm tra engine/khóa gốc và DELETE thực tế), `flush()` của `importFile` (batch INSERT và ON DUPLICATE KEY UPDATE), cùng toàn bộ các truy vấn metadata schema có tham số (`listTables`, `listRoutines`, `listEvents`, `listIndexes`, `listRelations`, và preflight facts `restoreTargetFacts`).
+- Loại bỏ hoàn toàn việc nội suy chuỗi client-side (text interpolation) của mysql2 đối với các tham số chứa dấu nháy đơn `'`, nháy kép `"` hoặc dấu gạch chéo ngược `\` (`\`), bảo đảm dữ liệu được truyền dưới dạng byte chính xác nguyên vẹn qua binary protocol, hoàn toàn tương thích và miễn nhiễm với chế độ `NO_BACKSLASH_ESCAPES`.
+- Các câu lệnh SET (như `SET SESSION sql_mode`) và các truy vấn SQL tự do do người dùng nhập trong SQL Editor được giữ nguyên ở giao thức text query (`query`), đảm bảo tính tương thích với server MySQL và MariaDB.
+- Kiểm tra toàn bộ test: `npm run check` đạt **900/900 pass / 0 fail / 13 skip** (913 tổng); Electron smoke **87/87 pass**; website smoke **14/14 pass**; server test **17/17 pass**; `git diff --check` qua.
+
+
 ## 17/11 — G5.4 phần 5: danh sách IN/NOT IN và prepared reads
 
 - Tiếp sau `0c20508`, thêm IN/NOT IN cho text/ENUM/SET/numeric/calendar hiện hỗ trợ, 1–20 string/list và tối đa 100 giá trị toàn cây (BETWEEN tính hai). Giữ exact empty/whitespace/comma, giá trị lặp và BIGINT/DECIMAL; không raw SQL, split, trim, drop rule/truncate hoặc chấp nhận NULL thật. JSON/binary/spatial/unknown vẫn chỉ NULL. SQL IN/NOT IN loại dòng NULL; thêm NULL bằng OR tường minh.

@@ -26,7 +26,7 @@ const { parseNavicatFile } = require('./navicat.cjs');
 const { DatabaseSession, testConnection, previewImportFile, normalizeFileFormat } = require('./database.cjs');
 const { saveBackupFile, manifestPathFor, fileIdentity } = require('./backup-file.cjs');
 const { SessionRegistry } = require('./session-registry.cjs');
-const { assertWritable, assertReadOnlySql } = require('./connection-policy.cjs');
+const { assertWritable, assertReadOnlySql, analyzeProductionSqlRisks } = require('./connection-policy.cjs');
 const { ProductionApprovals, redactSql, parameterSummary } = require('./production-approvals.cjs');
 const productionApprovals = new ProductionApprovals();
 const { BackupInspection } = require('./backup-inspection.cjs');
@@ -293,12 +293,18 @@ async function withWriteReview(profileId,operation,payload,execute) {
     const planParams = serialize(plan.params);
     const revision = session.transactionRevision || 0;
     const fingerprint = productionProfileFingerprint(store.getWithSecrets(profileId));
+    const syntaxRisks = operation === 'query' ? analyzeProductionSqlRisks(snapshot.sql) : [];
+    const hasDestructiveRisk = syntaxRisks.some((r) => r.severity === 'destructive');
     const preview = {
       operation,profileId,connectionName:profile.name || profileId,
       host:profile.host ? `${profile.user || ''}@${profile.host}:${profile.port || 3306}` : '',
       database:snapshot.database || session.database || null,table:snapshot.table || null,
       sql:redactSql(plan.sql),parameters:parameterSummary(plan.params),parameterCount:plan.params.length,
       selectedRows:operation === 'delete-rows' ? snapshot.keysList.length : operation === 'query' ? null : 1,
+      rowCountEstimate: operation === 'query' ? 'Chưa xác định' : null,
+      rowCountNotice: operation === 'query' ? 'Số dòng ảnh hưởng chưa xác định. SqlPro không chạy COUNT(*) hoặc EXPLAIN ANALYZE ngầm để tránh khóa bảng và tiêu tốn tài nguyên production.' : '',
+      syntaxRisks,
+      hasDestructiveRisk,
       columns:operation === 'query' ? [] : Object.keys(snapshot.values || {}),
       inTransaction:Boolean(session.inTransaction),autocommit:session.autocommit !== false,
       note:operation === 'delete-rows' ? 'SQL dự kiến theo khóa chính. Khi có snapshot gốc, dữ liệu được kiểm tra và khóa trong transaction trước khi xóa.'

@@ -144,4 +144,139 @@ function assertReadOnlySql(profile, sql) {
   assertReadStatement(statement);
 }
 
-module.exports = { assertWritable, assertReadOnlySql };
+function analyzeProductionSqlRisks(sql) {
+  if (typeof sql !== 'string' || !sql.trim()) return [];
+  const risks = [];
+
+  const tokens = [];
+  let depth = 0;
+  for (let i = 0; i < sql.length;) {
+    const c = sql[i];
+    if (/\s/.test(c)) { i += 1; continue; }
+    if (c === '#' || (sql.startsWith('--', i) && (!sql[i + 2] || /\s/.test(sql[i + 2])))) {
+      while (i < sql.length && !/[\r\n]/.test(sql[i])) i += 1;
+      continue;
+    }
+    if (sql.startsWith('/*', i)) {
+      const end = sql.indexOf('*/', i + 2);
+      if (end < 0) break;
+      i = end + 2; continue;
+    }
+    if (["'", '"', '`'].includes(c)) {
+      const start = i++;
+      for (; i < sql.length; i += 1) {
+        if (sql[i] === '\\') { i += 1; continue; }
+        if (sql[i] === c) {
+          if (sql[i + 1] === c) { i += 1; continue; }
+          i += 1; break;
+        }
+      }
+      tokens.push({ type: c === '`' ? 'ident' : 'literal', value: sql.slice(start, i), depth });
+      continue;
+    }
+    if (c === '(') { depth += 1; tokens.push({ type: 'symbol', value: '(', depth }); i += 1; continue; }
+    if (c === ')') { tokens.push({ type: 'symbol', value: ')', depth }); if (depth > 0) depth -= 1; i += 1; continue; }
+    if (c === ';') {
+      tokens.push({ type: 'symbol', value: ';', depth: 0 });
+      depth = 0;
+      i += 1;
+      continue;
+    }
+    const word = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(sql.slice(i));
+    if (word) {
+      tokens.push({ type: 'word', value: word[0].toUpperCase(), raw: word[0], depth });
+      i += word[0].length;
+      continue;
+    }
+    tokens.push({ type: 'symbol', value: c, depth });
+    i += 1;
+  }
+
+  const statements = [];
+  let currentStmt = [];
+  for (const t of tokens) {
+    if (t.value === ';' && t.type === 'symbol') {
+      if (currentStmt.length) statements.push(currentStmt);
+      currentStmt = [];
+    } else {
+      currentStmt.push(t);
+    }
+  }
+  if (currentStmt.length) statements.push(currentStmt);
+
+  for (const stmt of statements) {
+    const firstWordIdx = stmt.findIndex((t) => t.type === 'word');
+    if (firstWordIdx === -1) continue;
+    const firstWord = stmt[firstWordIdx].value;
+
+    if (firstWord === 'DROP') {
+      const words = stmt.slice(firstWordIdx + 1).filter((t) => t.type === 'word' || t.type === 'ident');
+      const targetDesc = words.slice(0, 3).map((w) => w.value).join(' ');
+      risks.push({
+        type: 'DROP',
+        severity: 'destructive',
+        target: targetDesc,
+        message: `Xóa vĩnh viễn đối tượng (DROP ${targetDesc}). Thao tác này không thể hoàn tác.`
+      });
+    } else if (firstWord === 'TRUNCATE') {
+      const words = stmt.slice(firstWordIdx + 1).filter((t) => t.type === 'word' || t.type === 'ident');
+      const targetDesc = words.slice(0, 2).map((w) => w.value).join(' ');
+      risks.push({
+        type: 'TRUNCATE',
+        severity: 'destructive',
+        target: targetDesc,
+        message: `Làm rỗng toàn bộ bảng (TRUNCATE ${targetDesc}). Toàn bộ dữ liệu trong bảng sẽ bị xóa sạch.`
+      });
+    } else if (firstWord === 'DELETE') {
+      const whereIdx = stmt.findIndex((t) => t.type === 'word' && t.value === 'WHERE' && t.depth === 0);
+      let isUnconditional = whereIdx === -1;
+      if (!isUnconditional) {
+        const afterWhere = stmt.slice(whereIdx + 1).filter((t) => t.depth === 0);
+        const norm = afterWhere.map((t) => t.value).join('').toUpperCase();
+        if (['1', '1=1', 'TRUE', "'1'='1'", '"1"="1"'].includes(norm)) {
+          isUnconditional = true;
+        }
+      }
+      if (isUnconditional) {
+        const tableWord = stmt.slice(firstWordIdx + 1).find((t) => (t.type === 'word' && t.value !== 'FROM') || t.type === 'ident')?.value || '';
+        risks.push({
+          type: 'UNCONDITIONAL_DELETE',
+          severity: 'destructive',
+          target: tableWord,
+          message: `Lệnh DELETE ${tableWord ? 'trên bảng ' + tableWord + ' ' : ''}không có điều kiện WHERE (hoặc điều kiện luôn đúng). Thao tác này sẽ xóa TẤT CẢ các dòng trong bảng!`
+        });
+      }
+    } else if (firstWord === 'UPDATE') {
+      const whereIdx = stmt.findIndex((t) => t.type === 'word' && t.value === 'WHERE' && t.depth === 0);
+      let isUnconditional = whereIdx === -1;
+      if (!isUnconditional) {
+        const afterWhere = stmt.slice(whereIdx + 1).filter((t) => t.depth === 0);
+        const norm = afterWhere.map((t) => t.value).join('').toUpperCase();
+        if (['1', '1=1', 'TRUE', "'1'='1'", '"1"="1"'].includes(norm)) {
+          isUnconditional = true;
+        }
+      }
+      if (isUnconditional) {
+        const tableWord = stmt.slice(firstWordIdx + 1).find((t) => t.type === 'word' || t.type === 'ident')?.value || '';
+        risks.push({
+          type: 'UNCONDITIONAL_UPDATE',
+          severity: 'warning',
+          target: tableWord,
+          message: `Lệnh UPDATE ${tableWord ? 'trên bảng ' + tableWord + ' ' : ''}không có điều kiện WHERE (hoặc điều kiện luôn đúng). Thao tác này sẽ cập nhật TẤT CẢ các dòng trong bảng!`
+        });
+      }
+    } else if (firstWord === 'ALTER' && stmt.some((t) => t.type === 'word' && t.value === 'TABLE')) {
+      const tableWord = stmt.slice(firstWordIdx + 1).find((t) => t.type === 'ident' || (t.type === 'word' && t.value !== 'TABLE'))?.value || '';
+      risks.push({
+        type: 'ALTER_TABLE',
+        severity: 'warning',
+        target: tableWord,
+        message: `Thay đổi cấu trúc bảng (ALTER TABLE ${tableWord}). Thao tác DDL này có thể khóa bảng và gây implicit commit.`
+      });
+    }
+  }
+
+  return risks;
+}
+
+module.exports = { assertWritable, assertReadOnlySql, analyzeProductionSqlRisks };

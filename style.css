@@ -3306,3 +3306,39 @@ body.dark-theme .diff-val-target {
   color: #fca5a5;
   background: #3b181a;
 }
+
+/* ==========================================================================
+   Production Safety & Risk Banner Styles (G1.3)
+   ========================================================================== */
+
+.production-risk-banner {
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 8px 0;
+  font-size: 0.88em;
+  line-height: 1.4;
+}
+
+.production-risk-banner.risk-destructive {
+  background: #fef2f2;
+  border: 1px solid #ef4444;
+  color: #991b1b;
+}
+
+.production-risk-banner.risk-warning {
+  background: #fffbeb;
+  border: 1px solid #f59e0b;
+  color: #92400e;
+}
+
+body.dark-theme .production-risk-banner.risk-destructive {
+  background: #450a0a;
+  border-color: #dc2626;
+  color: #fca5a5;
+}
+
+body.dark-theme .production-risk-banner.risk-warning {
+  background: #451a03;
+  border-color: #d97706;
+  color: #fcd34d;
+}

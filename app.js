@@ -10979,17 +10979,30 @@ async function deleteSelectedRows() {
 
 function productionPreviewHtml(preview) {
   const labels = {'insert-row':'Thêm bản ghi','update-row':'Cập nhật bản ghi','delete-rows':'Xóa bản ghi',query:'Chạy SQL',commit:'Commit toàn phiên'};
+  const risksHtml = (preview.syntaxRisks || []).map((risk) => `
+    <div class="production-risk-banner ${risk.severity === 'destructive' ? 'risk-destructive' : 'risk-warning'}">
+      <strong>${risk.severity === 'destructive' ? '⚠️ NGUY HIỂM' : '⚠️ CẢNH BÁO'}:</strong> ${esc(risk.message)}
+    </div>
+  `).join('');
+
   return `<h2>Xác nhận ghi trên Production</h2>
     <p><strong>${esc(preview.connectionName)}</strong> · ${esc(preview.host || '')}</p>
     <p>Database: <strong>${esc(preview.database || 'Chưa chọn')}</strong>${preview.table ? ` · Bảng: <strong>${esc(preview.table)}</strong>` : ''}</p>
     <p>Thao tác: ${esc(labels[preview.operation] || 'Ghi dữ liệu')}${preview.selectedRows === null ? ' · Số dòng ảnh hưởng chưa xác định' : ` · ${Number(preview.selectedRows).toLocaleString()} dòng được chọn (không tính tác động trigger/cascade)`}</p>
+    ${preview.rowCountNotice ? `<p class="hint" style="font-style: italic;">ℹ️ ${esc(preview.rowCountNotice)}</p>` : ''}
+    ${risksHtml}
     ${preview.columns?.length ? `<p>Cột thay đổi: ${preview.columns.map(esc).join(', ')}</p>` : ''}
     <label>SQL dự kiến — giá trị đã che</label><pre class="production-sql-preview">${esc(preview.sql)}</pre>
     ${preview.parameterCount ? `<p>${Number(preview.parameterCount).toLocaleString()} tham số · giá trị được che</p><ul class="production-parameters">${preview.parameters.map((entry) => `<li>#${Number(entry.position)} · ${esc(entry.type)} · ${esc(entry.value)}</li>`).join('')}</ul>` : ''}
+    ${preview.hasDestructiveRisk ? `
+      <label class="checkline" style="margin: 10px 0; font-weight: 600; color: #dc2626;">
+        <input type="checkbox" id="productionRiskAcknowledge"> Tôi đã kiểm tra đúng đích và chấp nhận rủi ro thực thi thao tác phá hủy trên Production
+      </label>
+    ` : ''}
     <p class="hint">${esc(preview.note)}</p>
     <p class="hint">Xác nhận có hiệu lực trong 2 phút và chỉ dùng một lần. Nếu phiên hoặc nội dung đã đổi, cần xem trước lại.</p>
     <p class="securitywarning">${preview.inTransaction || preview.autocommit === false ? 'Thao tác nằm trong phiên có transaction/autocommit OFF; Commit/Rollback áp dụng toàn phiên. ' : ''}DDL có thể tự commit. Xác nhận không bảo đảm mọi thay đổi có thể hoàn tác.</p>
-    <div class="actions"><button id="productionCancel">Hủy</button><button class="danger" id="productionConfirm">Xác nhận đúng đích và thực hiện</button></div>`;
+    <div class="actions"><button id="productionCancel">Hủy</button><button class="danger" id="productionConfirm" ${preview.hasDestructiveRisk ? 'disabled' : ''}>Xác nhận đúng đích và thực hiện</button></div>`;
 }
 
 function confirmProductionWrite(preview) {
@@ -11008,6 +11021,13 @@ function confirmProductionWrite(preview) {
     dialog.addEventListener('cancel',(event) => {event.preventDefault();finish(false);});
     dialog.querySelector('#productionCancel').addEventListener('click',() => finish(false));
     dialog.querySelector('#productionConfirm').addEventListener('click',() => finish(true));
+    const ack = dialog.querySelector('#productionRiskAcknowledge');
+    const confirmBtn = dialog.querySelector('#productionConfirm');
+    if (ack && confirmBtn) {
+      ack.addEventListener('change', () => {
+        confirmBtn.disabled = !ack.checked;
+      });
+    }
     dialog.showModal();
     dialog.querySelector('#productionCancel').focus();
   });

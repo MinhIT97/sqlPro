@@ -65,7 +65,7 @@ Nghiệm thu: báo cáo có cách tái chạy, commit và môi trường; failur
 
 - [x] G1.1 Thêm `environment` Local/Staging/Production và màu profile; migration profile cũ mặc định không phân loại, không tự đoán production theo hostname. Hiện tên kết nối/database tại tab, editor, dialog ghi và thanh trạng thái; dùng chữ cùng màu. Dải viền cảnh báo header và dark theme contrast.
 - [x] G1.2 Chế độ chỉ đọc: ưu tiên tài khoản DB có quyền chỉ đọc; thêm policy tại main cho toàn bộ đường ghi (SQL, grid, import, restore, copy, migration). Phân tích batch/comment/CTE/routine; câu chưa phân loại được bị từ chối trong chế độ chỉ đọc của app. Không tuyên bố bộ phân tích SQL thay thế quyền DB.
-- [ ] G1.3 Policy production: preview SQL có placeholder/tham số cho thao tác UI; che giá trị nhạy cảm mặc định; xác nhận đích và thao tác DROP/TRUNCATE/ghi thiếu điều kiện. Tách cảnh báo theo cú pháp khỏi dự báo số dòng; không chạy COUNT tốn kém hoặc EXPLAIN ANALYZE ngầm.
+- [x] G1.3 Policy production: preview SQL có placeholder/tham số cho thao tác UI; che giá trị nhạy cảm mặc định; xác nhận đích và thao tác DROP/TRUNCATE/ghi thiếu điều kiện. Tách cảnh báo theo cú pháp khỏi dự báo số dòng; không chạy COUNT tốn kém hoặc EXPLAIN ANALYZE ngầm.
 - [ ] G1.4 Thanh transaction hiển thị session, autocommit, trạng thái, thời điểm bắt đầu quan sát; Commit/Rollback chỉ tác động session đã chụp. Không cho commit xen vào tác vụ bận. Cảnh báo DDL có thể implicit commit; đồng bộ lại trạng thái từ server sau lỗi/reconnect.
 - [ ] G1.5 Đóng/đổi/ngắt kết nối: báo đúng transaction chưa kết thúc; giữ pin session đang có transaction; không tự chạy lại câu ghi sau mất mạng. Xác định và trình bày rõ quan hệ tab/session.
 

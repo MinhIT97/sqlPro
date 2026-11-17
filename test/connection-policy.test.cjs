@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { assertWritable, assertReadOnlySql } = require('../electron/connection-policy.cjs');
+const { assertWritable, assertReadOnlySql, analyzeProductionSqlRisks } = require('../electron/connection-policy.cjs');
 const { DatabaseSession } = require('../electron/database.cjs');
 const readOnly = {readOnly:true};
 
@@ -106,4 +106,67 @@ test('read-only policy strictly blocks CTE attempts to mutate or call unrecogniz
     'WITH cte(x) AS (SELECT 1) DROP TABLE users',
     'WITH cte(col1) AS (SELECT 1) CALL my_procedure()'
   ]) assert.throws(() => assertReadOnlySql(readOnly, sql), (error) => ['READ_ONLY_SQL_UNSUPPORTED', 'CONNECTION_READ_ONLY'].includes(error.code), sql);
+});
+
+test('analyzeProductionSqlRisks detects DROP, TRUNCATE, unconditional writes, and distinguishes subqueries and literals', () => {
+  assert.equal(analyzeProductionSqlRisks('').length, 0);
+
+  // DROP detection
+  const dropTable = analyzeProductionSqlRisks('DROP TABLE `users`;');
+  assert.equal(dropTable.length, 1);
+  assert.equal(dropTable[0].type, 'DROP');
+  assert.equal(dropTable[0].severity, 'destructive');
+
+  const dropDb = analyzeProductionSqlRisks('DROP DATABASE `legacy_db`;');
+  assert.equal(dropDb.length, 1);
+  assert.equal(dropDb[0].type, 'DROP');
+  assert.equal(dropDb[0].severity, 'destructive');
+
+  // TRUNCATE detection
+  const truncate = analyzeProductionSqlRisks('TRUNCATE TABLE `orders`;');
+  assert.equal(truncate.length, 1);
+  assert.equal(truncate[0].type, 'TRUNCATE');
+  assert.equal(truncate[0].severity, 'destructive');
+
+  // Unconditional DELETE detection
+  const deleteNoWhere = analyzeProductionSqlRisks('DELETE FROM `customers`;');
+  assert.equal(deleteNoWhere.length, 1);
+  assert.equal(deleteNoWhere[0].type, 'UNCONDITIONAL_DELETE');
+  assert.equal(deleteNoWhere[0].severity, 'destructive');
+
+  const deleteTrivialOne = analyzeProductionSqlRisks('DELETE FROM `customers` WHERE 1;');
+  assert.equal(deleteTrivialOne.length, 1);
+  assert.equal(deleteTrivialOne[0].type, 'UNCONDITIONAL_DELETE');
+
+  const deleteTrivialEquality = analyzeProductionSqlRisks('DELETE FROM `customers` WHERE 1 = 1;');
+  assert.equal(deleteTrivialEquality.length, 1);
+  assert.equal(deleteTrivialEquality[0].type, 'UNCONDITIONAL_DELETE');
+
+  // Conditional DELETE: not flagged as unconditional
+  const deleteWithWhere = analyzeProductionSqlRisks('DELETE FROM `customers` WHERE id = 123;');
+  assert.equal(deleteWithWhere.length, 0);
+
+  // Unconditional UPDATE detection
+  const updateNoWhere = analyzeProductionSqlRisks('UPDATE `customers` SET active = 0;');
+  assert.equal(updateNoWhere.length, 1);
+  assert.equal(updateNoWhere[0].type, 'UNCONDITIONAL_UPDATE');
+  assert.equal(updateNoWhere[0].severity, 'warning');
+
+  const updateTrivialWhere = analyzeProductionSqlRisks('UPDATE `customers` SET active = 0 WHERE TRUE;');
+  assert.equal(updateTrivialWhere.length, 1);
+  assert.equal(updateTrivialWhere[0].type, 'UNCONDITIONAL_UPDATE');
+
+  // Conditional UPDATE: not flagged as unconditional
+  const updateWithWhere = analyzeProductionSqlRisks('UPDATE `customers` SET active = 0 WHERE id = 123;');
+  assert.equal(updateWithWhere.length, 0);
+
+  // ALTER TABLE detection
+  const alter = analyzeProductionSqlRisks('ALTER TABLE `users` ADD COLUMN `age` INT;');
+  assert.equal(alter.length, 1);
+  assert.equal(alter[0].type, 'ALTER_TABLE');
+  assert.equal(alter[0].severity, 'warning');
+
+  // Safe SELECT with string literal or comment containing keywords
+  const safeSelect = analyzeProductionSqlRisks("SELECT * FROM users WHERE note = 'DROP TABLE orders; TRUNCATE TABLE logs;'; -- DELETE FROM all");
+  assert.equal(safeSelect.length, 0);
 });

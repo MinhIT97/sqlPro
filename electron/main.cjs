@@ -15,6 +15,12 @@ function tablePreferences() {
   if (!tablePreferencesRepository) tablePreferencesRepository = createTablePreferences(app.getPath('userData'));
   return tablePreferencesRepository;
 }
+const { createAuditLogStore } = require('./audit-log.cjs');
+let auditLogRepository;
+function auditLog() {
+  if (!auditLogRepository) auditLogRepository = createAuditLogStore(app.getPath('userData'));
+  return auditLogRepository;
+}
 const sync = require('./sync.cjs');
 const { parseNavicatFile } = require('./navicat.cjs');
 const { DatabaseSession, testConnection, previewImportFile, normalizeFileFormat } = require('./database.cjs');
@@ -816,6 +822,10 @@ handle('state:save', (value) => {
 handle('table-preferences:read', (scope) => tablePreferences().read(scope));
 handle('table-preferences:save', (scope, value) => tablePreferences().save(scope, value));
 handle('table-preferences:remove', (scope) => tablePreferences().remove(scope));
+handle('audit-log:read', (filter) => auditLog().read(filter));
+handle('audit-log:append', (entry) => auditLog().append(entry));
+handle('audit-log:prune', (options) => auditLog().prune(options));
+handle('audit-log:clear', () => auditLog().clear());
 
 handle('file:save-text', async (payload) => {
   if (!payload || typeof payload !== 'object' || typeof payload.contents !== 'string'

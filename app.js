@@ -2106,6 +2106,13 @@ async function exportCurrentResult(format) {
       if (!res.canceled) {
         toast('Đã xuất ' + target.rows.length + ' dòng ra CSV'
           + (target.truncated ? ' (chỉ các dòng đang hiển thị)' : ''));
+        void recordAudit({
+          database: targetDatabase || app.database,
+          actionType: 'EXPORT',
+          summary: `Xuất CSV (${target.rows.length} dòng)`,
+          affectedRows: target.rows.length,
+          status: 'success'
+        });
       }
     }).catch((err) => toast(err.message, 'error'));
   } else {
@@ -2120,6 +2127,13 @@ async function exportCurrentResult(format) {
       if (!res.canceled) {
         toast('Đã xuất ' + target.rows.length + ' dòng ra JSON'
           + (target.truncated ? ' (chỉ các dòng đang hiển thị)' : ''));
+        void recordAudit({
+          database: targetDatabase || app.database,
+          actionType: 'EXPORT',
+          summary: `Xuất JSON (${target.rows.length} dòng)`,
+          affectedRows: target.rows.length,
+          status: 'success'
+        });
       }
     }).catch((err) => toast(err.message, 'error'));
   }
@@ -2705,9 +2719,11 @@ async function showProcesslistModal() {
             const sql = typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.safeKillQuerySql(killId) : `KILL QUERY ${killId}`;
             await call(desktop.db.query({ ...activeQueryTarget(), sql, confirmed: true }));
             toast(`Đã gửi lệnh dừng SQL cho tiến trình #${killId}`, 'success');
+            void recordAudit({ actionType: 'KILL', summary: `Dừng câu lệnh SQL (KILL QUERY #${killId})`, status: 'success' });
             await loadProcesslist();
           } catch (err) {
             toast(err.message || 'Lỗi khi dừng câu lệnh SQL', 'error');
+            void recordAudit({ actionType: 'KILL', summary: `Lỗi khi dừng câu lệnh SQL #${killId}`, status: 'error', errorSummary: err.message });
           }
         });
       });
@@ -2732,9 +2748,11 @@ async function showProcesslistModal() {
             const sql = typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.safeKillConnectionSql(killId) : `KILL ${killId}`;
             await call(desktop.db.query({ ...activeQueryTarget(), sql, confirmed: true }));
             toast(`Đã hủy tiến trình #${killId}`, 'success');
+            void recordAudit({ actionType: 'KILL', summary: `Đóng kết nối tiến trình (KILL #${killId})`, status: 'success' });
             await loadProcesslist();
           } catch (err) {
             toast(err.message || 'Lỗi khi hủy tiến trình', 'error');
+            void recordAudit({ actionType: 'KILL', summary: `Lỗi khi hủy tiến trình #${killId}`, status: 'error', errorSummary: err.message });
           }
         });
       });
@@ -3736,6 +3754,374 @@ async function showSchemaDiffModal() {
   });
 
   initConfigTab();
+}
+
+/* ==========================================================================
+   G8.1 — LOCAL AUDIT LOGGING & AUDIT VIEWER MODAL
+   ========================================================================== */
+
+async function recordAudit(entryInput) {
+  if (typeof SqlAuditLog === 'undefined' || !entryInput) return;
+  const profileId = entryInput.profileId || app.connection?.id || null;
+  const profileName = entryInput.profileName || app.connection?.name || app.connection?.host || 'Chưa kết nối';
+  const database = entryInput.database !== undefined ? entryInput.database : (app.database || '');
+  const input = Object.assign({ profileId, profileName, database }, entryInput);
+
+  try {
+    if (desktop?.auditLog?.append) {
+      await desktop.auditLog.append(input);
+    } else {
+      const entry = SqlAuditLog.createAuditEntry(input);
+      let localEntries = [];
+      try {
+        localEntries = JSON.parse(localStorage.getItem('sqlpro-audit-log') || '[]');
+        if (!Array.isArray(localEntries)) localEntries = [];
+      } catch {
+        localEntries = [];
+      }
+      localEntries.unshift(entry);
+      const pruned = SqlAuditLog.pruneAuditEntries(localEntries, { maxEntries: 1000 });
+      localStorage.setItem('sqlpro-audit-log', JSON.stringify(pruned));
+    }
+  } catch (error) {
+    console.warn('Không thể ghi nhật ký thao tác:', error);
+  }
+}
+
+async function getAuditLogs(filter) {
+  if (typeof SqlAuditLog === 'undefined') return [];
+  try {
+    if (desktop?.auditLog?.read) {
+      return await desktop.auditLog.read(filter);
+    }
+    const local = JSON.parse(localStorage.getItem('sqlpro-audit-log') || '[]');
+    return SqlAuditLog.filterAuditEntries(local, filter);
+  } catch {
+    return [];
+  }
+}
+
+async function showAuditLogModal() {
+  if (typeof SqlAuditLog === 'undefined') {
+    toast('Module Audit Log chưa được tải.', 'error');
+    return;
+  }
+
+  modal(`
+    <div class="modal-card audit-modal-card">
+      <div class="modal-header">
+        <div class="modal-header-left">
+          <h3>📋 Nhật ký thao tác <span class="modal-title-tag">Local Audit Log</span></h3>
+          <span class="subtle" id="auditHeaderCount">Đang tải...</span>
+        </div>
+        <button class="close-btn" data-click="close-modal" title="Đóng (Esc)" aria-label="Đóng">✕</button>
+      </div>
+
+      <div class="audit-disclaimer-banner">
+        <span class="audit-disclaimer-icon">ℹ️</span>
+        <span class="audit-disclaimer-text">${esc(SqlAuditLog.AUDIT_DISCLAIMER)}</span>
+      </div>
+
+      <div class="audit-toolbar">
+        <div class="audit-filters-row">
+          <input type="search" id="auditSearchInput" class="audit-search-input" placeholder="🔍 Tìm kiếm thao tác, bảng, CSDL, mã lỗi..." autofocus>
+          <select id="auditActionSelect" class="audit-select" title="Lọc theo loại thao tác">
+            <option value="ALL">Tất cả thao tác</option>
+            <option value="QUERY">Truy vấn (QUERY/SELECT)</option>
+            <option value="INSERT">Thêm bản ghi (INSERT)</option>
+            <option value="UPDATE">Cập nhật (UPDATE)</option>
+            <option value="DELETE">Xóa (DELETE)</option>
+            <option value="DDL">Cấu trúc (DDL/ALTER/DROP)</option>
+            <option value="EXPORT">Xuất file (EXPORT)</option>
+            <option value="IMPORT">Nhập file (IMPORT)</option>
+            <option value="BACKUP">Sao lưu (BACKUP)</option>
+            <option value="RESTORE">Phục hồi (RESTORE)</option>
+            <option value="KILL">Hủy tiến trình (KILL)</option>
+            <option value="SCHEMA_DIFF">Đồng bộ Schema</option>
+          </select>
+          <select id="auditStatusSelect" class="audit-select" title="Lọc theo trạng thái">
+            <option value="ALL">Tất cả trạng thái</option>
+            <option value="success">✓ Thành công</option>
+            <option value="error">✕ Lỗi</option>
+          </select>
+          <select id="auditTimeSelect" class="audit-select" title="Lọc theo thời gian">
+            <option value="ALL">Mọi thời điểm</option>
+            <option value="today">Hôm nay</option>
+            <option value="7days">7 ngày gần nhất</option>
+            <option value="30days">30 ngày gần nhất</option>
+          </select>
+        </div>
+
+        <div class="audit-actions-row">
+          <div class="audit-actions-left">
+            <button class="audit-btn" id="auditExportCsvBtn" title="Xuất toàn bộ nhật ký đang lọc ra tệp CSV">📥 Xuất CSV</button>
+            <button class="audit-btn" id="auditExportJsonBtn" title="Xuất toàn bộ nhật ký đang lọc ra tệp JSON">📥 Xuất JSON</button>
+          </div>
+          <div class="audit-actions-right">
+            <button class="audit-btn secondary" id="auditPrune30Btn" title="Xóa các bản ghi cũ hơn 30 ngày để tiết kiệm dung lượng">🧹 Dọn >30 ngày</button>
+            <button class="audit-btn danger" id="auditClearBtn" title="Xóa toàn bộ lịch sử nhật ký thao tác">🗑️ Xóa toàn bộ</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-body audit-modal-body" id="auditModalBody">
+        <div id="auditTableContainer" class="audit-table-container">
+          <div class="processlist-loading">Đang tải dữ liệu nhật ký...</div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <div class="modal-footer-hint">
+          <span>💡 <em>Dữ liệu nhạy cảm và mật khẩu đã được tự động che giấu bằng ký tự hoa thị (***).</em></span>
+        </div>
+        <button class="secondary" data-click="close-modal">Đóng (Esc)</button>
+      </div>
+    </div>
+  `);
+
+  let allEntries = [];
+  let expandedEntryId = null;
+
+  async function loadData() {
+    try {
+      allEntries = await getAuditLogs();
+      renderEntries();
+    } catch (err) {
+      const container = $('#auditTableContainer');
+      if (container) container.innerHTML = `<div class="processlist-empty" style="color:#ef4444;">Lỗi khi đọc nhật ký thao tác: ${esc(err.message)}</div>`;
+    }
+  }
+
+  function getFilteredEntries() {
+    const search = $('#auditSearchInput')?.value.trim() || '';
+    const actionType = $('#auditActionSelect')?.value || 'ALL';
+    const status = $('#auditStatusSelect')?.value || 'ALL';
+    const timeFilter = $('#auditTimeSelect')?.value || 'ALL';
+
+    let fromTime = null;
+    const now = Date.now();
+    if (timeFilter === 'today') {
+      const startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+      fromTime = startOfDay.toISOString();
+    } else if (timeFilter === '7days') {
+      fromTime = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
+    } else if (timeFilter === '30days') {
+      fromTime = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
+    }
+
+    return SqlAuditLog.filterAuditEntries(allEntries, {
+      search,
+      actionType: actionType === 'ALL' ? null : actionType,
+      status: status === 'ALL' ? null : status,
+      fromTime
+    });
+  }
+
+  function renderEntries() {
+    const container = $('#auditTableContainer');
+    const headerCount = $('#auditHeaderCount');
+    if (!container) return;
+
+    const filtered = getFilteredEntries();
+    if (headerCount) {
+      headerCount.textContent = `${filtered.length} / ${allEntries.length} bản ghi`;
+    }
+
+    if (!filtered.length) {
+      container.innerHTML = `
+        <div class="processlist-empty">
+          <div style="font-size:2em; margin-bottom:8px;">📋</div>
+          <div>Không tìm thấy nhật ký thao tác nào phù hợp.</div>
+        </div>
+      `;
+      return;
+    }
+
+    function formatTime(isoString) {
+      if (!isoString) return '—';
+      const d = new Date(isoString);
+      if (isNaN(d.getTime())) return isoString;
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())} ${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
+    }
+
+    container.innerHTML = `
+      <table class="audit-table">
+        <thead>
+          <tr>
+            <th style="width:130px;">Thời gian</th>
+            <th style="width:140px;">Kết nối / CSDL</th>
+            <th style="width:90px;">Thao tác</th>
+            <th>Tóm tắt thao tác</th>
+            <th style="width:70px; text-align:right;">Số dòng</th>
+            <th style="width:80px; text-align:right;">Thời lượng</th>
+            <th style="width:100px; text-align:center;">Trạng thái</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${filtered.map((entry) => {
+            const isExpanded = expandedEntryId === entry.id;
+            const statusClass = entry.status === 'success' ? 'audit-status-success' : 'audit-status-error';
+            const statusText = entry.status === 'success' ? '✓ Thành công' : '✕ Lỗi';
+            const actionBadgeClass = `audit-badge audit-badge-${entry.actionType.toLowerCase()}`;
+            const targetLabel = [entry.profileName, entry.database].filter(Boolean).join(' / ') || '—';
+
+            return `
+              <tr class="audit-row ${isExpanded ? 'expanded' : ''}" data-entry-id="${esc(entry.id)}" style="cursor:pointer;">
+                <td style="font-family:monospace; font-size:0.85em; color:#64748b;">${formatTime(entry.timestamp)}</td>
+                <td style="max-width:140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(targetLabel)}">${esc(targetLabel)}</td>
+                <td><span class="${actionBadgeClass}">${esc(entry.actionType)}</span></td>
+                <td class="audit-summary-cell" title="${esc(entry.summary)}">
+                  ${esc(entry.summary)}
+                  ${entry.errorCode ? `<span class="audit-error-code">[${esc(entry.errorCode)}]</span>` : ''}
+                </td>
+                <td style="text-align:right; font-family:monospace;">${entry.affectedRows !== null ? entry.affectedRows : '—'}</td>
+                <td style="text-align:right; font-family:monospace; font-size:0.85em; color:#64748b;">${entry.durationMs} ms</td>
+                <td style="text-align:center;"><span class="${statusClass}">${statusText}</span></td>
+              </tr>
+              ${isExpanded ? `
+                <tr class="audit-detail-row">
+                  <td colspan="7">
+                    <div class="audit-detail-card">
+                      <div class="audit-detail-grid">
+                        <div><strong>Mã bản ghi:</strong> <code>${esc(entry.id)}</code></div>
+                        <div><strong>Thời điểm ISO:</strong> <code>${esc(entry.timestamp)}</code></div>
+                        <div><strong>Kết nối:</strong> ${esc(entry.profileName)} (${esc(entry.profileId)})</div>
+                        <div><strong>CSDL:</strong> ${esc(entry.database || '—')}</div>
+                        ${entry.table ? `<div><strong>Bảng:</strong> <code>${esc(entry.table)}</code></div>` : ''}
+                        ${entry.errorCode ? `<div><strong style="color:#ef4444;">Mã lỗi:</strong> <code>${esc(entry.errorCode)}</code></div>` : ''}
+                        ${entry.errorSummary ? `<div style="grid-column:1 / -1;"><strong style="color:#ef4444;">Chi tiết lỗi:</strong> <div class="audit-error-box">${esc(entry.errorSummary)}</div></div>` : ''}
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+              ` : ''}
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    `;
+
+    container.querySelectorAll('.audit-row').forEach((row) => {
+      row.addEventListener('click', () => {
+        const id = row.dataset.entryId;
+        expandedEntryId = expandedEntryId === id ? null : id;
+        renderEntries();
+      });
+    });
+  }
+
+  $('#auditSearchInput')?.addEventListener('input', debounce(renderEntries, 200));
+  $('#auditActionSelect')?.addEventListener('change', renderEntries);
+  $('#auditStatusSelect')?.addEventListener('change', renderEntries);
+  $('#auditTimeSelect')?.addEventListener('change', renderEntries);
+
+  $('#auditExportCsvBtn')?.addEventListener('click', async () => {
+    const filtered = getFilteredEntries();
+    if (!filtered.length) {
+      toast('Không có bản ghi nào để xuất.', 'info');
+      return;
+    }
+    const csvData = SqlAuditLog.exportAuditCsv(filtered);
+    try {
+      if (desktop?.saveTextFile) {
+        const res = await desktop.saveTextFile({
+          suggestedName: `sqlpro-audit-log-${Date.now()}.csv`,
+          contents: csvData,
+          filters: [{ name: 'CSV File', extensions: ['csv'] }]
+        });
+        if (!res.canceled) toast(`Đã xuất ${filtered.length} bản ghi audit ra CSV`, 'success');
+      } else {
+        const blob = new Blob([csvData], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `sqlpro-audit-log-${Date.now()}.csv`;
+        link.click();
+        URL.revokeObjectURL(url);
+        toast(`Đã xuất ${filtered.length} bản ghi audit ra CSV`, 'success');
+      }
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
+
+  $('#auditExportJsonBtn')?.addEventListener('click', async () => {
+    const filtered = getFilteredEntries();
+    if (!filtered.length) {
+      toast('Không có bản ghi nào để xuất.', 'info');
+      return;
+    }
+    const jsonData = SqlAuditLog.exportAuditJson(filtered);
+    try {
+      if (desktop?.saveTextFile) {
+        const res = await desktop.saveTextFile({
+          suggestedName: `sqlpro-audit-log-${Date.now()}.json`,
+          contents: jsonData,
+          filters: [{ name: 'JSON File', extensions: ['json'] }]
+        });
+        if (!res.canceled) toast(`Đã xuất ${filtered.length} bản ghi audit ra JSON`, 'success');
+      } else {
+        const blob = new Blob([jsonData], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `sqlpro-audit-log-${Date.now()}.json`;
+        link.click();
+        URL.revokeObjectURL(url);
+        toast(`Đã xuất ${filtered.length} bản ghi audit ra JSON`, 'success');
+      }
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
+
+  $('#auditPrune30Btn')?.addEventListener('click', async () => {
+    const confirmed = await confirmAction(
+      'Dọn dẹp nhật ký cũ hơn 30 ngày?',
+      'Các bản ghi thao tác được tạo cách đây hơn 30 ngày sẽ bị xóa vĩnh viễn khỏi thiết bị để giải phóng dung lượng.',
+      'Dọn dẹp'
+    );
+    if (!confirmed) return;
+
+    try {
+      if (desktop?.auditLog?.prune) {
+        const res = await desktop.auditLog.prune({ maxAgeDays: 30 });
+        toast(`Đã dọn dẹp ${res.prunedCount} bản ghi cũ`, 'success');
+      } else {
+        const pruned = SqlAuditLog.pruneAuditEntries(allEntries, { maxAgeDays: 30 });
+        localStorage.setItem('sqlpro-audit-log', JSON.stringify(pruned));
+        toast('Đã dọn dẹp nhật ký cũ', 'success');
+      }
+      await loadData();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
+
+  $('#auditClearBtn')?.addEventListener('click', async () => {
+    const confirmed = await confirmAction(
+      'Xóa toàn bộ nhật ký thao tác?',
+      'Toàn bộ lịch sử nhật ký thao tác cục bộ trên máy này sẽ bị xóa sạch. Thao tác này không thể hoàn tác.',
+      'Xóa sạch'
+    );
+    if (!confirmed) return;
+
+    try {
+      if (desktop?.auditLog?.clear) {
+        await desktop.auditLog.clear();
+      } else {
+        localStorage.removeItem('sqlpro-audit-log');
+      }
+      toast('Đã xóa toàn bộ nhật ký thao tác', 'success');
+      await loadData();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
+
+  await loadData();
 }
 
 async function runTableMaintenance(tableName, operation) {
@@ -9600,6 +9986,21 @@ async function runQuery() {
       database: tab.database || null
     }));
     historyRows = historyRows.slice(0, 500);
+    const classified = typeof SqlAuditLog !== 'undefined' ? SqlAuditLog.classifySqlAction(sqlToRun) : { actionType: 'QUERY', table: null };
+    const affectedCount = result.kind === 'batch'
+      ? result.succeededCount
+      : (result.kind === 'ok' ? result.affectedRows : (result.rows ? result.rows.length : 0));
+    void recordAudit({
+      profileId: target.profileId,
+      database: tab.database || null,
+      table: classified.table,
+      actionType: classified.actionType,
+      affectedRows: affectedCount,
+      durationMs: result.durationMs || 0,
+      status: batchFailed ? 'error' : 'success',
+      errorCode: batchFailed ? 'BATCH_FAILED' : null,
+      errorSummary: batchFailed ? (result.results.find((entry) => !entry.ok)?.error?.message || 'Lỗi câu lệnh SQL') : null
+    });
     if (batchFailed) {
       const failed = result.results.find((entry) => !entry.ok);
       setStatus(`Lỗi ở câu lệnh #${failed?.index || result.executedCount} • ${result.durationMs} ms`);
@@ -9622,6 +10023,17 @@ async function runQuery() {
       database: tab.database || null
     }));
     historyRows = historyRows.slice(0, 500);
+    const classified = typeof SqlAuditLog !== 'undefined' ? SqlAuditLog.classifySqlAction(sqlToRun) : { actionType: 'QUERY', table: null };
+    void recordAudit({
+      profileId: target?.profileId || null,
+      database: tab.database || null,
+      table: classified.table,
+      actionType: classified.actionType,
+      durationMs: 0,
+      status: 'error',
+      errorCode: error.code || 'QUERY_ERROR',
+      errorSummary: error.message
+    });
     setStatus(error.message);
     if (error.code === 'SESSION_CLOSED' || error.code === 'QUERY_TIMEOUT' || error.code === 'QUERY_CANCELED') {
       toast(`${error.message} Kết nối sẽ tự thiết lập lại ở lần chạy sau.`, 'error');
@@ -12497,6 +12909,7 @@ const delegatedClickActions = {
   'processlist': () => showProcesslistModal(),
   'server-vars': () => showServerVarsModal(),
   'schema-diff': () => showSchemaDiffModal(),
+  'audit-log': () => showAuditLogModal(),
   'shortcuts': () => showShortcutsModal(),
   'snippets': () => openSnippetsModal(),
   'toggle-theme': () => toggleTheme(),

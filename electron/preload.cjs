@@ -138,6 +138,12 @@ contextBridge.exposeInMainWorld('sqlProDesktop', Object.freeze({
     save: (scope, value) => ipcRenderer.invoke('table-preferences:save', scope, value),
     remove: (scope) => ipcRenderer.invoke('table-preferences:remove', scope)
   }),
+  auditLog: Object.freeze({
+    read: (filter) => ipcRenderer.invoke('audit-log:read', filter),
+    append: (entry) => ipcRenderer.invoke('audit-log:append', entry),
+    prune: (options) => ipcRenderer.invoke('audit-log:prune', options),
+    clear: () => ipcRenderer.invoke('audit-log:clear')
+  }),
   saveTextFile: (payload) => invoke('file:save-text', payload),
   openJsonFile: () => invoke('file:open-json'),
   openTextFile: (payload) => invoke('file:open-text', payload),

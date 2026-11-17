@@ -49,6 +49,11 @@ let pendingTablePreferenceRead = null;
 handle('table-preferences:read', scope => pendingTablePreferenceRead ? pendingTablePreferenceRead(scope) : ok(tablePreferencesRepository.read(scope)));
 handle('table-preferences:save', (scope, value) => ok(tablePreferencesRepository.save(scope, value)));
 handle('table-preferences:remove', scope => ok(tablePreferencesRepository.remove(scope)));
+const auditLogRepository = require(path.join(root, 'electron/audit-log.cjs')).createAuditLogStore(app.getPath('userData'));
+handle('audit-log:read', (filter) => auditLogRepository.read(filter));
+handle('audit-log:append', (entry) => auditLogRepository.append(entry));
+handle('audit-log:prune', (options) => auditLogRepository.prune(options));
+handle('audit-log:clear', () => auditLogRepository.clear());
 handle('clipboard:write-text', async (text) => { await clipboard.writeText(text); return ok({ written: true }); });
 handle('clipboard:read-text', async () => ok(await clipboard.readText()));
 handle('workspaces:list', () => ok([{ id: 'ws-personal', name: 'Personal' }]));
@@ -1682,6 +1687,54 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate("Boolean($('#diffRunCompareBtn'))"), true);
 
     await evaluate('closeModal()');
+  });
+  await check('audit log modal opens, displays disclaimer, filters entries, and exports', async () => {
+    await evaluate(`(async () => {
+      await recordAudit({
+        profileId: 'smoke-profile',
+        profileName: 'Smoke Test DB',
+        database: 'test_db',
+        table: 'users',
+        actionType: 'INSERT',
+        summary: 'Thêm bản ghi vào bảng users',
+        affectedRows: 1,
+        durationMs: 8,
+        status: 'success'
+      });
+      await recordAudit({
+        profileId: 'smoke-profile',
+        profileName: 'Smoke Test DB',
+        database: 'test_db',
+        actionType: 'QUERY',
+        summary: 'SELECT FROM users',
+        durationMs: 4,
+        status: 'error',
+        errorCode: 'ER_NO_SUCH_TABLE',
+        errorSummary: 'Table does not exist'
+      });
+    })()`);
+
+    await evaluate("$('button[data-click=\"audit-log\"]').click()");
+    await until("Boolean($('#modal .audit-modal-card'))");
+
+    assert.equal(await evaluate("Boolean($('.audit-disclaimer-banner'))"), true);
+    assert.equal(await evaluate("Boolean($('#auditSearchInput'))"), true);
+    assert.equal(await evaluate("Boolean($('#auditActionSelect'))"), true);
+    assert.equal(await evaluate("Boolean($('#auditExportCsvBtn'))"), true);
+
+    await until("document.querySelectorAll('.audit-row').length >= 2");
+    const summaries = await evaluate("Array.from(document.querySelectorAll('.audit-summary-cell')).map(el => el.textContent.trim())");
+    assert.ok(summaries.some(s => s.includes('users')));
+
+    await evaluate(`(() => {
+      const select = $('#auditActionSelect');
+      select.value = 'INSERT';
+      select.dispatchEvent(new Event('change'));
+    })()`);
+    await until("document.querySelectorAll('.audit-row').length === 1");
+
+    await evaluate('closeModal()');
+    await until("!$('#modal').open");
   });
   await check('query snippets modal opens, filters by search, and inserts into editor at caret with undo', async () => {
     await evaluate(`(() => {

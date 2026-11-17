@@ -1643,6 +1643,15 @@ app.whenReady().then(async () => {
 
     await evaluate('closeModal()');
   });
+  await check('schema diff modal opens, configures source/target, and navigates tabs', async () => {
+    await evaluate('showSchemaDiffModal()');
+    await until("Boolean($('#modal .schema-diff-card'))");
+    assert.equal(await evaluate("Boolean($('#diffSourceProfile'))"), true);
+    assert.equal(await evaluate("Boolean($('#diffTargetProfile'))"), true);
+    assert.equal(await evaluate("Boolean($('#diffRunCompareBtn'))"), true);
+
+    await evaluate('closeModal()');
+  });
   await check('query snippets modal opens, filters by search, and inserts into editor at caret with undo', async () => {
     await evaluate(`(() => {
       mode = 'query';

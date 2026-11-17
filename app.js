@@ -3121,6 +3121,618 @@ async function showServerVarsModal(defaultTab = 'variables') {
   $('#varsFilterInput')?.addEventListener('input', debounce(loadData, 250));
 }
 
+async function showSchemaDiffModal() {
+  if (!desktop || !app.connection) {
+    toast('Chưa kết nối CSDL.', 'error');
+    return;
+  }
+
+  const profiles = app.connections?.length ? app.connections : (app.connection ? [app.connection] : []);
+  const currentProfileId = app.connection.id;
+  const currentDb = app.database || '';
+
+  modal(`
+    <div class="modal-card schema-diff-card">
+      <div class="modal-header">
+        <div class="modal-header-left">
+          <h3>🔄 So sánh & Đồng bộ Lược đồ <span class="modal-title-tag">Schema Diff</span></h3>
+          <div class="schema-diff-tabs" role="tablist">
+            <button class="diff-tab-btn active" data-diff-tab="config">⚙️ Cấu hình</button>
+            <button class="diff-tab-btn" data-diff-tab="summary" disabled>📊 Tổng quan</button>
+            <button class="diff-tab-btn" data-diff-tab="tables" disabled>▦ Bảng & Cột</button>
+            <button class="diff-tab-btn" data-diff-tab="indexes" disabled>🔑 Chỉ mục & FK</button>
+            <button class="diff-tab-btn" data-diff-tab="migration" disabled>📝 Mã Migration SQL</button>
+          </div>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <button class="close-btn" data-click="close-modal" title="Đóng (Esc)" aria-label="Đóng">✕</button>
+        </div>
+      </div>
+      <div class="modal-body" id="diffModalBody">
+        <div id="diffTabContent">
+          <div class="processlist-loading">Đang tải danh sách kết nối và cơ sở dữ liệu...</div>
+        </div>
+      </div>
+      <div class="modal-footer" id="diffModalFooter">
+        <div class="modal-footer-hint">
+          <span id="diffFooterHint">💡 <em>Chọn CSDL Nguồn (chuẩn) và CSDL Đích (cần đồng bộ), sau đó nhấn "So sánh Lược đồ".</em></span>
+        </div>
+        <button class="secondary" data-click="close-modal">Đóng (Esc)</button>
+      </div>
+    </div>
+  `);
+
+  let currentTab = 'config';
+  let diffResult = null;
+  let migrationStatements = [];
+  let sourceSnapshot = null;
+  let targetSnapshot = null;
+
+  let sourceProfileId = currentProfileId;
+  let sourceDb = currentDb;
+  let targetProfileId = currentProfileId;
+  let targetDb = '';
+
+  let allowDropTables = false;
+  let allowDropColumns = false;
+  let ignoreComments = false;
+  let ignoreCollation = false;
+  let wrapForeignKeys = true;
+
+  let sourceDatabases = [];
+  let targetDatabases = [];
+
+  async function loadDatabasesFor(profileId) {
+    try {
+      const dbs = await call(desktop.db.databases(profileId));
+      return Array.isArray(dbs) ? dbs : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function initConfigTab() {
+    const container = $('#diffTabContent');
+    if (!container) return;
+
+    sourceDatabases = await loadDatabasesFor(sourceProfileId);
+    targetDatabases = sourceProfileId === targetProfileId ? sourceDatabases : await loadDatabasesFor(targetProfileId);
+
+    if (!targetDb && targetDatabases.length > 1) {
+      targetDb = targetDatabases.find((d) => d !== sourceDb) || targetDatabases[0] || '';
+    } else if (!targetDb && targetDatabases.length === 1) {
+      targetDb = targetDatabases[0];
+    }
+
+    renderConfigView();
+  }
+
+  function renderConfigView() {
+    const container = $('#diffTabContent');
+    if (!container) return;
+
+    container.innerHTML = `
+      <div class="diff-config-pane">
+        <div class="diff-compare-grid">
+          <div class="diff-side-box">
+            <div class="diff-side-title">
+              <span>🔵</span> <strong>CSDL NGUỒN (Chuẩn / Mong muốn)</strong>
+            </div>
+            <label style="font-size:0.85em; color:#64748b;">Kết nối:</label>
+            <select id="diffSourceProfile" style="width:100%;">
+              ${profiles.map((p) => `<option value="${esc(p.id)}" ${p.id === sourceProfileId ? 'selected' : ''}>${esc(p.name || p.host)} (${esc(p.host)}:${p.port || 3306})</option>`).join('')}
+            </select>
+            <label style="font-size:0.85em; color:#64748b; margin-top:4px;">Cơ sở dữ liệu:</label>
+            <select id="diffSourceDb" style="width:100%;">
+              ${sourceDatabases.map((db) => `<option value="${esc(db)}" ${db === sourceDb ? 'selected' : ''}>${esc(db)}</option>`).join('')}
+            </select>
+          </div>
+
+          <div style="display:flex; flex-direction:column; align-items:center; gap:8px;">
+            <button type="button" class="diff-swap-btn" id="diffSwapBtn" title="Đổi chiều Nguồn ⇄ Đích">⇄</button>
+            <span style="font-size:0.75em; color:#94a3b8;">So sánh</span>
+          </div>
+
+          <div class="diff-side-box">
+            <div class="diff-side-title">
+              <span>🎯</span> <strong>CSDL ĐÍCH (Cần đồng bộ / Cũ)</strong>
+            </div>
+            <label style="font-size:0.85em; color:#64748b;">Kết nối:</label>
+            <select id="diffTargetProfile" style="width:100%;">
+              ${profiles.map((p) => `<option value="${esc(p.id)}" ${p.id === targetProfileId ? 'selected' : ''}>${esc(p.name || p.host)} (${esc(p.host)}:${p.port || 3306})</option>`).join('')}
+            </select>
+            <label style="font-size:0.85em; color:#64748b; margin-top:4px;">Cơ sở dữ liệu:</label>
+            <select id="diffTargetDb" style="width:100%;">
+              ${targetDatabases.map((db) => `<option value="${esc(db)}" ${db === targetDb ? 'selected' : ''}>${esc(db)}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+
+        <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:14px;">
+          <div style="font-weight:600; font-size:0.9em; margin-bottom:10px;">⚙️ Tùy chọn so sánh & an toàn:</div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; font-size:0.88em;">
+            <label style="display:flex; align-items:center; gap:6px;">
+              <input type="checkbox" id="diffAllowDropTables" ${allowDropTables ? 'checked' : ''}>
+              <span>Cho phép DROP TABLE (mặc định tắt vì an toàn)</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:6px;">
+              <input type="checkbox" id="diffAllowDropColumns" ${allowDropColumns ? 'checked' : ''}>
+              <span>Cho phép DROP COLUMN (mặc định tắt)</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:6px;">
+              <input type="checkbox" id="diffIgnoreComments" ${ignoreComments ? 'checked' : ''}>
+              <span>Bỏ qua khác biệt ghi chú (Comments)</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:6px;">
+              <input type="checkbox" id="diffIgnoreCollation" ${ignoreCollation ? 'checked' : ''}>
+              <span>Bỏ qua khác biệt Collation</span>
+            </label>
+          </div>
+        </div>
+
+        <div style="text-align:center; margin-top:8px;">
+          <button type="button" class="primary" id="diffRunCompareBtn" style="padding:10px 28px; font-size:1em;">
+            ⚡ Bắt đầu so sánh lược đồ
+          </button>
+        </div>
+      </div>
+    `;
+
+    $('#diffSourceProfile')?.addEventListener('change', async (e) => {
+      sourceProfileId = e.target.value;
+      sourceDatabases = await loadDatabasesFor(sourceProfileId);
+      sourceDb = sourceDatabases[0] || '';
+      renderConfigView();
+    });
+
+    $('#diffSourceDb')?.addEventListener('change', (e) => {
+      sourceDb = e.target.value;
+    });
+
+    $('#diffTargetProfile')?.addEventListener('change', async (e) => {
+      targetProfileId = e.target.value;
+      targetDatabases = await loadDatabasesFor(targetProfileId);
+      targetDb = targetDatabases[0] || '';
+      renderConfigView();
+    });
+
+    $('#diffTargetDb')?.addEventListener('change', (e) => {
+      targetDb = e.target.value;
+    });
+
+    $('#diffSwapBtn')?.addEventListener('click', () => {
+      const tempP = sourceProfileId;
+      sourceProfileId = targetProfileId;
+      targetProfileId = tempP;
+
+      const tempDb = sourceDb;
+      sourceDb = targetDb;
+      targetDb = tempDb;
+
+      const tempDbs = sourceDatabases;
+      sourceDatabases = targetDatabases;
+      targetDatabases = tempDbs;
+
+      renderConfigView();
+    });
+
+    $('#diffAllowDropTables')?.addEventListener('change', (e) => {
+      allowDropTables = e.target.checked;
+    });
+    $('#diffAllowDropColumns')?.addEventListener('change', (e) => {
+      allowDropColumns = e.target.checked;
+    });
+    $('#diffIgnoreComments')?.addEventListener('change', (e) => {
+      ignoreComments = e.target.checked;
+    });
+    $('#diffIgnoreCollation')?.addEventListener('change', (e) => {
+      ignoreCollation = e.target.checked;
+    });
+
+    $('#diffRunCompareBtn')?.addEventListener('click', executeCompare);
+  }
+
+  async function captureFullSchema(database, profileId) {
+    const rawTables = await call(desktop.db.tables(database, profileId));
+    const fullTables = [];
+
+    for (const t of rawTables) {
+      if (t.type === 'view') continue;
+      try {
+        const [cols, idxs, rels] = await Promise.all([
+          call(desktop.db.columns(database, t.name, profileId)),
+          call(desktop.db.indexes(database, t.name, profileId)),
+          call(desktop.db.relations(database, t.name, profileId))
+        ]);
+
+        const outbound = rels?.outbound || [];
+        const fkMap = new Map();
+        for (const r of outbound) {
+          if (!fkMap.has(r.name)) {
+            fkMap.set(r.name, {
+              name: r.name,
+              columns: [],
+              referencedTable: r.refTable,
+              referencedColumns: [],
+              onDelete: 'RESTRICT',
+              onUpdate: 'RESTRICT'
+            });
+          }
+          const fk = fkMap.get(r.name);
+          fk.columns.push(r.columnName);
+          fk.referencedColumns.push(r.refColumn);
+        }
+
+        fullTables.push({
+          name: t.name,
+          engine: t.engine || 'InnoDB',
+          comment: t.comment || '',
+          columns: (cols || []).map((c) => ({
+            name: c.name,
+            type: c.type,
+            nullable: c.nullable,
+            default: c.defaultValue,
+            extra: c.extra,
+            comment: c.comment
+          })),
+          indexes: (idxs || []).map((i) => ({
+            name: i.name,
+            isPrimary: i.name === 'PRIMARY',
+            isUnique: !i.nonUnique,
+            type: i.type,
+            columns: (i.columns || []).map((c) => ({ name: typeof c === 'string' ? c : c.name }))
+          })),
+          foreignKeys: [...fkMap.values()]
+        });
+      } catch (err) {
+        console.warn(`Lỗi khi đọc schema của bảng ${t.name}:`, err);
+      }
+    }
+
+    let routinesList = [];
+    try {
+      routinesList = await call(desktop.db.routines(database, profileId));
+    } catch {
+      routinesList = [];
+    }
+
+    return {
+      database,
+      engine: 'MySQL',
+      tables: fullTables,
+      views: rawTables.filter((t) => t.type === 'view').map((v) => ({ name: v.name, definition: '' })),
+      routines: (routinesList || []).map((r) => ({ name: r.name, type: r.type, sql: '' })),
+      triggers: [],
+      events: []
+    };
+  }
+
+  async function executeCompare() {
+    if (!sourceDb || !targetDb) {
+      toast('Vui lòng chọn cả CSDL Nguồn và CSDL Đích.', 'error');
+      return;
+    }
+    if (sourceProfileId === targetProfileId && sourceDb === targetDb) {
+      toast('CSDL Nguồn và Đích không được trùng nhau.', 'error');
+      return;
+    }
+
+    const container = $('#diffTabContent');
+    container.innerHTML = `
+      <div class="processlist-loading">
+        <div style="font-weight:600; margin-bottom:8px;">Đang trích xuất và phân tích lược đồ...</div>
+        <div style="font-size:0.85em; color:#9ca3af;">Đang nạp cấu trúc ${esc(sourceDb)} và ${esc(targetDb)}...</div>
+      </div>
+    `;
+
+    try {
+      sourceSnapshot = await captureFullSchema(sourceDb, sourceProfileId);
+      targetSnapshot = await captureFullSchema(targetDb, targetProfileId);
+
+      const options = {
+        ignoreComments,
+        ignoreCollation,
+        ignoreAutoIncrement: true,
+        ignoreEngine: false
+      };
+
+      diffResult = window.SchemaDiff.compareSchemas(sourceSnapshot, targetSnapshot, options);
+      migrationStatements = window.SchemaDiff.generateMigrationSql(diffResult, {
+        allowDropTables,
+        allowDropColumns
+      });
+
+      document.querySelectorAll('.diff-tab-btn').forEach((btn) => {
+        btn.disabled = false;
+      });
+
+      switchTab('summary');
+    } catch (err) {
+      container.innerHTML = `<div class="processlist-error">Lỗi khi so sánh schema: ${esc(err.message)}</div>`;
+    }
+  }
+
+  function switchTab(tabName) {
+    currentTab = tabName;
+    document.querySelectorAll('.diff-tab-btn').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.diffTab === tabName);
+    });
+
+    if (tabName === 'config') renderConfigView();
+    else if (tabName === 'summary') renderSummaryTab();
+    else if (tabName === 'tables') renderTablesTab();
+    else if (tabName === 'indexes') renderIndexesTab();
+    else if (tabName === 'migration') renderMigrationTab();
+  }
+
+  function renderSummaryTab() {
+    const container = $('#diffTabContent');
+    if (!container || !diffResult) return;
+
+    const { summary, tables, views, routines } = diffResult;
+
+    container.innerHTML = `
+      <div style="padding:16px;">
+        <div class="diff-stat-cards">
+          <div class="diff-stat-card diff-stat-total">
+            <span class="diff-stat-num">${summary.totalChanges}</span>
+            <span class="diff-stat-label">Tổng số thay đổi</span>
+          </div>
+          <div class="diff-stat-card diff-stat-safe">
+            <span class="diff-stat-num">${summary.safeCount}</span>
+            <span class="diff-stat-label">An toàn (Thêm mới)</span>
+          </div>
+          <div class="diff-stat-card diff-stat-warning">
+            <span class="diff-stat-num">${summary.warningCount}</span>
+            <span class="diff-stat-label">Cảnh báo (Sửa đổi)</span>
+          </div>
+          <div class="diff-stat-card diff-stat-destructive">
+            <span class="diff-stat-num">${summary.destructiveCount}</span>
+            <span class="diff-stat-label">Nguy hiểm (Xóa bỏ)</span>
+          </div>
+        </div>
+
+        <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:14px; margin-bottom:14px;">
+          <h4 style="margin:0 0 10px 0; font-size:0.95em;">📋 Tóm tắt phân loại đối tượng:</h4>
+          <div style="display:grid; grid-template-columns:repeat(2, 1fr); gap:8px; font-size:0.88em;">
+            <div>• Bảng mới cần tạo: <strong>${tables.added.length}</strong></div>
+            <div>• Bảng cũ cần xóa: <strong>${tables.dropped.length}</strong></div>
+            <div>• Bảng có thay đổi cột / chỉ mục: <strong>${tables.modified.length}</strong></div>
+            <div>• Views & Thủ tục thay đổi: <strong>${views.added.length + views.modified.length + routines.added.length}</strong></div>
+          </div>
+        </div>
+
+        <div style="display:flex; justify-content:flex-end; gap:8px;">
+          <button type="button" class="secondary" id="diffGoTablesBtn">Xem chi tiết Bảng & Cột →</button>
+          <button type="button" class="primary" id="diffGoMigrationBtn">Xem Script Migration SQL →</button>
+        </div>
+      </div>
+    `;
+
+    $('#diffGoTablesBtn')?.addEventListener('click', () => switchTab('tables'));
+    $('#diffGoMigrationBtn')?.addEventListener('click', () => switchTab('migration'));
+  }
+
+  function renderTablesTab() {
+    const container = $('#diffTabContent');
+    if (!container || !diffResult) return;
+
+    const { tables } = diffResult;
+
+    if (!tables.added.length && !tables.modified.length && !tables.dropped.length) {
+      container.innerHTML = '<div class="processlist-empty">Không có sự khác biệt nào về bảng hoặc cột.</div>';
+      return;
+    }
+
+    container.innerHTML = `
+      <div style="padding:14px;">
+        <div class="diff-items-list">
+          ${tables.added.map((t) => `
+            <div class="diff-item-row">
+              <div>
+                <strong>${esc(t.name)}</strong>
+                <span style="color:#64748b; font-size:0.82em; margin-left:8px;">(${t.columns.length} cột, ${t.indexes.length} chỉ mục)</span>
+              </div>
+              <span class="diff-tag-added">＋ TẠO MỚI</span>
+            </div>
+          `).join('')}
+
+          ${tables.modified.map((tm) => `
+            <div style="border:1px solid #e2e8f0; border-radius:6px; padding:10px 14px; background:#fff; margin-bottom:8px;">
+              <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
+                <strong>${esc(tm.name)}</strong>
+                <span class="diff-tag-modified">~ SỬA ĐỔI</span>
+              </div>
+              <div style="font-size:0.84em; color:#475569; display:flex; flex-direction:column; gap:4px; margin-left:12px;">
+                ${tm.columns.added.map((c) => `<div><span style="color:#16a34a; font-weight:600;">[+]</span> Thêm cột <code>${esc(c.name)}</code> (${esc(c.type)})</div>`).join('')}
+                ${tm.columns.modified.map((c) => `<div><span style="color:#d97706; font-weight:600;">[~]</span> Sửa cột <code>${esc(c.name)}</code>: ${esc(c.changes.join(', '))}</div>`).join('')}
+                ${tm.columns.dropped.map((c) => `<div><span style="color:#dc2626; font-weight:600;">[-]</span> Xóa cột <code>${esc(c.name)}</code></div>`).join('')}
+              </div>
+            </div>
+          `).join('')}
+
+          ${tables.dropped.map((t) => `
+            <div class="diff-item-row">
+              <div>
+                <strong>${esc(t.name)}</strong>
+                <span style="color:#64748b; font-size:0.82em; margin-left:8px;">(Bảng sẽ bị xóa nếu cho phép)</span>
+              </div>
+              <span class="diff-tag-dropped">✕ XÓA BẢNG</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderIndexesTab() {
+    const container = $('#diffTabContent');
+    if (!container || !diffResult) return;
+
+    const { tables } = diffResult;
+    const modifiedWithKeys = tables.modified.filter((t) => t.indexes.added.length || t.indexes.modified.length || t.indexes.dropped.length || t.foreignKeys.added.length || t.foreignKeys.modified.length || t.foreignKeys.dropped.length);
+
+    if (!modifiedWithKeys.length && !tables.added.some((t) => t.foreignKeys.length)) {
+      container.innerHTML = '<div class="processlist-empty">Không có sự khác biệt nào về chỉ mục hoặc khóa ngoại.</div>';
+      return;
+    }
+
+    container.innerHTML = `
+      <div style="padding:14px;">
+        <div class="diff-items-list">
+          ${modifiedWithKeys.map((tm) => `
+            <div style="border:1px solid #e2e8f0; border-radius:6px; padding:10px 14px; background:#fff; margin-bottom:8px;">
+              <div style="font-weight:600; margin-bottom:6px;">Bảng: ${esc(tm.name)}</div>
+              <div style="font-size:0.84em; display:flex; flex-direction:column; gap:4px; margin-left:12px;">
+                ${tm.indexes.added.map((i) => `<div><span style="color:#16a34a; font-weight:600;">[+]</span> Thêm chỉ mục <code>${esc(i.name)}</code> (${esc(i.type)})</div>`).join('')}
+                ${tm.indexes.modified.map((i) => `<div><span style="color:#d97706; font-weight:600;">[~]</span> Sửa chỉ mục <code>${esc(i.name)}</code></div>`).join('')}
+                ${tm.indexes.dropped.map((i) => `<div><span style="color:#dc2626; font-weight:600;">[-]</span> Xóa chỉ mục <code>${esc(i.name)}</code></div>`).join('')}
+                ${tm.foreignKeys.added.map((f) => `<div><span style="color:#16a34a; font-weight:600;">[+]</span> Thêm khóa ngoại <code>${esc(f.name)}</code> -> ${esc(f.referencedTable)}</div>`).join('')}
+                ${tm.foreignKeys.modified.map((f) => `<div><span style="color:#d97706; font-weight:600;">[~]</span> Sửa khóa ngoại <code>${esc(f.name)}</code></div>`).join('')}
+                ${tm.foreignKeys.dropped.map((f) => `<div><span style="color:#dc2626; font-weight:600;">[-]</span> Xóa khóa ngoại <code>${esc(f.name)}</code></div>`).join('')}
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderMigrationTab() {
+    const container = $('#diffTabContent');
+    if (!container || !diffResult) return;
+
+    function getFormattedScript() {
+      return window.SchemaDiff.formatMigrationScript(migrationStatements, {
+        sourceName: `${sourceDb} (${sourceProfileId})`,
+        targetName: `${targetDb} (${targetProfileId})`,
+        wrapForeignKeys
+      });
+    }
+
+    container.innerHTML = `
+      <div style="padding:14px; display:flex; flex-direction:column; gap:10px;">
+        <div class="diff-options-bar">
+          <div style="display:flex; align-items:center; gap:14px;">
+            <label style="display:flex; align-items:center; gap:5px; font-weight:500;">
+              <input type="checkbox" id="diffSelectAllStmts" checked>
+              <span>Chọn tất cả (${migrationStatements.length} lệnh)</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:5px;">
+              <input type="checkbox" id="diffWrapFkChecks" ${wrapForeignKeys ? 'checked' : ''}>
+              <span>Tắt kiểm tra khóa ngoại khi chạy (Safe execution)</span>
+            </label>
+          </div>
+          <div style="display:flex; gap:6px;">
+            <button type="button" class="secondary" id="diffCopySqlBtn">📋 Sao chép</button>
+            <button type="button" class="secondary" id="diffDownloadSqlBtn">💾 Tải file .sql</button>
+            <button type="button" class="primary" id="diffOpenEditorBtn">▷ Mở trong Editor</button>
+          </div>
+        </div>
+
+        <textarea class="diff-sql-script-area" id="diffSqlScriptArea" readonly>${esc(getFormattedScript())}</textarea>
+
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
+          <span style="font-size:0.82em; color:#64748b;">
+            ⚠️ Luôn sao lưu CSDL đích trước khi thực thi script migration DDL.
+          </span>
+          <button type="button" class="primary" id="diffApplyTargetBtn" style="background:#b91c1c; border-color:#991b1b;">
+            ⚡ Áp dụng trực tiếp vào CSDL Đích (${esc(targetDb)})
+          </button>
+        </div>
+      </div>
+    `;
+
+    $('#diffWrapFkChecks')?.addEventListener('change', (e) => {
+      wrapForeignKeys = e.target.checked;
+      const scriptArea = $('#diffSqlScriptArea');
+      if (scriptArea) scriptArea.value = getFormattedScript();
+    });
+
+    $('#diffCopySqlBtn')?.addEventListener('click', async () => {
+      try {
+        await writeClipboardText(getFormattedScript());
+        toast('Đã sao chép mã Migration SQL vào clipboard', 'success');
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    });
+
+    $('#diffDownloadSqlBtn')?.addEventListener('click', () => {
+      try {
+        const text = getFormattedScript();
+        const blob = new Blob([text], { type: 'text/sql;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `migration_${sourceDb}_to_${targetDb}_${Date.now()}.sql`;
+        link.click();
+        URL.revokeObjectURL(url);
+        toast('Đã tải xuống tệp Migration SQL', 'success');
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    });
+
+    $('#diffOpenEditorBtn')?.addEventListener('click', () => {
+      const sql = getFormattedScript();
+      closeModal();
+      newQuery(sql, { profileId: targetProfileId, database: targetDb });
+      toast(`Đã mở mã Migration vào SQL Editor cho ${targetDb}`, 'info');
+    });
+
+    $('#diffApplyTargetBtn')?.addEventListener('click', async () => {
+      const activeStatements = migrationStatements.filter((s) => s.enabled);
+      if (!activeStatements.length) {
+        toast('Không có câu lệnh nào được chọn để áp dụng.', 'error');
+        return;
+      }
+
+      const hasDestructive = activeStatements.some((s) => s.severity === 'destructive');
+      const confirmMsg = `Bạn có chắc chắn muốn thực thi ${activeStatements.length} câu lệnh DDL vào CSDL "${targetDb}" không?${hasDestructive ? '\n\n⚠️ CẢNH BÁO: Script có chứa câu lệnh xóa dữ liệu (DROP)! Thao tác này không thể hoàn tác!' : ''}`;
+
+      confirmAction(confirmMsg, async () => {
+        closeModal();
+        setStatus(`Đang thực thi migration vào ${targetDb}...`);
+
+        let executedCount = 0;
+        try {
+          if (wrapForeignKeys) {
+            await call(desktop.db.query({ profileId: targetProfileId, database: targetDb, sql: 'SET FOREIGN_KEY_CHECKS = 0;' }));
+          }
+
+          for (const stmt of activeStatements) {
+            await call(desktop.db.query({ profileId: targetProfileId, database: targetDb, sql: stmt.sql, confirmed: true }));
+            executedCount++;
+          }
+
+          if (wrapForeignKeys) {
+            await call(desktop.db.query({ profileId: targetProfileId, database: targetDb, sql: 'SET FOREIGN_KEY_CHECKS = 1;' }));
+          }
+
+          toast(`Đã áp dụng thành công ${executedCount} câu lệnh migration vào ${targetDb}!`, 'success');
+          setStatus(`Migration hoàn tất: ${executedCount} câu lệnh`);
+          if (app.database === targetDb) {
+            app.tables = await call(desktop.db.tables(targetDb, targetProfileId));
+            renderSidebar();
+          }
+        } catch (err) {
+          toast(`Lỗi khi áp dụng migration (đã chạy ${executedCount}/${activeStatements.length}): ${err.message}`, 'error');
+          setStatus(`Migration thất bại tại câu lệnh ${executedCount + 1}`);
+        }
+      }, { separate: true });
+    });
+  }
+
+  document.querySelectorAll('.diff-tab-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (!btn.disabled) switchTab(btn.dataset.diffTab);
+    });
+  });
+
+  initConfigTab();
+}
+
 async function runTableMaintenance(tableName, operation) {
   if (!desktop || !app.connection || !app.database) {
     toast('Chưa chọn CSDL.', 'error');
@@ -11840,6 +12452,7 @@ const delegatedClickActions = {
   'disconnect': () => disconnect(),
   'processlist': () => showProcesslistModal(),
   'server-vars': () => showServerVarsModal(),
+  'schema-diff': () => showSchemaDiffModal(),
   'shortcuts': () => showShortcutsModal(),
   'snippets': () => openSnippetsModal(),
   'toggle-theme': () => toggleTheme(),

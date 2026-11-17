@@ -7456,6 +7456,11 @@ function closeQueryTab(index) {
 function updateChrome() {
   document.body.classList.toggle('query-mode', mode === 'query');
   document.body.classList.toggle('transfer-mode', mode === 'transfer');
+  const envValue = connectionEnvironment(app.connection).value;
+  document.body.classList.toggle('env-production', envValue === 'production');
+  document.body.classList.toggle('env-staging', envValue === 'staging');
+  document.body.classList.toggle('env-local', envValue === 'local');
+  document.body.classList.toggle('conn-readonly', connectionIsReadOnly(app.connection?.id));
   const label = mode === 'query' ? 'QUERY' : mode === 'history' ? 'WORKSPACE' : mode === 'data' ? 'TABLE' : mode.toUpperCase();
   const title = mode === 'transfer' ? 'Tác vụ database' : mode === 'backups' ? 'Backups' : mode === 'query' ? 'SQL Editor' : mode === 'history' ? 'Lịch sử truy vấn' : (table || app.database || 'Workspace');
   $('#title').innerHTML = `${esc(title)} <span>${label}</span> ${app.connection ? connectionEnvironmentBadge(app.connection) : ''}`;

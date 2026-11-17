@@ -1218,6 +1218,9 @@ textarea.inline-cell-editor:focus {
 #filterMode { width: 140px; min-width: 140px; flex-shrink: 0; }
 .filter-group { min-width: 0; margin: 10px 0; padding: 10px; border: 1px solid #cbd5e1; border-radius: 6px; }
 .filter-group-actions, .filter-rule { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+.filter-rule:has(.filter-list-values) { align-items: flex-start; }
+.filter-list-values { flex: 1 1 240px; min-width: 0; }
+.filter-list-value { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
 #tableFilterEditor { max-height: 78vh; overflow: hidden; display: flex; flex-direction: column; }
 #filterGroups { min-height: 0; overflow: auto; flex: 1 1 auto; padding-right: 4px; }
 #tableFilterEditor select, #tableFilterEditor input { width: auto; min-width: 0; max-width: 100%; flex: 1 1 130px; }

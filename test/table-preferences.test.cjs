@@ -26,6 +26,10 @@ test('view capture excludes all filter values by default; opt-in round trips exa
   assert.deepEqual(Preferences.normalize(copy(saved), columns), saved);
   assert.ok(Object.isFrozen(saved.filters.filterTree.items[1].items[0]));
   assert.deepEqual(state.filterTree, filterTree);
+  const listState = { ...state, filterTree: { version: 1, op: 'OR', items: [{ column: 'name', operator: 'in', value: ['', 'a,b', 'NULL'] }, { column: 'id', operator: 'not-in', value: ['9007199254740993'] }] } };
+  assert.equal(Preferences.capture(listState, columns).filters, null);
+  const listView = Preferences.capture(listState, columns, true);
+  assert.deepEqual(Preferences.normalize(copy(listView), columns).filters.filterTree, listState.filterTree);
 });
 
 test('preferences fail as a whole for metadata drift, inherited/unknown fields and invalid filters', () => {

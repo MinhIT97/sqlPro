@@ -8,6 +8,25 @@ function setup() {
   session.raw = async (sql, params) => { calls.push({ sql, params }); return /COUNT/.test(sql) ? { rows: [{ total: 20 }] } : { result: [{ a: 1, b: 1, label: 'x' }, { a: 1, b: 2, label: 'x' }, { a: 1, b: 3, label: 'x' }] }; };
   return { session, calls };
 }
+test('grid, COUNT and column metadata use server-side parameters; generic raw calls retain their explicit protocol', async () => {
+  const session = new DatabaseSession({}), calls = [];
+  const metadata = [{ name: 'id', type: 'int', nullable: 'NO', keyType: 'PRI', extra: '', position: 1 }, { name: 'label', type: 'text', keyType: '', position: 2 }];
+  session.connection = {
+    execute(sql, params, callback) {
+      calls.push({ protocol: 'execute', sql, params });
+      callback(null, /information_schema/.test(sql) ? metadata : /COUNT/.test(sql) ? [{ total: 1 }] : [{ id: 1, label: "a\\b'" }]);
+    },
+    query(sql, params, callback) { calls.push({ protocol: 'query', sql, params }); callback(null, []); }
+  };
+  const options = { database: "db'\\", table: 't', searchColumn: 'label', searchMode: 'exact', search: "a\\b'" };
+  await session.tableData(options); await session.countTableRows(options);
+  assert.deepEqual(calls.map(call => call.protocol), ['execute', 'execute', 'execute']);
+  assert.deepEqual(calls[0].params, [options.database, 't']);
+  assert.equal(calls[1].params[0], options.search);
+  assert.equal(calls[1].sql.includes(options.search), false);
+  await session.raw('SELECT 1'); assert.equal(calls.at(-1).protocol, 'query');
+  assert.equal(session.buildMysqlOptions().maxPreparedStatements, 64);
+});
 test('paging reads immediately, counts only on request and caches count across sort changes', async () => {
   const { session, calls } = setup(); const options = { database: 'd', table: 't', pageSize: 2 };
   const first = await session.tableData(options);

@@ -5988,7 +5988,7 @@ function tableFilterDialog() {
   };
   const draft = app.filterTree ? JSON.parse(JSON.stringify(app.filterTree)) : { version: 1, op: 'AND', items: [firstRule()] };
   modal(`<div id="tableFilterEditor"><h2>Bộ lọc AND/OR</h2><p>${esc(target.database)}.${esc(target.table)} · Tối đa 20 điều kiện, 8 nhóm, 3 mức.</p>
-    <div id="filterGroups"></div><p class="hint">Kết hợp bằng AND với tìm kiếm nhanh đang áp dụng. Giữ nguyên khoảng trắng và chuỗi rỗng; NULL chọn bằng toán tử riêng. Ngày giờ dùng giá trị SQL theo phiên database.</p>
+    <div id="filterGroups"></div><p class="hint">Kết hợp AND với tìm nhanh. IN/NOT IN: mỗi ô là một giá trị, tối đa 20 ô/danh sách, 100 giá trị/bộ lọc. Giữ khoảng trắng và chuỗi rỗng; IN/NOT IN không chọn dòng NULL, hãy thêm điều kiện Là NULL bằng OR nếu cần. Ngày giờ theo phiên database.</p>
     <pre id="groupFilterPreview" class="group-filter-preview" aria-label="Xem trước điều kiện"></pre><p id="groupFilterError" role="status" aria-live="polite"></p>
     <div class="actions"><button type="button" id="removeGroupFilter">Xóa bộ lọc AND/OR</button><button type="button" data-click="close-modal">Hủy</button><button type="button" class="primary" id="applyGroupFilter">Áp dụng (Ctrl+Enter)</button></div></div>`, true);
   const editor = $('#tableFilterEditor');
@@ -6019,11 +6019,12 @@ function tableFilterDialog() {
         ${path.length ? `<button type="button" data-filter-action="remove" data-filter-path="${key}">Xóa nhóm</button>` : ''}</div>
         ${node.items.map((item, index) => html(item, [...path, index])).join('')}</fieldset>`;
       const column = app.columns.find(entry => entry.name === node.column), operators = Filters.operators(column || {});
-      const isNull = ['is-null', 'not-null'].includes(node.operator), between = node.operator === 'between';
-      const values = between ? node.value : [node.value];
+      const isNull = ['is-null', 'not-null'].includes(node.operator), between = node.operator === 'between', list = ['in', 'not-in'].includes(node.operator);
+      const values = between || list ? node.value : [node.value];
+      const input = (value, index) => `<input type="text" maxlength="200" value="${esc(value ?? '')}" data-filter-field="value" data-filter-index="${index}" data-filter-path="${key}" aria-label="${list ? `Giá trị danh sách ${index + 1}` : between ? index ? 'Đến giá trị' : 'Từ giá trị' : 'Giá trị điều kiện'}" placeholder="${between ? index ? 'Đến' : 'Từ' : 'Giá trị'}">`;
       return `<div class="filter-rule"><select data-filter-field="column" data-filter-path="${key}" aria-label="Cột điều kiện">${app.columns.map(entry => `<option value="${esc(entry.name)}" ${node.column === entry.name ? 'selected' : ''}>${esc(entry.name)}</option>`).join('')}</select>
         <select data-filter-field="operator" data-filter-path="${key}" aria-label="Toán tử điều kiện">${operators.map(operator => `<option value="${operator}" ${node.operator === operator ? 'selected' : ''}>${esc(Filters.labels[operator])}</option>`).join('')}</select>
-        ${isNull ? '<span class="muted">Không cần giá trị</span>' : (Array.isArray(values) ? values : ['', '']).map((value, index) => `<input type="text" maxlength="200" value="${esc(value ?? '')}" data-filter-field="value" data-filter-index="${index}" data-filter-path="${key}" aria-label="${between ? index ? 'Đến giá trị' : 'Từ giá trị' : 'Giá trị điều kiện'}" placeholder="${between ? index ? 'Đến' : 'Từ' : 'Giá trị'}">`).join('')}
+        ${isNull ? '<span class="muted">Không cần giá trị</span>' : list ? `<div class="filter-list-values">${(Array.isArray(values) ? values : []).map((value, index) => `<div class="filter-list-value">${input(value, index)}<button type="button" data-filter-action="remove-value" data-filter-index="${index}" data-filter-path="${key}" aria-label="Xóa giá trị ${index + 1}">×</button></div>`).join('')}<button type="button" data-filter-action="add-value" data-filter-path="${key}" ${values?.length >= Filters.limits.list ? 'disabled' : ''}>＋ Giá trị</button></div>` : (Array.isArray(values) ? values : ['', '']).map(input).join('')}
         <button type="button" data-filter-action="remove" data-filter-path="${key}" aria-label="Xóa điều kiện">×</button></div>`;
     };
     $('#filterGroups').innerHTML = html(draft); preview();
@@ -6039,7 +6040,16 @@ function tableFilterDialog() {
     if (action === 'rule' && node.items && count.rules < Filters.limits.rules) node.items.push(firstRule());
     else if (action === 'group' && node.items && path.length < 2 && count.groups < Filters.limits.groups && count.rules < Filters.limits.rules) node.items.push({ op: 'AND', items: [firstRule()] });
     else if (action === 'remove' && path.length) nodeAt(path.slice(0, -1)).items.splice(path.at(-1), 1);
+    else if (['in', 'not-in'].includes(node.operator) && Array.isArray(node.value)) {
+      if (action === 'add-value' && node.value.length < Filters.limits.list) node.value.push('');
+      else if (action === 'remove-value') {
+        const index = Number(button.dataset.filterIndex);
+        if (Number.isInteger(index) && index >= 0 && index < node.value.length) node.value.splice(index, 1);
+      }
+    }
     render();
+    if (action === 'add-value') editor.querySelector(`[data-filter-field="value"][data-filter-path="${path.join('.')}"][data-filter-index="${node.value.length - 1}"]`)?.focus();
+    else if (action === 'remove-value') editor.querySelector(`[data-filter-action="add-value"][data-filter-path="${path.join('.')}"]`)?.focus();
   });
   const edit = event => {
     const control = event.target.closest('[data-filter-field]');
@@ -6047,7 +6057,7 @@ function tableFilterDialog() {
     const path = pathOf(control), node = path && nodeAt(path), field = control.dataset.filterField;
     if (!node || !current()) { preview(); return; }
     if (field === 'value' && event.type === 'input') {
-      if (node.operator === 'between') node.value[Number(control.dataset.filterIndex)] = control.value;
+      if (['between', 'in', 'not-in'].includes(node.operator)) node.value[Number(control.dataset.filterIndex)] = control.value;
       else node.value = control.value;
       preview();
     } else if (event.type === 'change' && field !== 'value') {
@@ -6056,7 +6066,7 @@ function tableFilterDialog() {
         if (field === 'column') { node.column = control.value; node.operator = Filters.operators(app.columns.find(column => column.name === node.column) || {})[0]; }
         else node.operator = control.value;
         if (['is-null', 'not-null'].includes(node.operator)) delete node.value;
-        else node.value = node.operator === 'between' ? ['', ''] : '';
+        else node.value = node.operator === 'between' ? ['', ''] : ['in', 'not-in'].includes(node.operator) ? [''] : '';
       }
       render();
       editor.querySelector(`[data-filter-field="${field}"][data-filter-path="${path.join('.')}"]`)?.focus();

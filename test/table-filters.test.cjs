@@ -50,6 +50,40 @@ test('invalid or empty trees never become missing predicates or silently dropped
   assert.throws(() => Filters.compile(tree(rule()), [...columns, columns[0]]), { code: 'INVALID_FILTER' });
 });
 
+test('IN and NOT IN bind typed lists without splitting commas, trimming text or losing precision', () => {
+  const values = ['', ' NULL ', 'NULL', 'a,b', "x') OR 1=1 --", '%_\\='];
+  const input = tree(rule('title`', 'in', values), { op: 'OR', items: [rule('id', 'not-in', ['9223372036854775800', '2']),
+    rule('total', 'in', ['12345678901234567890.01', '1.00']), rule('date', 'not-in', ['2026-11-17'])] });
+  const before = JSON.stringify(input), plan = compile(input);
+  assert.equal(plan.where, '(`title``` IN (?, ?, ?, ?, ?, ?) AND (`id` NOT IN (?, ?) OR `total` IN (?, ?) OR `date` NOT IN (?)))');
+  assert.deepEqual(plan.params, [...values, '9223372036854775800', '2', '12345678901234567890.01', '1.00', '2026-11-17']);
+  assert.equal(plan.where.includes('OR 1=1'), false);
+  assert.equal(JSON.stringify(input), before);
+  assert.ok(Object.isFrozen(plan.tree.items[0].value));
+  assert.equal(plan.key, compile(plan.tree).key);
+  assert.deepEqual(Filters.compile(tree(rule('choice', 'in', ['a,b'])), [{ name: 'choice', type: "enum('a,b','x')" }]).params, ['a,b']);
+});
+
+test('list cardinality, total values, unsupported types and any invalid member fail the entire predicate', async () => {
+  const list = Array.from({ length: 20 }, (_, index) => String(index));
+  assert.equal(compile(tree(...Array.from({ length: 5 }, () => rule('id', 'in', list)))).params.length, 100);
+  const bad = [[], '1,2', ['1', null], ['1', 2], Array(2), Array.from({ length: 21 }, () => '1'), ['1', '1.5'], ['1', 'x']];
+  for (const operator of ['in', 'not-in']) {
+    for (const values of bad) assert.throws(() => compile(tree(rule('id', operator, values))), { code: 'INVALID_FILTER' });
+    assert.throws(() => compile(tree(rule('date', operator, ['2026-02-30']))), { code: 'INVALID_FILTER' });
+    assert.throws(() => compile(tree(rule('title`', operator, ['x'.repeat(201)]))), { code: 'INVALID_FILTER' });
+    for (const column of ['payload', 'data', 'shape']) assert.throws(() => compile(tree(rule(column, operator, ['x']))), { code: 'INVALID_FILTER' });
+  }
+  assert.throws(() => compile(tree(...Array.from({ length: 5 }, () => rule('id', 'in', list)), rule())), /100 giá trị/);
+  assert.throws(() => compile(tree(...Array.from({ length: 5 }, () => rule('id', 'in', list)), rule('title`', 'prefix', 'x'))), /100 giá trị/);
+  const session = new DatabaseSession({}); let reads = 0;
+  session.listColumns = async () => columns;
+  session.raw = async () => { reads++; return { result: [] }; };
+  await assert.rejects(session.tableData({ database: 'd', table: 't', filterTree: tree(rule('id', 'in', ['1', null])) }), { code: 'INVALID_FILTER' });
+  await assert.rejects(session.countTableRows({ database: 'd', table: 't', filterTree: tree(rule('id', 'not-in', [])) }), { code: 'INVALID_FILTER' });
+  assert.equal(reads, 0);
+});
+
 test('depth/group/rule/value quotas are enforced before returning any partial predicate', () => {
   assert.equal(compile(tree(...Array.from({ length: 20 }, () => rule()))).rules, 20);
   assert.throws(() => compile(tree(...Array.from({ length: 21 }, () => rule()))), { code: 'INVALID_FILTER' });
@@ -73,6 +107,13 @@ test('advanced filters bind COUNT/cache/cursor and combine with quick search thr
   const changed = { ...options, filterTree: tree(rule('id', 'gte', '2')) };
   assert.equal((await session.countTableRows(changed)).cached, false);
   await session.tableData({ ...changed, page: 2, cursor: first.nextCursor }); assert.match(calls.at(-1).sql, /OFFSET/);
+  const lists = { ...options, filterTree: tree(rule('id', 'in', ['1', '2'])) };
+  const listPage = await session.tableData(lists);
+  assert.equal((await session.countTableRows(lists)).cached, false);
+  assert.equal((await session.countTableRows(lists)).cached, true);
+  const listChanged = { ...lists, filterTree: tree(rule('id', 'in', ['1', '3'])) };
+  assert.equal((await session.countTableRows(listChanged)).cached, false);
+  await session.tableData({ ...listChanged, page: 2, cursor: listPage.nextCursor }); assert.match(calls.at(-1).sql, /OFFSET/);
   const before = calls.length;
   await assert.rejects(session.tableData({ ...options, filterTree: tree() }), { code: 'INVALID_FILTER' });
   assert.equal(calls.length, before);

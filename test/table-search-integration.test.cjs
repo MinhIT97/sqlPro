@@ -32,6 +32,11 @@ test('table search matches grid, explicit COUNT and streamed export on a real se
     for (const [id, label, note] of rows) await admin.query('INSERT INTO samples (id,label,note,amount,happened) VALUES (?,?,?,?,?)', [id, label, note, '12345678901234567890.12', id <= 3 ? '2026-11-01' : '2026-11-17']);
     await admin.query('CREATE TABLE composite_samples (a INT, b INT, label VARCHAR(30), PRIMARY KEY(a,b)) ENGINE=InnoDB');
     for (const [a, b] of [[1, 1], [1, 2], [2, 1], [2, 2], [3, 1]]) await admin.query('INSERT INTO composite_samples VALUES (?,?,?)', [a, b, `${a}.${b}`]);
+    await admin.query('CREATE TABLE list_variants (id INT PRIMARY KEY, ci VARCHAR(200) COLLATE utf8mb4_unicode_ci, cs VARCHAR(200) COLLATE utf8mb4_bin, happened TIMESTAMP NULL) ENGINE=InnoDB');
+    await admin.query("SET SESSION time_zone = '+00:00'");
+    for (const [id, text] of [[1, 'Alpha'], [2, 'alpha'], [3, needle], [4, null], [5, ''], [6, 'a,b'], [7, 'NULL']]) {
+      await admin.query('INSERT INTO list_variants VALUES (?,?,?,?)', [id, text, text, '2026-11-17 00:00:00']);
+    }
     await session.connect();
     await session.runQuery('START TRANSACTION');
     const before = (await session.raw('SELECT @@SESSION.sql_mode AS mode, @@SESSION.autocommit AS autocommit')).rows[0];
@@ -56,7 +61,14 @@ test('table search matches grid, explicit COUNT and streamed export on a real se
       ['integer range and decimal comparison', { filterTree: group('AND', rule('id', 'between', ['2', '4']), rule('amount', 'eq', '12345678901234567890.12')) }, [2, 3, 4]],
       ['DATE range retains SQL calendar values', { filterTree: group('AND', rule('happened', 'between', ['2026-11-01', '2026-11-02'])) }, [1, 2, 3]],
       ['generated columns are readable predicates', { filterTree: group('AND', rule('doubled', 'gte', '10')) }, [5, 6, 7]],
-      ['advanced prefix escapes wildcards', { filterTree: group('AND', rule('label', 'prefix', needle)) }, [1, 3]]
+      ['advanced prefix escapes wildcards', { filterTree: group('AND', rule('label', 'prefix', needle)) }, [1, 3]],
+      ['IN text uses exact members and native collation', { filterTree: group('AND', rule('label', 'in', [needle, '', 'plain'])) }, [1, 5, 7]],
+      ['NOT IN excludes NULL but retains empty text', { filterTree: group('AND', rule('note', 'not-in', ['NULL', 'x'])) }, [2, 6]],
+      ['NULL text and empty values are separate list members', { filterTree: group('AND', rule('note', 'in', ['NULL', ''])) }, [2, 3, 6]],
+      ['OR adds NULL explicitly to NOT IN', { filterTree: group('OR', rule('note', 'not-in', ['NULL', 'x']), { column: 'note', operator: 'is-null' }) }, [1, 2, 5, 6, 7]],
+      ['typed integer and generated column lists', { filterTree: group('AND', rule('id', 'in', ['1', '3', '5']), rule('doubled', 'not-in', ['6'])) }, [1, 5]],
+      ['typed decimal list retains long digits', { filterTree: group('AND', rule('amount', 'in', ['12345678901234567890.12', '0'])) }, [1, 2, 3, 4, 5, 6, 7]],
+      ['typed date list combines with quick search', { search: needle, searchColumn: 'label', filterTree: group('AND', rule('happened', 'in', ['2026-11-17'])) }, [4]]
     ];
     for (const [label, search, expected] of cases) await t.test(label, async () => {
       const options = { database, table: 'samples', pageSize: 100, orderBy: 'id', ...search };
@@ -111,7 +123,7 @@ test('table search matches grid, explicit COUNT and streamed export on a real se
         const metadata = await session.listColumns(database, 'samples');
         const scope = { profileId: 'fixture', database, table: 'samples' };
         const view = Preferences.capture({ visibleColumns: ['id', 'label'], sorts: [{ column: 'note', direction: 'DESC' }, { column: 'id', direction: 'DESC' }],
-          search: needle, searchColumn: 'label', searchMode: 'contains', filterTree: group('AND', rule('id', 'gte', '3')) }, metadata, true);
+          search: needle, searchColumn: 'label', searchMode: 'contains', filterTree: group('AND', rule('id', 'in', ['3', '4'])) }, metadata, true);
         createTablePreferences(root).save(scope, view);
         const restored = Preferences.normalize(createTablePreferences(root).read(scope).view, metadata);
         const options = { database, table: 'samples', pageSize: 100, sorts: restored.sorts, ...restored.filters };
@@ -124,6 +136,38 @@ test('table search matches grid, explicit COUNT and streamed export on a real se
         assert.deepEqual(rows.map(row => row.id), [4, 3]);
         assert.deepEqual(Object.keys(rows[0]), ['id', 'label']);
       } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    });
+    await t.test('lists preserve native collations and timestamp timezone conversion across SQL mode variants', async () => {
+      const original = (await session.raw('SELECT @@SESSION.sql_mode AS mode, @@SESSION.time_zone AS zone')).rows[0];
+      try {
+        for (const sqlMode of ['', 'STRICT_TRANS_TABLES,NO_BACKSLASH_ESCAPES,ANSI_QUOTES']) {
+          await session.raw('SET SESSION sql_mode = ?', [sqlMode]);
+          for (const [column, operator, values, expected] of [
+            ['ci', 'in', ['ALPHA'], [1, 2]], ['cs', 'in', ['Alpha'], [1]],
+            ['cs', 'not-in', ['Alpha'], [2, 3, 5, 6, 7]], ['cs', 'in', [needle, '', 'a,b', 'NULL'], [3, 5, 6, 7]]
+          ]) {
+            const options = { database, table: 'list_variants', filterTree: group('AND', rule(column, operator, values)), pageSize: 100 };
+            assert.deepEqual((await session.tableData(options)).rows.map(row => row.id), expected);
+            assert.equal((await session.countTableRows({ ...options, force: true })).total, expected.length);
+            let output = '';
+            await session.exportTableFile({ ...options, sorts: [], format: 'json' }, async chunk => { output += chunk; });
+            assert.deepEqual(JSON.parse(output).map(row => row.id), expected);
+          }
+        }
+        for (const [zone, value] of [['+00:00', '2026-11-17 00:00:00'], ['+07:00', '2026-11-17 07:00:00']]) {
+          await session.raw('SET SESSION time_zone = ?', [zone]);
+          const options = { database, table: 'list_variants', filterTree: group('AND', rule('happened', 'in', [value])), pageSize: 100 };
+          assert.equal((await session.tableData(options)).rows.length, 7);
+          assert.equal((await session.countTableRows({ ...options, force: true })).total, 7);
+          let output = '';
+          await session.exportTableFile({ ...options, format: 'json' }, async chunk => { output += chunk; });
+          assert.equal(JSON.parse(output).length, 7);
+        }
+      } finally {
+        await session.raw('SET SESSION sql_mode = ?', [original.mode]);
+        await session.raw('SET SESSION time_zone = ?', [original.zone]);
+      }
+      assert.equal((await session.raw('SELECT @@SESSION.time_zone AS zone')).rows[0].zone, original.zone);
     });
     assert.deepEqual((await session.raw('SELECT @@SESSION.sql_mode AS mode, @@SESSION.autocommit AS autocommit')).rows[0], before);
     assert.equal(session.inTransaction, true);

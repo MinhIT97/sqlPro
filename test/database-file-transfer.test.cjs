@@ -28,9 +28,14 @@ test('JSON string transport preserves nested JSON export types and large numeric
 
 function createSession(columns, rows = [], insertResult = () => ({ affectedRows: 1, info: 'Duplicates: 0' }), options = {}) {
   const session = new DatabaseSession({});
-  const calls = { inserts: [], queries: [], meta: [], transactions: [], destroyed: 0 };
+  const calls = { inserts: [], queries: [], prepared: [], meta: [], transactions: [], destroyed: 0 };
   session.listColumns = async () => columns;
   session.connection = {
+    execute(config) {
+      calls.queries.push(config);
+      calls.prepared.push(config);
+      return { async *stream() { for (const row of rows) yield row; } };
+    },
     query(config, params, callback) {
       if (typeof config === 'object' && config !== null) {
         calls.queries.push(config);
@@ -76,6 +81,19 @@ async function withTempDir(run) {
     await fs.promises.rm(directory, { recursive: true, force: true });
   }
 }
+
+test('filtered streaming export uses prepared parameters and invalid IN lists start no row stream', async () => {
+  const { session, calls } = createSession(COLUMNS, [[1, "a\\b'", 0, null, null]]);
+  const filterTree = { version: 1, op: 'AND', items: [{ column: 'name', operator: 'in', value: ["a\\b'", '', 'NULL'] }] };
+  await session.exportTableFile({ database: 'd', table: 't', format: 'json', filterTree }, async () => {});
+  assert.equal(calls.prepared.length, 1);
+  assert.deepEqual(calls.prepared[0].values, ["a\\b'", '', 'NULL']);
+  assert.match(calls.prepared[0].sql, /`name` IN \(\?, \?, \?\)/);
+  assert.equal(calls.prepared[0].sql.includes("a\\b'"), false);
+  const before = calls.queries.length;
+  await assert.rejects(session.exportTableFile({ database: 'd', table: 't', format: 'json', filterTree: { ...filterTree, items: [{ column: 'name', operator: 'in', value: [] }] } }, async () => {}), { code: 'INVALID_FILTER' });
+  assert.equal(calls.queries.length, before);
+});
 
 async function writeTemp(directory, name, content) {
   const filePath = path.join(directory, name);
@@ -204,35 +222,37 @@ test('xuất theo lô, tôn trọng backpressure và ghi đủ byte', async () =
   assert.equal((chunks.join('').match(/^4,/gm) || []).length, 1);
 });
 
-test('hủy export trả EXPORT_CANCELED kèm tiến độ một phần và giải phóng tác vụ', async () => {
-  const { session } = createSession(COLUMNS.slice(0, 2), [
-    [1, 'An'],
-    [2, 'Binh']
-  ]);
-  let yielded = 0;
-  session.connection.query = () => ({
-    async *stream() {
-      for (const row of [[1, 'An'], [2, 'Binh']]) {
-        if (yielded === 1) session.cancelTask('export-cancel');
-        yielded += 1;
-        yield row;
+test('hủy export trả EXPORT_CANCELED kèm tiến độ một phần và giải phóng tác vụ', async t => {
+  for (const filtered of [false, true]) await t.test(filtered ? 'prepared filtered stream' : 'unfiltered text stream', async () => {
+    const { session } = createSession(COLUMNS.slice(0, 2), [
+      [1, 'An'],
+      [2, 'Binh']
+    ]);
+    let yielded = 0;
+    session.connection.execute = session.connection.query = () => ({
+      async *stream() {
+        for (const row of [[1, 'An'], [2, 'Binh']]) {
+          if (yielded === 1) session.cancelTask('export-cancel');
+          yielded += 1;
+          yield row;
+        }
       }
-    }
+    });
+    await assert.rejects(
+      session.exportTableFile(
+        { database: 'sample', table: 'items', format: 'csv', taskId: 'export-cancel', ...(filtered ? { filterTree: { version: 1, op: 'AND', items: [{ column: 'id', operator: 'in', value: ['1', '2'] }] } } : {}) },
+        async () => {}
+      ),
+      (error) => {
+        assert.equal(error.code, 'EXPORT_CANCELED');
+        assert.equal(error.partial.rows, 1);
+        assert.equal(error.partial.format, 'csv');
+        return true;
+      }
+    );
+    assert.equal(session.activeTask, null);
+    assert.equal(session.dead, true);
   });
-  await assert.rejects(
-    session.exportTableFile(
-      { database: 'sample', table: 'items', format: 'csv', taskId: 'export-cancel' },
-      async () => {}
-    ),
-    (error) => {
-      assert.equal(error.code, 'EXPORT_CANCELED');
-      assert.equal(error.partial.rows, 1);
-      assert.equal(error.partial.format, 'csv');
-      return true;
-    }
-  );
-  assert.equal(session.activeTask, null);
-  assert.equal(session.dead, true);
 });
 
 test('nhập CSV ánh xạ cột, validate kiểu và giao dịch theo lô', async () => {

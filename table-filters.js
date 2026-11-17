@@ -5,8 +5,8 @@
 }(typeof globalThis !== 'undefined' ? globalThis : this, function createTableFilters(RowValues) {
   'use strict';
 
-  const limits = Object.freeze({ depth: 3, groups: 8, rules: 20, value: 200 });
-  const labels = Object.freeze({ eq: 'Bằng', ne: 'Khác', gt: 'Lớn hơn', gte: 'Lớn hơn hoặc bằng', lt: 'Nhỏ hơn', lte: 'Nhỏ hơn hoặc bằng', between: 'Trong khoảng', contains: 'Chứa', prefix: 'Bắt đầu bằng', 'is-null': 'Là NULL', 'not-null': 'Khác NULL' });
+  const limits = Object.freeze({ depth: 3, groups: 8, rules: 20, value: 200, list: 20, values: 100 });
+  const labels = Object.freeze({ eq: 'Bằng', ne: 'Khác', gt: 'Lớn hơn', gte: 'Lớn hơn hoặc bằng', lt: 'Nhỏ hơn', lte: 'Nhỏ hơn hoặc bằng', between: 'Trong khoảng', in: 'Thuộc danh sách (IN)', 'not-in': 'Không thuộc (NOT IN)', contains: 'Chứa', prefix: 'Bắt đầu bằng', 'is-null': 'Là NULL', 'not-null': 'Khác NULL' });
   const fail = message => { throw Object.assign(new Error(message), { code: 'INVALID_FILTER' }); };
   const quote = value => '`' + value.replace(/`/g, '``') + '`';
   const nullOperators = ['is-null', 'not-null'];
@@ -14,8 +14,8 @@
   function operators(column) {
     if (!column?.type) return [...nullOperators];
     const base = RowValues.describe(column).base;
-    if (/^(?:char|varchar|tinytext|text|mediumtext|longtext|enum|set)$/.test(base)) return ['eq', 'ne', 'contains', 'prefix', ...nullOperators];
-    if (/^(?:tinyint|smallint|mediumint|int|integer|bigint|decimal|numeric|float|double|real|bool|boolean|year|date|datetime|timestamp|time)$/.test(base)) return ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'between', ...nullOperators];
+    if (/^(?:char|varchar|tinytext|text|mediumtext|longtext|enum|set)$/.test(base)) return ['eq', 'ne', 'contains', 'prefix', 'in', 'not-in', ...nullOperators];
+    if (/^(?:tinyint|smallint|mediumint|int|integer|bigint|decimal|numeric|float|double|real|bool|boolean|year|date|datetime|timestamp|time)$/.test(base)) return ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'between', 'in', 'not-in', ...nullOperators];
     return [...nullOperators];
   }
 
@@ -28,6 +28,10 @@
     }
     let groups = 0, rules = 0;
     const params = [], seen = new Set();
+    const bind = values => {
+      if (params.length + values.length > limits.values) fail(`Bộ lọc chỉ nhận tối đa ${limits.values} giá trị trên toàn cây.`);
+      params.push(...values);
+    };
     const value = (raw, column) => {
       if (typeof raw !== 'string' || raw.length > limits.value) fail(`Giá trị lọc phải là chuỗi tối đa ${limits.value} ký tự.`);
       try {
@@ -59,20 +63,25 @@
       }
       if (!Object.hasOwn(node, 'value')) fail('Điều kiện thiếu giá trị.');
       let normalized, where;
-      if (operator === 'between') {
+      if (operator === 'in' || operator === 'not-in') {
+        if (!Array.isArray(node.value) || !node.value.length || node.value.length > limits.list) fail(`Danh sách cần từ 1 đến ${limits.list} giá trị; NULL dùng toán tử riêng.`);
+        normalized = Object.freeze(Array.from(node.value, raw => value(raw, column)));
+        bind(normalized);
+        where = `${reference} ${operator === 'not-in' ? 'NOT IN' : 'IN'} (${normalized.map(() => '?').join(', ')})`;
+      } else if (operator === 'between') {
         if (!Array.isArray(node.value) || node.value.length !== 2) fail('Khoảng lọc cần đúng hai giá trị.');
         normalized = Object.freeze(Array.from(node.value, raw => value(raw, column)));
-        params.push(...normalized); where = `${reference} BETWEEN ? AND ?`;
+        bind(normalized); where = `${reference} BETWEEN ? AND ?`;
       } else if (operator === 'contains' || operator === 'prefix') {
         // LIKE input is a search string, not an ENUM/SET assignment. Keep empty
         // strings and whitespace exact; never silently drop a rule.
         if (typeof node.value !== 'string' || node.value.length > limits.value) fail('Giá trị tìm kiếm vượt giới hạn hoặc không hợp lệ.');
         normalized = node.value;
         const literal = normalized.replace(/[=%_]/g, character => `=${character}`);
-        params.push(operator === 'prefix' ? `${literal}%` : `%${literal}%`);
+        bind([operator === 'prefix' ? `${literal}%` : `%${literal}%`]);
         where = `${reference} LIKE ? ESCAPE '='`;
       } else {
-        normalized = value(node.value, column); params.push(normalized);
+        normalized = value(node.value, column); bind([normalized]);
         where = `${reference} ${{ eq: '=', ne: '<>', gt: '>', gte: '>=', lt: '<', lte: '<=' }[operator]} ?`;
       }
       return { tree: Object.freeze({ column: column.name, operator, value: normalized }), where };

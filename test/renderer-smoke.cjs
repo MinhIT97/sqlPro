@@ -1348,6 +1348,63 @@ app.whenReady().then(async () => {
     assert.equal(calls.filter(call => call.name === 'db:table-data').length, before);
     await evaluate("app.columns=groupSavedColumns;delete window.groupSavedColumns;closeModal();renderDataView()");
   });
+  await check('IN lists support exact individual values, keyboard apply, count/export and opt-in restart restoration', async () => {
+    const values = ['', 'NULL', 'a,b', "x') OR 1=1 --", ...Array.from({ length: 16 }, (_, index) => `item_${index}`)];
+    await evaluate("app.filterTree=null;app.search='';app.searchColumn=null;app.searchMode='contains';renderDataView();tableFilterDialog();{let c=$('[data-filter-field=\"column\"]');c.value='name';c.dispatchEvent(new Event('change',{bubbles:true}));let o=$('[data-filter-field=\"operator\"]');o.value='in';o.dispatchEvent(new Event('change',{bubbles:true}));}");
+    for (let index = 0; index < values.length; index++) {
+      if (index) await evaluate("$('[data-filter-action=\"add-value\"]').click()");
+      await evaluate(`{const input=$('[data-filter-field="value"][data-filter-index="${index}"]');input.value=${JSON.stringify(values[index])};input.dispatchEvent(new Event('input',{bubbles:true}));}`);
+    }
+    assert.equal(await evaluate("$('[data-filter-action=\"add-value\"]').disabled && !$('#applyGroupFilter').disabled"), true);
+    assert.equal(await evaluate("$('#groupFilterPreview').textContent.includes('OR 1=1')"), false);
+    await evaluate("$('[data-filter-action=\"remove-value\"][data-filter-index=\"19\"]').click()");
+    assert.equal(await evaluate("document.activeElement===$('[data-filter-action=\"add-value\"]') && !$('[data-filter-action=\"add-value\"]').disabled"), true);
+    await evaluate(`$('[data-filter-action="add-value"]').click();{const input=$('[data-filter-field="value"][data-filter-index="19"]');input.value=${JSON.stringify(values[19])};input.dispatchEvent(new Event('input',{bubbles:true}));}`);
+    win.setContentSize(940, 700);
+    await evaluate("document.body.classList.remove('dark-theme')");
+    await captureReview('filter-list-small', () => evaluate("$('#toast').style.display='none';$('[data-filter-field=\"value\"][data-filter-index=\"19\"]').focus()"));
+    assert.equal(await evaluate("$('#tableFilterEditor').scrollWidth<=$('#tableFilterEditor').clientWidth && $('#applyGroupFilter').getBoundingClientRect().bottom<=innerHeight"), true);
+    await evaluate("document.body.classList.add('dark-theme')");
+    await captureReview('filter-list-small-dark', () => evaluate("$('[data-filter-field=\"value\"][data-filter-index=\"19\"]').focus()"));
+    for (const type of ['keyDown', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return', modifiers: ['control'] });
+    await until("!$('#modal').open && Boolean($('#groupFilterBtn')) && app.filterTree?.items[0].operator==='in'");
+    const expected = { version: 1, op: 'AND', items: [{ column: 'name', operator: 'in', value: values }] };
+    assert.deepEqual(calls.filter(call => call.name === 'db:table-data').at(-1).args[0].filterTree, expected);
+    await evaluate("$('#countRowsBtn').click()");
+    await until("!$('#countRowsBtn') || !$('#countRowsBtn').disabled");
+    assert.deepEqual(calls.filter(call => call.name === 'db:table-count').at(-1).args[0].filterTree, expected);
+    await evaluate("transfer('export');$('#exportFiltered').checked=true;$('#exportGo').click()");
+    await until("!$('#modal').open");
+    assert.deepEqual(calls.filter(call => call.name === 'db:export-file').at(-1).args[0].filterTree, expected);
+    await evaluate("renderDataView();tablePreferenceDialog()");
+    await until("!$('#saveTablePreference').disabled");
+    assert.equal(await evaluate("$('#saveTableFilterValues').checked"), false);
+    await evaluate("$('#saveTableFilterValues').checked=true;$('#saveTablePreference').click()");
+    await until("$('#tablePreferenceStatus').textContent.includes('Đã lưu')");
+    const saved = calls.filter(call => call.name === 'table-preferences:save').at(-1);
+    assert.deepEqual(saved.args[1].filters.filterTree, expected);
+    await evaluate("closeModal();selectTable('users')");
+    await until("Boolean($('#groupFilterBtn')) && app.filterTree?.items[0].operator==='in'");
+    assert.deepEqual(await evaluate('app.filterTree'), expected);
+    tablePreferencesRepository.remove(saved.args[0]);
+    await evaluate("app.filterTree=null;app.sorts=null;renderDataView()");
+    win.setContentSize(1344, 835);
+  });
+  await check('empty and invalid numeric lists block apply; value budgets and Escape preserve the active predicate', async () => {
+    await evaluate("tableFilterDialog();{const o=$('[data-filter-field=\"operator\"]');o.value='not-in';o.dispatchEvent(new Event('change',{bubbles:true}));}$('[data-filter-action=\"remove-value\"]').click()");
+    const before = calls.filter(call => call.name === 'db:table-data').length;
+    assert.equal(await evaluate("$('#applyGroupFilter').disabled"), true);
+    await evaluate("$('[data-filter-action=\"add-value\"]').click();{const v=$('[data-filter-field=\"value\"]');v.value='1.5';v.dispatchEvent(new Event('input',{bubbles:true}));}$('#tableFilterEditor').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,bubbles:true}))");
+    assert.equal(await evaluate("$('#modal').open && app.filterTree===null && $('#applyGroupFilter').disabled"), true);
+    await evaluate("closeModal();app.filterTree=SqlTableFilters.compile({version:1,op:'AND',items:Array.from({length:5},()=>({column:'id',operator:'in',value:Array.from({length:20},(_,i)=>String(i))}))},app.columns).tree;renderDataView();tableFilterDialog();$('[data-filter-action=\"rule\"][data-filter-path=\"\"]').click();{const v=$('[data-filter-field=\"value\"][data-filter-path=\"5\"]');v.value='1';v.dispatchEvent(new Event('input',{bubbles:true}));}$('#applyGroupFilter').click()");
+    assert.match(await evaluate("$('#groupFilterError').textContent"), /100 giá trị/);
+    assert.equal(await evaluate("$('#applyGroupFilter').disabled && app.filterTree.items.length===5"), true);
+    assert.equal(calls.filter(call => call.name === 'db:table-data').length, before);
+    for (const type of ['keyDown', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Escape' });
+    await until("!$('#modal').open");
+    assert.equal(await evaluate("app.filterTree.items.length"), 5);
+    await evaluate("app.filterTree=null;renderDataView()");
+  });
   await check('column visibility and mixed sorts preserve hidden PK editing, export snapshot and keyboard control', async () => {
     await evaluate("mode='data';app.visibleColumns=null;app.sorts=null;app.orderBy=null;app.orderDir='ASC';renderDataView();$('#tableViewBtn').click()");
     const reads = calls.filter(call => call.name === 'db:table-data').length;

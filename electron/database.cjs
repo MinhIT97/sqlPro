@@ -899,7 +899,7 @@ class DatabaseSession {
     this.autocommit = true;
     this.metadata = new Map();
     this.tableDataService = new TableDataService({
-      columns: (...args) => this.listColumns(...args), raw: (...args) => this.raw(...args),
+      columns: (...args) => this.listColumns(...args), raw: (sql, params) => this.raw(sql, params, null, { prepared: true }),
       quoteId, tableRef, serializeRow, originalHashes, keyParameter: rowKeyParameter, searchParameter: coerceValue
     });
   }
@@ -1006,6 +1006,7 @@ class DatabaseSession {
       bigNumberStrings: true,
       dateStrings: true,
       jsonStrings: true,
+      maxPreparedStatements: 64,
       // UPDATE affectedRows counts matched rows, including assignments to the same value.
       flags: ['FOUND_ROWS'],
       multipleStatements: false,
@@ -1156,12 +1157,13 @@ class DatabaseSession {
     this.autocommit = autocommit;
   }
 
-  raw(sql, params = [], timeoutMs = null) {
+  raw(sql, params = [], timeoutMs = null, { prepared = false } = {}) {
     this.ensureOpen();
     this.transactionRevision = (this.transactionRevision || 0) + 1;
     return new Promise((resolve, reject) => {
       const command = Number.isFinite(timeoutMs) && timeoutMs > 0 ? { sql, timeout: timeoutMs } : sql;
-      this.connection.query(command, params, (error, result, fields) => {
+      const method = prepared ? 'execute' : 'query';
+      this.connection[method](command, params, (error, result, fields) => {
         if (error) {
           reject(error);
           return;
@@ -1285,7 +1287,7 @@ class DatabaseSession {
          FROM information_schema.COLUMNS
         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
         ORDER BY ORDINAL_POSITION`,
-      [database, table]
+      [database, table], null, { prepared: true }
     );
     const columns = result.map((row) => ({
       name: row.name,
@@ -2011,7 +2013,8 @@ class DatabaseSession {
         await emit(`${selected.map((column) => ExportValues.csvField(column.name, delimiter)).join(delimiter)}\n`);
       }
       throwIfCanceled();
-      const query = this.connection.query({ sql, values: where.params, rowsAsArray: true, disableEval: true });
+      const command = { sql, values: where.params, rowsAsArray: true, disableEval: true };
+      const query = where.params.length ? this.connection.execute(command) : this.connection.query(command);
       let firstRow = true;
       try {
         for await (const row of query.stream()) {

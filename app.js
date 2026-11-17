@@ -5788,14 +5788,26 @@ async function inlineEditCell(td) {
   });
 }
 
+function tableSearchSummary(state) {
+  if (state.searchMode === 'is-null' || state.searchMode === 'not-null') {
+    return state.searchColumn ? `${state.searchColumn} ${state.searchMode === 'is-null' ? 'là NULL' : 'khác NULL'}` : '';
+  }
+  if (!String(state.search || '').trim()) return '';
+  const label = { contains: 'Chứa', exact: 'Bằng', prefix: 'Bắt đầu bằng' }[state.searchMode] || 'Chứa';
+  return `${state.search} · ${label}${state.searchColumn ? ` · ${state.searchColumn}` : ''}`;
+}
+
 function renderDataView() {
   const readOnly = connectionIsReadOnly();
   const editable = !readOnly && app.primaryKey.length > 0;
+  const nullSearch = app.searchMode === 'is-null' || app.searchMode === 'not-null';
+  const canResetSearch = Boolean(app.search || app.searchColumn || app.searchMode && app.searchMode !== 'contains');
   $('#workspace').innerHTML = `
     <div class="toolbar">
-      <input class="filter" id="filter" placeholder="⌕  Tìm trong bảng…" value="${esc(app.search)}">
+      <input class="filter" id="filter" aria-label="Giá trị tìm kiếm" maxlength="200" placeholder="${nullSearch ? 'Không cần nhập giá trị' : '⌕  Tìm trong bảng…'}" value="${esc(app.search)}" ${nullSearch ? 'disabled' : ''} title="Tối đa 200 ký tự; % và _ là ký tự thường.">
       <select id="filterColumn" aria-label="Cột tìm kiếm"><option value="">Tất cả cột</option>${app.columns.map((column) => `<option value="${esc(column.name)}" ${app.searchColumn === column.name ? 'selected' : ''}>${esc(column.name)}</option>`).join('')}</select>
-      <select id="filterMode" aria-label="Cách tìm kiếm"><option value="contains">Chứa</option><option value="exact" ${app.searchMode === 'exact' ? 'selected' : ''}>Bằng</option></select>
+      <select id="filterMode" aria-label="Cách tìm kiếm"><option value="contains">Chứa</option><option value="exact" ${app.searchMode === 'exact' ? 'selected' : ''}>Bằng</option><option value="prefix" ${app.searchMode === 'prefix' ? 'selected' : ''}>Bắt đầu bằng</option><option value="is-null" ${nullSearch && app.searchMode === 'is-null' ? 'selected' : ''} ${app.searchColumn ? '' : 'disabled'}>Là NULL</option><option value="not-null" ${app.searchMode === 'not-null' ? 'selected' : ''} ${app.searchColumn ? '' : 'disabled'}>Khác NULL</option></select>
+      <button id="clearFilterBtn" type="button" ${canResetSearch ? '' : 'disabled'}>Đặt lại bộ lọc</button>
       <button id="addRowBtn" ${readOnly ? 'disabled title="Kết nối chỉ đọc"' : ''}>＋ Thêm bản ghi</button>
       <button class="danger" id="deleteRowsBtn" ${editable ? '' : `disabled title="${readOnly ? 'Kết nối chỉ đọc' : 'Bảng không có khóa chính'}"`}>⌫ Xóa</button>
       <button id="refreshBtn">↻</button>
@@ -5810,21 +5822,34 @@ function renderDataView() {
     </div>
   `;
   const filter = $('#filter');
+  const target = { profileId: app.connection?.id, database: app.database, table };
+  const current = () => mode === 'data' && target.profileId === app.connection?.id && target.database === app.database && target.table === table;
   filter.addEventListener('input', debounce(() => {
+    if (!current() || $('#filter') !== filter || filter.disabled) return;
     app.search = filter.value;
+    const search = app.search, searchColumn = app.searchColumn, searchMode = app.searchMode;
     app.page = 1;
     app.pageCursor = null;
     loadData().then(() => {
+      if (!current() || search !== app.search || searchColumn !== app.searchColumn || searchMode !== app.searchMode) return;
       const next = $('#filter');
-      if (next) {
+      if (next && !next.disabled) {
         next.focus();
         next.setSelectionRange(next.value.length, next.value.length);
       }
     });
   }, 350));
   for (const selector of ['#filterColumn', '#filterMode']) $(selector).addEventListener('change', () => {
+    if (!current() || $('#filter') !== filter) return;
     app.searchColumn = $('#filterColumn').value || null;
     app.searchMode = $('#filterMode').value;
+    if (!app.searchColumn && ['is-null', 'not-null'].includes(app.searchMode)) app.searchMode = 'contains';
+    app.search = ['is-null', 'not-null'].includes(app.searchMode) ? '' : filter.value;
+    app.page = 1; app.pageCursor = null; void loadData();
+  });
+  $('#clearFilterBtn').addEventListener('click', () => {
+    if (!current()) return;
+    app.search = ''; app.searchColumn = null; app.searchMode = 'contains';
     app.page = 1; app.pageCursor = null; void loadData();
   });
   $('#addRowBtn').addEventListener('click', () => editRow(null));
@@ -10647,11 +10672,15 @@ async function transfer(type) {
   const database = app.database;
   const targetTable = table;
   if (type === 'export') {
-    const hasSearch = Boolean(String(app.search || '').trim());
+    const profileId = app.connection?.id || null;
+    const searchState = { search: app.search, searchColumn: app.searchColumn || null, searchMode: app.searchMode || 'contains' };
+    const orderBy = app.orderBy ? { column: app.orderBy, direction: app.orderDir || 'ASC' } : null;
+    const searchSummary = tableSearchSummary(searchState);
+    const hasSearch = Boolean(searchSummary);
     modal(`
       <h2>Xuất dữ liệu</h2>
       <p>${esc(database)}.${esc(targetTable)}</p>
-      <p class="hint">Phạm vi: ${hasSearch ? `các dòng khớp bộ lọc “${esc(app.search)}” nếu chọn bên dưới, ngược lại toàn bộ bảng` : 'toàn bộ bảng'}${app.orderBy ? ` · sắp xếp theo ${esc(app.orderBy)} ${esc(app.orderDir || 'ASC')}` : ''}.</p>
+      <p class="hint">Phạm vi: ${hasSearch ? `các dòng khớp bộ lọc “${esc(searchSummary)}” nếu chọn bên dưới, ngược lại toàn bộ bảng` : 'toàn bộ bảng'}${orderBy ? ` · sắp xếp theo ${esc(orderBy.column)} ${esc(orderBy.direction)}` : ''}.</p>
       <label>Định dạng</label>
       <select id="exportFormat">
         <option value="csv">CSV — UTF-8, có dòng tiêu đề</option>
@@ -10660,7 +10689,7 @@ async function transfer(type) {
       </select>
       <label class="check-row" style="margin-top:12px">
         <input type="checkbox" id="exportFiltered" ${hasSearch ? '' : 'disabled'}>
-        Chỉ xuất các dòng khớp bộ lọc hiện tại${hasSearch ? ` (“${esc(app.search)}”)` : ''}
+        Chỉ xuất các dòng khớp bộ lọc hiện tại${hasSearch ? ` (“${esc(searchSummary)}”)` : ''}
       </label>
       <div class="hint">Tác vụ chạy theo luồng, không giới hạn 20.000 dòng và có thể hủy giữa chừng. CSV/TSV dùng <code>\\N</code> cho NULL và <code>0x…</code> cho dữ liệu nhị phân; JSON giữ nguyên <code>null</code>.</div>
       <div class="actions">
@@ -10672,7 +10701,6 @@ async function transfer(type) {
       const format = $('#exportFormat').value;
       const useFilter = $('#exportFiltered')?.checked === true;
       const taskId = newTransferTaskId('export');
-      const profileId = app.connection?.id || null;
       showTransferProgress('export', `${database}.${targetTable}`, { taskId, profileId });
       try {
         const result = await call(desktop.db.exportFile({
@@ -10681,10 +10709,10 @@ async function transfer(type) {
           table: targetTable,
           format,
           taskId,
-          search: useFilter ? app.search : '',
-          searchColumn: useFilter ? app.searchColumn : null,
-          searchMode: useFilter ? app.searchMode : 'contains',
-          orderBy: app.orderBy ? { column: app.orderBy, direction: app.orderDir } : null
+          search: useFilter ? searchState.search : '',
+          searchColumn: useFilter ? searchState.searchColumn : null,
+          searchMode: useFilter ? searchState.searchMode : 'contains',
+          orderBy
         }));
         activeTransfer = null;
         closeModal();

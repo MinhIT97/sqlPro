@@ -1,5 +1,7 @@
 'use strict';
 
+const { buildTableSearch } = require('./table-search.cjs');
+
 // SQL planning and bounded count cache are independent of IPC and renderer state.
 class TableDataService {
   constructor({ columns, raw, quoteId, tableRef, serializeRow, originalHashes = () => ({}), keyParameter, searchParameter, now = Date.now }) {
@@ -13,19 +15,11 @@ class TableDataService {
     const { database, table } = options;
     const columns = await this.columns(database, table);
     if (!columns.length) throw Object.assign(new Error(`Không tìm thấy bảng ${table}.`), { code: 'TABLE_NOT_FOUND' });
-    const term = String(options.search || '').trim().slice(0, 200);
-    const selected = options.searchColumn ? columns.filter((column) => column.name === options.searchColumn) : columns;
-    if (!selected.length) throw Object.assign(new Error('Cột tìm kiếm không hợp lệ.'), { code: 'INVALID_COLUMN' });
-    const searchMode = options.searchMode === 'exact' ? 'exact' : 'contains';
-    const clauses = term ? selected.map((column) => searchMode === 'exact'
-      ? `${options.searchColumn ? this.quoteId(column.name) : `CAST(${this.quoteId(column.name)} AS CHAR)`} = ?` : `CAST(${this.quoteId(column.name)} AS CHAR) LIKE ?`) : [];
-    const params = term ? selected.map((column) => searchMode === 'exact'
-      ? (options.searchColumn ? this.searchParameter(term, column) : term) : `%${term}%`) : [];
-    const where = clauses.length ? `(${clauses.join(' OR ')})` : '';
-    const key = JSON.stringify([database, table, term, options.searchColumn || '', searchMode]);
+    const { where, params, key: searchKey } = buildTableSearch(options, columns, { quoteId: this.quoteId, coerceValue: this.searchParameter });
+    const key = JSON.stringify([database, table, searchKey]);
     const cached = this.counts.get(key);
     const total = cached && cached.until > this.now() ? cached.total : null;
-    return { columns, params: clauses.length ? params : [], where, key, total };
+    return { columns, params, where, key, total };
   }
 
   async count(options) {

@@ -127,6 +127,21 @@ test('xuất CSV có header, escaping, NULL và binary', async () => {
   assert.equal(session.activeTask, null);
 });
 
+test('export uses the same prefix and NULL predicates as grid/count, combined with explicit filters', async () => {
+  for (const mode of ['prefix', 'contains', 'is-null', 'not-null']) {
+    const { session, calls } = createSession(COLUMNS);
+    const options = { database: 'sample', table: 'items', searchColumn: 'name', searchMode: mode, search: '%_=', filters: [{ column: 'id', operator: '>=', value: 2 }] };
+    const grid = await session.tableDataService.plan(options);
+    await session.exportTableFile({ ...options, format: 'json' }, async () => {});
+    assert.ok(calls.queries[0].sql.includes(`WHERE (\`id\` >= ?) AND ${grid.where}`));
+    assert.deepEqual(calls.queries[0].values, [2, ...grid.params]);
+    assert.equal(session.activeTask, null);
+  }
+  const { session, calls } = createSession(COLUMNS);
+  await assert.rejects(session.exportTableFile({ database: 'sample', table: 'items', format: 'csv', searchMode: 'is-null' }, async () => {}), { code: 'INVALID_FILTER' });
+  assert.equal(calls.queries.length, 0); assert.equal(session.activeTask, null);
+});
+
 test('xuất JSON là mảng hợp lệ và giữ NULL, object, binary', async () => {
   const rows = [
     [1, 'Alice, "A"', { a: 1 }, Buffer.from('00ff', 'hex')],

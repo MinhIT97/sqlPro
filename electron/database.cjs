@@ -20,6 +20,7 @@ const RowValues = require('../row-values.js');
 const ExportValues = require('../export-values.js');
 const { ResultBudget } = require('./result-budget.cjs');
 const { TableDataService } = require('./table-data.cjs');
+const { buildTableSearch } = require('./table-search.cjs');
 
 const MAX_QUERY_ROWS = 100000;
 const ANALYZE_ROWS = Symbol('validated-analyze-rows');
@@ -250,7 +251,6 @@ function resolveFileColumns(columns, requested) {
 
 function buildFileWhere(filters, columns, search = '', { searchColumn, searchMode } = {}) {
   const filterParts = [];
-  const searchParts = [];
   const params = [];
   if (Array.isArray(filters) && filters.length > 20) throw fail('Chỉ hỗ trợ tối đa 20 điều kiện lọc.', 'TOO_MANY_FILTERS');
   const byName = new Map(columns.map((column) => [column.name, column]));
@@ -292,22 +292,15 @@ function buildFileWhere(filters, columns, search = '', { searchColumn, searchMod
     filterParts.push(`${reference} ${operator} ?`);
     params.push(value);
   }
-  const term = String(search || '').trim().slice(0, 200);
-  if (term) {
-    const selected = searchColumn ? columns.filter((column) => column.name === searchColumn) : columns;
-    if (!selected.length) throw fail('Cột tìm kiếm không hợp lệ.', 'COLUMN_NOT_FOUND');
-    for (const column of selected) {
-      searchParts.push(searchMode === 'exact' ? `${searchColumn ? quoteId(column.name) : `CAST(${quoteId(column.name)} AS CHAR)`} = ?` : `CAST(${quoteId(column.name)} AS CHAR) LIKE ?`);
-      params.push(searchMode === 'exact' ? (searchColumn ? coerceValue(term, column) : term) : `%${term}%`);
-    }
-  }
+  const searchPlan = buildTableSearch({ search, searchColumn, searchMode }, columns, { quoteId, coerceValue });
+  params.push(...searchPlan.params);
   let sql = '';
-  if (filterParts.length && searchParts.length) {
-    sql = ` WHERE (${filterParts.join(' AND ')}) AND (${searchParts.join(' OR ')})`;
+  if (filterParts.length && searchPlan.where) {
+    sql = ` WHERE (${filterParts.join(' AND ')}) AND ${searchPlan.where}`;
   } else if (filterParts.length) {
     sql = ` WHERE ${filterParts.join(' AND ')}`;
-  } else if (searchParts.length) {
-    sql = ` WHERE (${searchParts.join(' OR ')})`;
+  } else if (searchPlan.where) {
+    sql = ` WHERE ${searchPlan.where}`;
   }
   return { sql, params };
 }

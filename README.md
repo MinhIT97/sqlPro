@@ -19,7 +19,7 @@ SqlPro là ứng dụng desktop Electron quản trị MySQL/MariaDB trên Window
 - Nút **ANALYZE…** riêng cho SELECT/CTE, luôn xác nhận vì thực thi truy vấn; xem thống kê server và xuất kết quả đã nhận mà không chạy lại.
 - Nhiều tab SQL Editor; mỗi tab giữ nội dung riêng khi chuyển qua lại.
 - Thêm, sửa, xóa bản ghi có khóa chính; tìm kiếm và phân trang.
-- Lọc theo cột với chế độ chứa/bằng; lấy trang trước, đếm tổng theo yêu cầu. Phân trang PK dùng keyset khi có cursor phù hợp, có thứ tự ổn định cho khóa ghép; sort khác dùng OFFSET với PK làm tie-breaker. Cache COUNT giữ tối đa 15 giây và bị xóa khi phiên ghi dữ liệu.
+- Lọc theo cột với chế độ chứa/bằng/bắt đầu bằng, NULL/khác NULL và nút đặt lại; grid, đếm tổng và xuất tệp dùng chung điều kiện. Phân trang PK dùng keyset khi có cursor phù hợp, có thứ tự ổn định cho khóa ghép; sort khác dùng OFFSET với PK làm tie-breaker. Cache COUNT giữ tối đa 15 giây và bị xóa khi phiên ghi dữ liệu.
 - Editor theo kiểu cột cho hộp thoại thêm/sửa dòng và sửa trực tiếp trong bảng/kết quả SQL: lịch DATE/DATETIME/TIMESTAMP, chọn TIME, số/YEAR, ENUM/SET, JSON và hex nhị phân. NULL/DEFAULT được chọn riêng; giữ số lớn, giây lẻ và giờ theo phiên database. Dữ liệu nhị phân chỉ có bản xem trước, cột generated và dữ liệu không gian được giữ ở chế độ chỉ đọc khi không thể sửa đầy đủ từ lưới.
 - Nhập CSV/TSV/JSON và xuất CSV/TSV/JSON theo luồng, có xem trước, ánh xạ cột và hủy giữa chừng.
 - Sao lưu database ra tệp `.sql` (cấu trúc bảng/view, trigger, procedure, function, event và dữ liệu) và phục hồi từ tệp `.sql`.
@@ -37,6 +37,14 @@ Sửa/xóa dòng từ lưới đối chiếu giá trị gốc để phát hiện
 Sửa ô trực tiếp giữ nội dung khi validation/lưu bị lỗi hoặc không xác nhận được dòng UPDATE. Sau lỗi, mất focus không tự gửi lại UPDATE; dùng Lưu/Enter hoặc Tab ra khỏi editor để thử lại tường minh, Esc để hủy. Các sự kiện blur do khóa điều khiển trong lúc đang lưu cũng không tạo lần ghi mới.
 
 Xóa có đối chiếu dữ liệu gốc hiện chỉ hỗ trợ bảng InnoDB. Engine khác hoặc không đọc được engine bị chặn trước DELETE; danh sách snapshot phải có một mục cho mỗi dòng yêu cầu. Điều này không bảo đảm rollback tác động gián tiếp của trigger lên bảng không có transaction. SQL DELETE tự nhập vẫn theo hành vi của server.
+
+### Tìm kiếm và lọc dữ liệu bảng
+
+Chọn cột và cách tìm **Chứa**, **Bằng** hoặc **Bắt đầu bằng** ở thanh công cụ bảng. Giá trị được bỏ khoảng trắng đầu/cuối, tối đa 200 ký tự. `%`, `_` và `=` được tìm như ký tự thường trong chế độ Chứa/Bắt đầu bằng; đây là thay đổi so với cách tìm cũ coi `%`/`_` là wildcard. So sánh vẫn theo collation của server. Bằng trên một cột giữ kiểm tra kiểu và số BIGINT/DECIMAL chính xác; Bằng trên tất cả cột so sánh biểu diễn chuỗi như trước.
+
+Chọn một cột cụ thể để dùng **Là NULL** hoặc **Khác NULL**; hai chế độ này không cần nhập giá trị. NULL khác chuỗi rỗng và chuỗi `NULL`. **Đặt lại bộ lọc** xóa giá trị/cột/chế độ và về trang đầu. Bộ lọc được thực hiện ở server, không tải toàn bảng để lọc trong renderer. Bắt đầu bằng trên một cột văn bản dùng LIKE trực tiếp; các kiểu khác hoặc tất cả cột dùng CAST. Khả năng dùng index phụ thuộc server/collation và kế hoạch thực tế, chưa có benchmark chứng nhận.
+
+**Đếm tổng** chỉ chạy khi bấm. Hộp xuất tệp hiển thị điều kiện đang áp dụng, kể cả NULL; bật **Chỉ xuất các dòng khớp bộ lọc hiện tại** để dùng cùng predicate với grid/count. Hộp giữ profile/database/table, điều kiện và thứ tự đã chụp lúc mở. Debounce của ô tìm kiếm cũ không được áp sang bảng hoặc bộ điều khiển đã thay. Chưa có nhóm AND/OR, range/date, chọn cột hiển thị/sort nhiều cột hoặc lưu bộ lọc theo bảng sau restart; G5.4/G4.2 chưa nghiệm thu toàn bộ.
 
 ### Gợi ý cột trong SQL Editor
 

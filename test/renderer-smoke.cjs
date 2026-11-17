@@ -1230,6 +1230,56 @@ app.whenReady().then(async () => {
     await evaluate("app.searchColumn=null; app.searchMode='contains'");
     win.setContentSize(1344, 835);
   });
+  await check('prefix and NULL filters keep count/export scope and reset using the keyboard', async () => {
+    await evaluate("mode='data';app.search='';app.searchColumn='name';app.searchMode='contains';renderDataView()");
+    win.setContentSize(940, 700); win.webContents.focus();
+    await until('innerWidth===940 && innerHeight===700');
+    await evaluate("$('#filter').value='%_=';$('#filter').dispatchEvent(new Event('input'));$('#filterMode').value='prefix';$('#filterMode').dispatchEvent(new Event('change'))");
+    await until("$('#filterMode')?.value==='prefix' && $('#filter')?.value==='%_='");
+    let payload = calls.filter(call => call.name === 'db:table-data').at(-1).args[0];
+    assert.equal(payload.search, '%_='); assert.equal(payload.searchMode, 'prefix'); assert.equal(payload.page, 1); assert.equal(payload.cursor, null);
+    await captureReview('table-search-prefix-small', () => evaluate("renderDataView();$('#toast').style.display='none';$('#filterMode').focus()"));
+    assert.ok(await evaluate("$('#filterMode').getBoundingClientRect().width>=140"));
+    assert.equal(await evaluate("$('#workspace .toolbar').scrollWidth<=$('#workspace .toolbar').clientWidth"), true);
+    for (const searchMode of ['is-null', 'not-null']) {
+      await evaluate(`$('#filterMode').value=${JSON.stringify(searchMode)};$('#filterMode').dispatchEvent(new Event('change'))`);
+      await until(`$('#filterMode')?.value===${JSON.stringify(searchMode)} && $('#filter')?.disabled===true`);
+      assert.equal(await evaluate("$('#filter').value"), '');
+      await evaluate("$('#countRowsBtn').click()"); await until('app.total===42');
+      payload = calls.filter(call => call.name === 'db:table-count').at(-1).args[0];
+      assert.equal(payload.searchMode, searchMode); assert.equal(payload.searchColumn, 'name'); assert.equal(payload.search, '');
+    }
+    await captureReview('table-search-null-small', () => evaluate("renderDataView();$('#toast').style.display='none';$('#filterMode').focus()"));
+    assert.equal(await evaluate("$('#filter').disabled && $('#filter').value===''"), true);
+    await evaluate("transfer('export')");
+    assert.equal(await evaluate("$('#exportFiltered').disabled"), false);
+    assert.match(await evaluate("$('#modal').textContent"), /name khác NULL/);
+    // The dialog's displayed target/filter remain authoritative if sidebar or
+    // underlying state changes before the user confirms the export.
+    await evaluate("window.searchExportSavedConnection=app.connection;app.connection={...app.connection,id:'changed-profile'};app.search='changed';app.searchColumn='id';app.searchMode='exact';$('#exportFiltered').checked=true;$('#exportGo').click()");
+    await until("!$('#modal').open");
+    payload = calls.filter(call => call.name === 'db:export-file').at(-1).args[0];
+    assert.equal(payload.profileId, 'test'); assert.equal(payload.searchMode, 'not-null'); assert.equal(payload.searchColumn, 'name'); assert.equal(payload.search, '');
+    await evaluate("app.connection=searchExportSavedConnection;delete window.searchExportSavedConnection;app.search='';app.searchColumn='name';app.searchMode='not-null';renderDataView();$('#filterColumn').value='';$('#filterColumn').dispatchEvent(new Event('change'))");
+    await until("$('#filterMode')?.value==='contains' && $('#filter')?.disabled===false");
+    assert.equal(await evaluate("$('#filterMode option[value=\"is-null\"]').disabled"), true);
+    await evaluate("app.search='reset me';app.searchColumn='name';app.searchMode='prefix';app.page=3;renderDataView();$('#clearFilterBtn').focus()");
+    for (const type of ['keyDown', 'char', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return' });
+    await until("$('#clearFilterBtn')?.disabled===true && app.search==='' && app.page===1 && app.searchColumn===null && app.searchMode==='contains'");
+    await evaluate("app.search='   ';renderDataView()");
+    assert.equal(await evaluate("$('#clearFilterBtn').disabled"), false);
+    await evaluate("$('#clearFilterBtn').click()");
+    await until("$('#clearFilterBtn')?.disabled===true && app.search===''");
+    win.setContentSize(1344, 835);
+  });
+  await check('detached search debounce cannot change another table or overwrite a newer filter mode', async () => {
+    const before = calls.filter(call => call.name === 'db:table-data').length;
+    await evaluate("app.search='';app.searchColumn=null;app.searchMode='contains';renderDataView();$('#filter').value='stale-filter-marker';$('#filter').dispatchEvent(new Event('input'));selectTable('users')");
+    await until("Boolean($('#filter')) && $('#filter').value===''");
+    await evaluate('new Promise(resolve=>setTimeout(resolve,450))');
+    assert.equal(await evaluate('app.search'), '');
+    assert.equal(calls.filter(call => call.name === 'db:table-data').slice(before).some(call => call.args[0].search === 'stale-filter-marker'), false);
+  });
   await check('file import previews mapping and sends a streaming payload', async () => {
     const before = calls.filter((call) => call.name === 'db:import-file').length;
     await evaluate('importFileModal()');
@@ -1267,7 +1317,7 @@ app.whenReady().then(async () => {
     await evaluate("app.search='Alice'; app.orderBy='name'; app.orderDir='DESC'; transfer('export')");
     await until("Boolean($('#exportGo'))");
     assert.match(await evaluate("$('#modal').textContent"), /không giới hạn 20\.000 dòng/);
-    assert.match(await evaluate("$('#modal').textContent"), /bộ lọc “Alice”/);
+    assert.match(await evaluate("$('#modal').textContent"), /bộ lọc “Alice · Chứa”/);
     assert.match(await evaluate("$('#modal').textContent"), /sắp xếp theo name DESC/);
     await evaluate("$('#exportFormat').value='json'; $('#exportFiltered').checked=true; $('#exportGo').click()");
     await untilNode(() => calls.some((call) => call.name === 'db:export-file'));

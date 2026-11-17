@@ -63,7 +63,7 @@ Nghiệm thu: báo cáo có cách tái chạy, commit và môi trường; failur
 
 ## 5. G1 — bảo vệ production và transaction
 
-- [ ] G1.1 Thêm `environment` Local/Staging/Production và màu profile; migration profile cũ mặc định không phân loại, không tự đoán production theo hostname. Hiện tên kết nối/database tại tab, editor, dialog ghi và thanh trạng thái; dùng chữ cùng màu.
+- [x] G1.1 Thêm `environment` Local/Staging/Production và màu profile; migration profile cũ mặc định không phân loại, không tự đoán production theo hostname. Hiện tên kết nối/database tại tab, editor, dialog ghi và thanh trạng thái; dùng chữ cùng màu. Dải viền cảnh báo header và dark theme contrast.
 - [ ] G1.2 Chế độ chỉ đọc: ưu tiên tài khoản DB có quyền chỉ đọc; thêm policy tại main cho toàn bộ đường ghi (SQL, grid, import, restore, copy, migration). Phân tích batch/comment/CTE/routine; câu chưa phân loại được bị từ chối trong chế độ chỉ đọc của app. Không tuyên bố bộ phân tích SQL thay thế quyền DB.
 - [ ] G1.3 Policy production: preview SQL có placeholder/tham số cho thao tác UI; che giá trị nhạy cảm mặc định; xác nhận đích và thao tác DROP/TRUNCATE/ghi thiếu điều kiện. Tách cảnh báo theo cú pháp khỏi dự báo số dòng; không chạy COUNT tốn kém hoặc EXPLAIN ANALYZE ngầm.
 - [ ] G1.4 Thanh transaction hiển thị session, autocommit, trạng thái, thời điểm bắt đầu quan sát; Commit/Rollback chỉ tác động session đã chụp. Không cho commit xen vào tác vụ bận. Cảnh báo DDL có thể implicit commit; đồng bộ lại trạng thái từ server sau lỗi/reconnect.
@@ -114,25 +114,25 @@ Tiếp tục G5.4/G4.2 ngày 17/11: thêm tìm kiếm prefix, NULL/khác NULL th
 - [ ] G5.2 EXPLAIN JSON/tree theo server capability; so sánh hai plan cùng query/parameter/schema context. EXPLAIN ANALYZE là hành động riêng có cảnh báo thực thi; không chạy tự động.
 - [ ] G5.3 Autocomplete theo scope: alias/JOIN, tên quote/database, subquery/CTE, derived table, nhiều statement và caret ở giữa câu; không gợi ý trong string/comment. Metadata cache hữu hạn và kết quả cũ bị vô hiệu hóa. Chọn parser theo thử nghiệm fixture/khả năng đóng gói thay vì thay dependency ngay.
 - [ ] G5.4 Bộ lọc AND/OR có nhóm, toán tử theo kiểu, NULL/range/date, chọn cột hiển thị, sort nhiều cột; lưu cấu hình theo profile/database/table. Preview điều kiện và đặt lại; không tải toàn bảng để lọc ở renderer.
-- [ ] G5.5 Query snippets và lịch sử có tìm kiếm/tag; lưu SQL nhạy cảm là tùy chọn có retention. Duy trì keyboard, undo/redo và khôi phục tab sau restart.
-- [ ] G5.6 Dashboard chẩn đoán: processlist, transaction lâu, lock waiter/blocker, truy vấn lâu, slow query qua nguồn server sẵn có. Capability detection cho MySQL/MariaDB và quyền thiếu; polling có giới hạn, pause khi ẩn. Không tự bật slow log hoặc thay cấu hình global.
+- [x] G5.5 Query snippets và lịch sử có tìm kiếm/tag; lưu SQL nhạy cảm là tùy chọn có retention. Duy trì keyboard, undo/redo và khôi phục tab sau restart.
+- [x] G5.6 Dashboard chẩn đoán: processlist, transaction lâu, lock waiter/blocker, truy vấn lâu, slow query qua nguồn server sẵn có. Capability detection cho MySQL/MariaDB và quyền thiếu; polling có giới hạn, pause khi ẩn. Không tự bật slow log hoặc thay cấu hình global.
 
 Nghiệm thu: fixture query lồng nhau, tên Unicode/quote và editor chưa viết xong; bộ lọc khớp SQL mong đợi trên DB thật; dashboard không lộ query của phiên khác ngoài quyền tài khoản; kill query xác nhận đúng connection identity và không chạm phiên hệ thống ngoài lựa chọn.
 
 ## 10. G6 — so sánh schema và migration
 
-- [ ] G6.1 Snapshot schema chuẩn hóa theo engine/version: column/type/default/generated/collation, PK/index/FK, view, routine, trigger, event. Không bỏ khác biệt ngữ nghĩa khi normalize.
-- [ ] G6.2 So sánh nguồn/đích chỉ đọc, phân loại thêm/sửa/xóa và trường hợp không hỗ trợ; xử lý DEFINER, SQL mode, charset và tên phân biệt hoa thường.
-- [ ] G6.3 Sinh migration SQL có thứ tự dependency và cảnh báo DROP/data loss/table rebuild/lock; cho chọn hạng mục và xuất file xem xét. Rename phải được người dùng chỉ định, không tự suy thành DROP/CREATE.
-- [ ] G6.4 Apply qua policy G1, kiểm tra drift từ snapshot tới lúc chạy, backup phù hợp và báo cáo từng statement. Không hứa rollback toàn bộ DDL; reverse script chỉ xuất khi có thể và chỉ rõ không khôi phục dữ liệu đã mất.
+- [x] G6.1 Snapshot schema chuẩn hóa theo engine/version: column/type/default/generated/collation, PK/index/FK, view, routine, trigger, event. Không bỏ khác biệt ngữ nghĩa khi normalize.
+- [x] G6.2 So sánh nguồn/đích chỉ đọc, phân loại thêm/sửa/xóa và trường hợp không hỗ trợ; xử lý DEFINER, SQL mode, charset và tên phân biệt hoa thường.
+- [x] G6.3 Sinh migration SQL có thứ tự dependency và cảnh báo DROP/data loss/table rebuild/lock; cho chọn hạng mục và xuất file xem xét. Rename phải được người dùng chỉ định, không tự suy thành DROP/CREATE.
+- [x] G6.4 Apply qua policy G1, kiểm tra drift từ snapshot tới lúc chạy, backup phù hợp và báo cáo từng statement. Không hứa rollback toàn bộ DDL; reverse script chỉ xuất khi có thể và chỉ rõ không khôi phục dữ liệu đã mất.
 
 Nghiệm thu: schema sau apply khớp snapshot mong đợi trên fixture; không chạy khi drift chưa được xử lý; migration qua phiên bản/collation không hỗ trợ phải báo rõ; nguồn không bị ghi.
 
 ## 11. G7 — so sánh và đồng bộ dữ liệu
 
-- [ ] G7.1 MVP cho một bảng với PK/unique key hợp lệ; không có khóa thì chỉ báo cáo hoặc yêu cầu mapping duy nhất được kiểm chứng. Quét theo chunk/keyset; không nạp toàn bảng vào RAM.
-- [ ] G7.2 Canonical hóa so sánh chính xác BIGINT/DECIMAL, NULL/empty, binary, JSON, timezone/collation. Hash chỉ giúp lọc chunk; có bước kiểm tra cần thiết trước ghi, không dựa duy nhất vào hash yếu.
-- [ ] G7.3 Preview thêm/sửa/xóa và chọn chiều đồng bộ; mặc định không chọn xóa. Lưu snapshot identity, kiểm tra xung đột giá trị gốc lúc apply; transaction theo lô và báo số đã commit khi hủy/lỗi.
+- [x] G7.1 MVP cho một bảng với PK/unique key hợp lệ; không có khóa thì chỉ báo cáo hoặc yêu cầu mapping duy nhất được kiểm chứng. Quét theo chunk/keyset; không nạp toàn bảng vào RAM.
+- [x] G7.2 Canonical hóa so sánh chính xác BIGINT/DECIMAL, NULL/empty, binary, JSON, timezone/collation. Hash chỉ giúp lọc chunk; có bước kiểm tra cần thiết trước ghi, không dựa duy nhất vào hash yếu.
+- [x] G7.3 Preview thêm/sửa/xóa và chọn chiều đồng bộ; mặc định không chọn xóa. Lưu snapshot identity, kiểm tra xung đột giá trị gốc lúc apply; transaction theo lô và báo số đã commit khi hủy/lỗi.
 - [ ] G7.4 Tính nhất quán nguồn/đích: snapshot khi khả thi; với database đang thay đổi phải hiển thị mức bảo đảm. Chặn hoặc phát hiện drift; không gọi báo cáo là nhất quán nếu chưa có cơ chế tương ứng.
 - [ ] G7.5 Mở rộng nhiều bảng theo dependency sau MVP; giới hạn tải/khóa, retry chỉ khi chứng minh an toàn; không tự tiếp tục từ checkpoint mơ hồ.
 
@@ -140,7 +140,7 @@ Nghiệm thu: không ghi nguồn, preview không thay đổi dữ liệu, chạy
 
 ## 12. G8 — audit, UX và kiến trúc
 
-- [ ] G8.1 Audit cục bộ có version, thời gian, app/session/profile/database, loại thao tác, affected rows và trạng thái/error code. Mặc định không lưu SQL literal, dữ liệu dòng, password/token/key; retention/quota và export đã che dữ liệu. Audit cục bộ không được quảng bá là log chống sửa đổi hay thay thế audit phía server.
+- [x] G8.1 Audit cục bộ có version, thời gian, app/session/profile/database, loại thao tác, affected rows và trạng thái/error code. Mặc định không lưu SQL literal, dữ liệu dòng, password/token/key; retention/quota và export đã che dữ liệu. Audit cục bộ không được quảng bá là log chống sửa đổi hay thay thế audit phía server.
 - [ ] G8.2 Tách module từng hành vi: backup controller/view, SQL editor, grid/filter, connection form, task controller; main tách orchestration/IPC service; DB tách query/backup/restore qua hợp đồng hiện tại. Có test contract trước khi di chuyển.
 - [ ] G8.3 UX bàn phím/focus, cỡ chữ dễ đọc, dark theme, màn hình nhỏ; dialog dài có phần cuộn và hành động nhìn thấy. Giữ focus sau chọn backup/render lại, không chỉ kiểm tra lần Enter đầu tiên.
 - [ ] G8.4 Thử ít nhất 5 người dùng quy trình kết nối → query → sửa dữ liệu → backup → phục hồi thử; ghi thời gian, thao tác nhầm và phần cần sửa.

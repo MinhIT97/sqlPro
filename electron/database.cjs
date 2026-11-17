@@ -71,6 +71,57 @@ function fail(message, code) {
   return error;
 }
 
+function isTimeoutOrConnectionError(err) {
+  if (!err) return false;
+  const code = String(err.code || '');
+  const msg = String(err.message || '');
+  return (
+    code === 'PROTOCOL_SEQUENCE_TIMEOUT' ||
+    code === 'ETIMEDOUT' ||
+    code === 'QUERY_TIMEOUT' ||
+    code === 'QUERY_CANCELED' ||
+    code === 'ER_QUERY_INTERRUPTED' ||
+    code === 'SESSION_DEAD' ||
+    code === 'SESSION_CLOSED' ||
+    code === 'PROTOCOL_CONNECTION_LOST' ||
+    code === 'ECONNRESET' ||
+    code === 'ECONNREFUSED' ||
+    code === 'EPIPE' ||
+    code === 'ER_SERVER_SHUTDOWN' ||
+    Boolean(err.fatal) ||
+    /timeout|cancel/i.test(code) ||
+    /timeout|cancel|interrupted|closed/i.test(msg)
+  );
+}
+
+function isMetadataCompatError(err) {
+  if (!err) return false;
+  if (isTimeoutOrConnectionError(err)) return false;
+  const code = String(err.code || '');
+  const msg = String(err.message || '');
+  return (
+    code === 'ER_NO_SUCH_TABLE' ||
+    code === 'ER_BAD_TABLE_ERROR' ||
+    code === 'ER_BAD_FIELD_ERROR' ||
+    code === 'ER_TABLEACCESS_DENIED_ERROR' ||
+    /REFERENTIAL_CONSTRAINTS/i.test(msg) ||
+    /Unknown table|Unknown column|doesn't exist/i.test(msg)
+  );
+}
+
+function getRemainingTimeoutMs(deadline) {
+  if (!deadline) return null;
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    const timeoutErr = Object.assign(
+      new Error('Truy vấn metadata vượt thời gian chờ.'),
+      { code: 'PROTOCOL_SEQUENCE_TIMEOUT' }
+    );
+    throw timeoutErr;
+  }
+  return remaining;
+}
+
 function flagValue(value) {
   if (value === true || value === 1 || value === '1') return true;
   if (value === false || value === 0 || value === '0') return false;
@@ -1191,15 +1242,16 @@ class DatabaseSession {
     return { database };
   }
 
-  async listTables(database) {
+  async listTables(database, options = {}) {
     const { result } = await this.raw(
       `SELECT TABLE_NAME AS name, TABLE_TYPE AS type, ENGINE AS engine,
-              TABLE_ROWS AS rowEstimate, TABLE_COMMENT AS comment
+              TABLE_ROWS AS rowEstimate, TABLE_COMMENT AS comment,
+              TABLE_COLLATION AS collation
          FROM information_schema.TABLES
         WHERE TABLE_SCHEMA = ?
         ORDER BY TABLE_NAME`,
       [database],
-      null,
+      options?.timeoutMs ?? null,
       { prepared: true }
     );
     return result.map((row) => ({
@@ -1207,11 +1259,12 @@ class DatabaseSession {
       type: /view/i.test(row.type) ? 'view' : 'table',
       engine: row.engine || '',
       rowEstimate: row.rowEstimate === null ? null : Number(row.rowEstimate),
-      comment: row.comment || ''
+      comment: row.comment || '',
+      collation: row.collation || null
     }));
   }
 
-  async listRoutines(database) {
+  async listRoutines(database, options = {}) {
     const { result } = await this.raw(
       `SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS type, DATA_TYPE AS returnType,
               IS_DETERMINISTIC AS \`deterministic\`, SECURITY_TYPE AS security,
@@ -1221,7 +1274,7 @@ class DatabaseSession {
         WHERE ROUTINE_SCHEMA = ?
         ORDER BY ROUTINE_TYPE, ROUTINE_NAME`,
       [database],
-      null,
+      options?.timeoutMs ?? null,
       { prepared: true }
     );
     return result.map((row) => ({
@@ -1237,7 +1290,7 @@ class DatabaseSession {
     }));
   }
 
-  async listEvents(database) {
+  async listEvents(database, options = {}) {
     const { result } = await this.raw(
       `SELECT EVENT_NAME AS name, STATUS AS status, EVENT_TYPE AS type,
               ON_COMPLETION AS onCompletion, INTERVAL_VALUE AS intervalValue,
@@ -1247,7 +1300,7 @@ class DatabaseSession {
         WHERE EVENT_SCHEMA = ?
         ORDER BY EVENT_NAME`,
       [database],
-      null,
+      options?.timeoutMs ?? null,
       { prepared: true }
     );
     return result.map((row) => ({
@@ -1265,13 +1318,13 @@ class DatabaseSession {
     }));
   }
 
-  async showCreate(database, name, kind) {
+  async showCreate(database, name, kind, options = {}) {
     const allowed = ['procedure', 'function', 'event', 'trigger', 'view', 'table'];
     if (!allowed.includes(kind)) throw fail('Loại đối tượng không hỗ trợ SHOW CREATE.', 'INVALID_OBJECT_TYPE');
     if (typeof database !== 'string' || !database || typeof name !== 'string' || !name) {
       throw fail('Tham số SHOW CREATE không hợp lệ.', 'INVALID_DATABASE');
     }
-    const { result } = await this.raw(`SHOW CREATE ${kind.toUpperCase()} ${quoteId(database)}.${quoteId(name)}`);
+    const { result } = await this.raw(`SHOW CREATE ${kind.toUpperCase()} ${quoteId(database)}.${quoteId(name)}`, [], options?.timeoutMs ?? null);
     const row = result[0] || {};
     const sqlKey = Object.keys(row).find((key) => /^Create /i.test(key));
     return {
@@ -1283,19 +1336,50 @@ class DatabaseSession {
     };
   }
 
-  async listColumns(database, table) {
+  async listColumns(database, table, options = {}) {
     const cacheKey = JSON.stringify(['columns', database, table]);
-    if (this.metadata.has(cacheKey)) return this.metadata.get(cacheKey);
-    const { result } = await this.raw(
-      `SELECT COLUMN_NAME AS name, COLUMN_TYPE AS type, IS_NULLABLE AS nullable,
-              COLUMN_DEFAULT AS defaultValue, COLUMN_KEY AS keyType, EXTRA AS extra,
-              COLUMN_COMMENT AS comment, ORDINAL_POSITION AS position
-         FROM information_schema.COLUMNS
-        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-        ORDER BY ORDINAL_POSITION`,
-      [database, table], null, { prepared: true }
-    );
-    const columns = result.map((row) => ({
+    if (!options?.fresh && this.metadata.has(cacheKey)) return this.metadata.get(cacheKey);
+
+    const timeoutMs = options?.timeoutMs;
+    const deadline = Number.isFinite(timeoutMs) && timeoutMs > 0 ? Date.now() + timeoutMs : null;
+
+    let rows = [];
+    try {
+      const remainingTimeout = getRemainingTimeoutMs(deadline);
+      const { result } = await this.raw(
+        `SELECT COLUMN_NAME AS name, COLUMN_TYPE AS type, IS_NULLABLE AS nullable,
+                COLUMN_DEFAULT AS defaultValue, COLUMN_KEY AS keyType, EXTRA AS extra,
+                COLUMN_COMMENT AS comment, ORDINAL_POSITION AS position,
+                GENERATION_EXPRESSION AS generationExpression,
+                COLLATION_NAME AS collation
+           FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+          ORDER BY ORDINAL_POSITION`,
+        [database, table], remainingTimeout, { prepared: true }
+      );
+      rows = result || [];
+    } catch (err) {
+      if (isTimeoutOrConnectionError(err)) {
+        throw err;
+      }
+      if (/generation_expression/i.test(err?.message || '') || err?.code === 'ER_BAD_FIELD_ERROR') {
+        const remainingTimeout = getRemainingTimeoutMs(deadline);
+        const { result } = await this.raw(
+          `SELECT COLUMN_NAME AS name, COLUMN_TYPE AS type, IS_NULLABLE AS nullable,
+                  COLUMN_DEFAULT AS defaultValue, COLUMN_KEY AS keyType, EXTRA AS extra,
+                  COLUMN_COMMENT AS comment, ORDINAL_POSITION AS position,
+                  COLLATION_NAME AS collation
+             FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+            ORDER BY ORDINAL_POSITION`,
+          [database, table], remainingTimeout, { prepared: true }
+        );
+        rows = result || [];
+      } else {
+        throw err;
+      }
+    }
+    const columns = rows.map((row) => ({
       name: row.name,
       type: row.type,
       nullable: row.nullable,
@@ -1303,80 +1387,187 @@ class DatabaseSession {
       key: row.keyType,
       extra: row.extra || '',
       comment: row.comment || '',
-      position: Number(row.position)
+      position: Number(row.position),
+      collation: row.collation || null,
+      generationExpression: row.generationExpression != null && row.generationExpression !== ''
+        ? String(row.generationExpression).trim()
+        : null
     }));
     this.metadata.set(cacheKey, columns);
     return columns;
   }
 
-  async listIndexes(database, table) {
-    const cacheKey = JSON.stringify(['indexes', database, table]);
-    if (this.metadata.has(cacheKey)) return this.metadata.get(cacheKey);
+  async listIndexes(database, table, options = {}) {
+    const includeDefinition = options.includeDefinition === true;
+    const cacheKey = JSON.stringify(includeDefinition
+      ? ['indexes', database, table, 'definition'] : ['indexes', database, table]);
+    if (!options?.fresh && this.metadata.has(cacheKey)) return this.metadata.get(cacheKey);
+    const deadline = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? Date.now() + options.timeoutMs : null;
+    const capabilities = new Set();
+    if (includeDefinition) {
+      const { result } = await this.raw(
+        `SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+            AND COLUMN_NAME IN ('EXPRESSION', 'IS_VISIBLE', 'IGNORED')`,
+        ['information_schema', 'STATISTICS'], getRemainingTimeoutMs(deadline), { prepared: true }
+      );
+      if (!Array.isArray(result) || result.some(row => !['EXPRESSION', 'IS_VISIBLE', 'IGNORED'].includes(row.name))
+          || new Set(result.map(row => row.name)).size !== result.length
+          || result.some(row => row.name === 'IS_VISIBLE') && result.some(row => row.name === 'IGNORED')) {
+        throw fail('Không xác định được capability metadata index.', 'INDEX_CAPABILITY_UNKNOWN');
+      }
+      for (const row of result) capabilities.add(row.name);
+    }
+    // Only these fixed, server-observed column names may enter the query.
+    const definitionFields = includeDefinition
+      ? `, ${capabilities.has('EXPRESSION') ? 'EXPRESSION' : 'NULL'} AS expression,
+           ${capabilities.has('IS_VISIBLE') ? 'IS_VISIBLE' : capabilities.has('IGNORED') ? 'IGNORED' : 'NULL'} AS visibilityValue`
+      : '';
     const { result } = await this.raw(
       `SELECT INDEX_NAME AS name, NON_UNIQUE AS nonUnique, SEQ_IN_INDEX AS sequence,
-              COLUMN_NAME AS columnName, INDEX_TYPE AS type, CARDINALITY AS cardinality
+              COLUMN_NAME AS columnName, INDEX_TYPE AS type, CARDINALITY AS cardinality,
+              SUB_PART AS subPart, COLLATION AS collation${definitionFields}
          FROM information_schema.STATISTICS
         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
         ORDER BY INDEX_NAME, SEQ_IN_INDEX`,
       [database, table],
-      null,
+      getRemainingTimeoutMs(deadline),
       { prepared: true }
     );
     const indexes = new Map();
     for (const row of result) {
+      const visibilityKind = capabilities.has('IS_VISIBLE') ? 'mysql-visible'
+        : capabilities.has('IGNORED') ? 'mariadb-ignored' : 'unsupported';
+      const visibility = visibilityKind === 'unsupported' ? 'unsupported'
+        : ['YES', 'NO'].includes(row.visibilityValue) ? row.visibilityValue : null;
       if (!indexes.has(row.name)) {
         indexes.set(row.name, {
           name: row.name,
           unique: Number(row.nonUnique) === 0,
           type: row.type,
           cardinality: row.cardinality === null ? null : Number(row.cardinality),
+          ...(includeDefinition ? { visibilityKind, visibility, definitionStatus: 'complete' } : {}),
           columns: []
         });
       }
-      indexes.get(row.name).columns.push({ name: row.columnName, sequence: Number(row.sequence) });
+      const expression = typeof row.expression === 'string' && row.expression.trim() ? row.expression.trim() : null;
+      if (includeDefinition && (visibility === null || !row.columnName && !expression
+          || indexes.get(row.name).visibility !== visibility)) {
+        indexes.get(row.name).definitionStatus = 'unknown';
+      }
+      indexes.get(row.name).columns.push({
+        name: row.columnName,
+        ...(includeDefinition ? { expression } : {}),
+        sequence: Number(row.sequence),
+        subPart: row.subPart !== null && row.subPart !== undefined ? Number(row.subPart) : null,
+        direction: row.collation === 'D' ? 'DESC' : (row.collation === 'A' ? 'ASC' : null)
+      });
     }
     const value = [...indexes.values()];
     this.metadata.set(cacheKey, value);
     return value;
   }
 
-  async listRelations(database, table) {
-    const outboundSql = `SELECT CONSTRAINT_NAME AS name, TABLE_NAME AS tableName, COLUMN_NAME AS columnName,
-                                REFERENCED_TABLE_SCHEMA AS refDatabase, REFERENCED_TABLE_NAME AS refTable,
-                                REFERENCED_COLUMN_NAME AS refColumn
-                           FROM information_schema.KEY_COLUMN_USAGE
-                          WHERE TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME IS NOT NULL
-                            ${table ? 'AND TABLE_NAME = ?' : ''}
-                          ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION`;
-    const outboundParams = table ? [database, table] : [database];
-    const { result } = await this.raw(outboundSql, outboundParams, null, { prepared: true });
-    let inbound = [];
-    if (table) {
-      const inboundResult = await this.raw(
-        `SELECT CONSTRAINT_NAME AS name, TABLE_NAME AS tableName, COLUMN_NAME AS columnName,
-                REFERENCED_TABLE_SCHEMA AS refDatabase, REFERENCED_TABLE_NAME AS refTable,
-                REFERENCED_COLUMN_NAME AS refColumn
-           FROM information_schema.KEY_COLUMN_USAGE
-          WHERE TABLE_SCHEMA = ? AND REFERENCED_TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME = ?
-          ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION`,
-        [database, database, table],
-        null,
-        { prepared: true }
-      );
-      inbound = inboundResult.result;
+  async listRelations(database, table, options = {}) {
+    const cacheKey = JSON.stringify(['relations', database, table || '*']);
+    if (!options?.fresh && this.metadata.has(cacheKey)) return this.metadata.get(cacheKey);
+
+    const timeoutMs = options?.timeoutMs;
+    const deadline = Number.isFinite(timeoutMs) && timeoutMs > 0 ? Date.now() + timeoutMs : null;
+
+    let outboundRows = [];
+    try {
+      const remainingTimeout = getRemainingTimeoutMs(deadline);
+      const outboundSql = `SELECT kcu.CONSTRAINT_NAME AS name,
+                                  kcu.TABLE_NAME AS tableName,
+                                  kcu.COLUMN_NAME AS columnName,
+                                  kcu.REFERENCED_TABLE_SCHEMA AS refDatabase,
+                                  kcu.REFERENCED_TABLE_NAME AS refTable,
+                                  kcu.REFERENCED_COLUMN_NAME AS refColumn,
+                                  rc.UPDATE_RULE AS updateRule,
+                                  rc.DELETE_RULE AS deleteRule
+                             FROM information_schema.KEY_COLUMN_USAGE kcu
+                             LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+                               ON rc.CONSTRAINT_SCHEMA = kcu.TABLE_SCHEMA
+                              AND rc.TABLE_NAME = kcu.TABLE_NAME
+                              AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+                            WHERE kcu.TABLE_SCHEMA = ? AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+                              ${table ? 'AND kcu.TABLE_NAME = ?' : ''}
+                            ORDER BY kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION`;
+      const outboundParams = table ? [database, table] : [database];
+      const { result } = await this.raw(outboundSql, outboundParams, remainingTimeout, { prepared: true });
+      outboundRows = result || [];
+    } catch (err) {
+      if (isTimeoutOrConnectionError(err) || !isMetadataCompatError(err)) {
+        throw err;
+      }
+      const remainingTimeout = getRemainingTimeoutMs(deadline);
+      const fallbackSql = `SELECT CONSTRAINT_NAME AS name, TABLE_NAME AS tableName, COLUMN_NAME AS columnName,
+                                  REFERENCED_TABLE_SCHEMA AS refDatabase, REFERENCED_TABLE_NAME AS refTable,
+                                  REFERENCED_COLUMN_NAME AS refColumn
+                             FROM information_schema.KEY_COLUMN_USAGE
+                            WHERE TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME IS NOT NULL
+                              ${table ? 'AND TABLE_NAME = ?' : ''}
+                            ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION`;
+      const fallbackParams = table ? [database, table] : [database];
+      const { result } = await this.raw(fallbackSql, fallbackParams, remainingTimeout, { prepared: true });
+      outboundRows = result || [];
     }
+
+    let inboundRows = [];
+    if (table) {
+      try {
+        const remainingTimeout = getRemainingTimeoutMs(deadline);
+        const inboundSql = `SELECT kcu.CONSTRAINT_NAME AS name,
+                                   kcu.TABLE_NAME AS tableName,
+                                   kcu.COLUMN_NAME AS columnName,
+                                   kcu.REFERENCED_TABLE_SCHEMA AS refDatabase,
+                                   kcu.REFERENCED_TABLE_NAME AS refTable,
+                                   kcu.REFERENCED_COLUMN_NAME AS refColumn,
+                                   rc.UPDATE_RULE AS updateRule,
+                                   rc.DELETE_RULE AS deleteRule
+                              FROM information_schema.KEY_COLUMN_USAGE kcu
+                              LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+                                ON rc.CONSTRAINT_SCHEMA = kcu.TABLE_SCHEMA
+                               AND rc.TABLE_NAME = kcu.TABLE_NAME
+                               AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+                             WHERE kcu.TABLE_SCHEMA = ? AND kcu.REFERENCED_TABLE_SCHEMA = ? AND kcu.REFERENCED_TABLE_NAME = ?
+                             ORDER BY kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION`;
+        const inboundResult = await this.raw(inboundSql, [database, database, table], remainingTimeout, { prepared: true });
+        inboundRows = inboundResult.result || [];
+      } catch (err) {
+        if (isTimeoutOrConnectionError(err) || !isMetadataCompatError(err)) {
+          throw err;
+        }
+        const remainingTimeout = getRemainingTimeoutMs(deadline);
+        const fallbackInboundSql = `SELECT CONSTRAINT_NAME AS name, TABLE_NAME AS tableName, COLUMN_NAME AS columnName,
+                                           REFERENCED_TABLE_SCHEMA AS refDatabase, REFERENCED_TABLE_NAME AS refTable,
+                                           REFERENCED_COLUMN_NAME AS refColumn
+                                      FROM information_schema.KEY_COLUMN_USAGE
+                                     WHERE TABLE_SCHEMA = ? AND REFERENCED_TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME = ?
+                                     ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION`;
+        const inboundResult = await this.raw(fallbackInboundSql, [database, database, table], remainingTimeout, { prepared: true });
+        inboundRows = inboundResult.result || [];
+      }
+    }
+
     const normalize = (row) => ({
       name: row.name,
       table: row.tableName,
       column: row.columnName,
       refTable: row.refTable,
       refColumn: row.refColumn,
-      refDatabase: row.refDatabase
+      refDatabase: row.refDatabase || null,
+      onDelete: row.deleteRule || row.onDelete || null,
+      onUpdate: row.updateRule || row.onUpdate || null
     });
-    return {
-      outbound: result.map(normalize),
-      inbound: inbound.map(normalize)
+
+    const value = {
+      outbound: outboundRows.map(normalize),
+      inbound: inboundRows.map(normalize)
     };
+    this.metadata.set(cacheKey, value);
+    return value;
   }
 
   async primaryKey(database, table) {
@@ -3720,5 +3911,8 @@ module.exports = {
   sshHostKeyFingerprint,
   verifySshHostKey,
   sshErrorCode,
-  classifyConnectionError
+  classifyConnectionError,
+  isTimeoutOrConnectionError,
+  isMetadataCompatError,
+  getRemainingTimeoutMs
 };

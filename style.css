@@ -3241,3 +3241,52 @@ body.dark-theme .audit-error-box {
   border-color: #5c2024;
   color: #fca5a5;
 }
+
+/* ==========================================================================
+   Data Diff & Table Synchronization Styles (G7)
+   ========================================================================== */
+
+.data-diff-card {
+  width: 960px;
+  max-width: 96vw;
+  max-height: 90vh;
+}
+
+.data-diff-table {
+  font-size: 0.86em;
+}
+
+.data-diff-table th {
+  background: #f8fafc;
+  color: #334155;
+  font-weight: 600;
+  padding: 8px 10px;
+  border-bottom: 2px solid #e2e8f0;
+}
+body.dark-theme .data-diff-table th {
+  background: #1e293b;
+  color: #94a3b8;
+  border-color: #334155;
+}
+
+.diff-val-source {
+  color: #15803d;
+  background: #f0fdf4;
+  font-family: monospace;
+  font-size: 0.9em;
+}
+body.dark-theme .diff-val-source {
+  color: #86efac;
+  background: #143526;
+}
+
+.diff-val-target {
+  color: #b91c1c;
+  background: #fef2f2;
+  font-family: monospace;
+  font-size: 0.9em;
+}
+body.dark-theme .diff-val-target {
+  color: #fca5a5;
+  background: #3b181a;
+}

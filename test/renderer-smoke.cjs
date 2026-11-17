@@ -1688,6 +1688,16 @@ app.whenReady().then(async () => {
 
     await evaluate('closeModal()');
   });
+  await check('data diff modal opens, configures source/target tables, and navigates tabs', async () => {
+    await evaluate('showDataDiffModal()');
+    await until("Boolean($('#modal .data-diff-card'))");
+    assert.equal(await evaluate("Boolean($('#dataDiffSourceProfile'))"), true);
+    assert.equal(await evaluate("Boolean($('#dataDiffTargetProfile'))"), true);
+    assert.equal(await evaluate("Boolean($('#dataDiffRunCompareBtn'))"), true);
+
+    await evaluate('closeModal()');
+    await until("!$('#modal').open");
+  });
   await check('audit log modal opens, displays disclaimer, filters entries, and exports', async () => {
     await evaluate(`(async () => {
       await recordAudit({

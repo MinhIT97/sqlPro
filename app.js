@@ -3757,6 +3757,643 @@ async function showSchemaDiffModal() {
 }
 
 /* ==========================================================================
+   G7 — DATA DIFF & TABLE SYNCHRONIZATION MODAL
+   ========================================================================== */
+
+async function showDataDiffModal(initialTable = null) {
+  if (!desktop || !app.connection) {
+    toast('Chưa kết nối CSDL.', 'error');
+    return;
+  }
+  if (typeof SqlDataDiff === 'undefined') {
+    toast('Module Data Diff chưa được tải.', 'error');
+    return;
+  }
+
+  modal(`
+    <div class="modal-card schema-diff-card data-diff-card">
+      <div class="modal-header">
+        <div class="modal-header-left">
+          <h3>⚖️ So sánh & Đồng bộ Dữ liệu <span class="modal-title-tag">Data Diff</span></h3>
+          <div class="diff-tabs" role="tablist">
+            <button class="diff-tab-btn active" data-data-diff-tab="config">⚙️ Cấu hình</button>
+            <button class="diff-tab-btn" data-data-diff-tab="overview" id="dataDiffOverviewTabBtn" disabled>📊 Tổng quan</button>
+            <button class="diff-tab-btn" data-data-diff-tab="differences" id="dataDiffDiffTabBtn" disabled>🔍 Dòng khác biệt</button>
+            <button class="diff-tab-btn" data-data-diff-tab="missing" id="dataDiffMissingTabBtn" disabled>➕➖ Thừa / Thiếu</button>
+            <button class="diff-tab-btn" data-data-diff-tab="sync" id="dataDiffSyncTabBtn" disabled>⚡ Mã SQL Đồng bộ</button>
+          </div>
+        </div>
+        <button class="close-btn" data-click="close-modal" title="Đóng (Esc)" aria-label="Đóng">✕</button>
+      </div>
+
+      <div class="modal-body schema-diff-body" id="dataDiffModalBody">
+        <div id="dataDiffTabContent">
+          <div class="processlist-loading">Đang khởi tạo cấu hình so sánh dữ liệu...</div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <div class="modal-footer-hint">
+          <span>💡 <em>Dữ liệu so sánh yêu cầu bảng có ít nhất một Khóa chính (Primary Key) hoặc Khóa duy nhất (Unique Key).</em></span>
+        </div>
+        <button class="secondary" data-click="close-modal">Đóng (Esc)</button>
+      </div>
+    </div>
+  `);
+
+  let currentTab = 'config';
+  let diffResult = null;
+  let sourceRows = [];
+  let targetRows = [];
+  let sourceColumns = [];
+  let targetColumns = [];
+  let primaryKeys = [];
+
+  let sourceProfileId = app.connection?.id || null;
+  let sourceDb = app.database || '';
+  let sourceTable = initialTable || table || '';
+
+  let targetProfileId = app.connection?.id || null;
+  let targetDb = app.database || '';
+  let targetTable = initialTable || table || '';
+
+  let rowLimit = 500;
+  let isComparing = false;
+  let includeDeletes = false;
+  let includeInserts = true;
+  let includeUpdates = true;
+
+  function switchTab(tabName) {
+    currentTab = tabName;
+    document.querySelectorAll('[data-data-diff-tab]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.dataDiffTab === tabName);
+    });
+
+    switch (tabName) {
+      case 'config': renderConfigTab(); break;
+      case 'overview': renderOverviewTab(); break;
+      case 'differences': renderDifferencesTab(); break;
+      case 'missing': renderMissingTab(); break;
+      case 'sync': renderSyncTab(); break;
+    }
+  }
+
+  async function renderConfigTab() {
+    const container = $('#dataDiffTabContent');
+    if (!container) return;
+
+    const connections = app.connections || [];
+    let sourceDatabases = [];
+    let targetDatabases = [];
+    let sourceTables = [];
+    let targetTables = [];
+
+    try {
+      sourceDatabases = await call(desktop.db.databases(sourceProfileId));
+      if (!sourceDb && sourceDatabases.length) sourceDb = sourceDatabases[0];
+      if (sourceDb) sourceTables = await call(desktop.db.tables(sourceDb, sourceProfileId));
+      if (!sourceTable && sourceTables.length) sourceTable = sourceTables[0].name;
+
+      targetDatabases = targetProfileId === sourceProfileId
+        ? sourceDatabases
+        : await call(desktop.db.databases(targetProfileId));
+      if (!targetDb && targetDatabases.length) targetDb = targetDatabases[0];
+      if (targetDb) targetTables = await call(desktop.db.tables(targetDb, targetProfileId));
+      if (!targetTable && targetTables.length) targetTable = targetTables[0].name;
+    } catch {
+      // Ignore initial loading errors
+    }
+
+    container.innerHTML = `
+      <div class="diff-config-container">
+        <div class="diff-config-columns">
+          <div class="diff-config-card source-card">
+            <div class="diff-side-badge source-badge">CSDL NGUỒN (Source / Desired Data)</div>
+            <div class="formrow" style="margin-top:12px;">
+              <label>Kết nối máy chủ:</label>
+              <select id="dataDiffSourceProfile">
+                ${connections.map((c) => `<option value="${esc(c.id)}" ${c.id === sourceProfileId ? 'selected' : ''}>${esc(c.name || c.host)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="formrow">
+              <label>Database:</label>
+              <select id="dataDiffSourceDb">
+                ${sourceDatabases.map((db) => `<option value="${esc(db)}" ${db === sourceDb ? 'selected' : ''}>${esc(db)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="formrow">
+              <label>Bảng dữ liệu:</label>
+              <select id="dataDiffSourceTable">
+                ${sourceTables.map((t) => `<option value="${esc(t.name)}" ${t.name === sourceTable ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+
+          <div class="diff-config-divider">
+            <span style="font-size:1.8em;">➔</span>
+            <span style="font-size:0.8em; color:#64748b; font-weight:600;">So sánh với</span>
+          </div>
+
+          <div class="diff-config-card target-card">
+            <div class="diff-side-badge target-badge">CSDL ĐÍCH (Target / Existing Data)</div>
+            <div class="formrow" style="margin-top:12px;">
+              <label>Kết nối máy chủ:</label>
+              <select id="dataDiffTargetProfile">
+                ${connections.map((c) => `<option value="${esc(c.id)}" ${c.id === targetProfileId ? 'selected' : ''}>${esc(c.name || c.host)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="formrow">
+              <label>Database:</label>
+              <select id="dataDiffTargetDb">
+                ${targetDatabases.map((db) => `<option value="${esc(db)}" ${db === targetDb ? 'selected' : ''}>${esc(db)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="formrow">
+              <label>Bảng dữ liệu:</label>
+              <select id="dataDiffTargetTable">
+                ${targetTables.map((t) => `<option value="${esc(t.name)}" ${t.name === targetTable ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="diff-options-bar" style="margin-top:16px;">
+          <div style="display:flex; align-items:center; gap:10px;">
+            <label style="font-weight:600; color:#475569;">Số dòng so sánh tối đa:</label>
+            <select id="dataDiffRowLimitSelect" style="padding:4px 8px; border-radius:4px; border:1px solid #cbd5e1;">
+              <option value="200" ${rowLimit === 200 ? 'selected' : ''}>200 dòng</option>
+              <option value="500" ${rowLimit === 500 ? 'selected' : ''}>500 dòng</option>
+              <option value="1000" ${rowLimit === 1000 ? 'selected' : ''}>1.000 dòng</option>
+              <option value="2000" ${rowLimit === 2000 ? 'selected' : ''}>2.000 dòng</option>
+            </select>
+          </div>
+          <button class="primary" id="dataDiffRunCompareBtn" style="padding:8px 20px; font-weight:600;">
+            ${isComparing ? '⏳ Đang so sánh...' : '⚖️ Bắt đầu so sánh dữ liệu'}
+          </button>
+        </div>
+
+        ${diffResult ? `
+          <div style="margin-top:16px; padding:12px; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:6px; color:#166534; font-size:0.9em; display:flex; justify-content:space-between; align-items:center;">
+            <span>✓ Đã so sánh xong <strong>${diffResult.summary.totalSource}</strong> dòng Nguồn và <strong>${diffResult.summary.totalTarget}</strong> dòng Đích. Khóa chính: <code>${diffResult.primaryKeys.join(', ')}</code></span>
+            <button class="small-btn primary" id="dataDiffViewOverviewQuickBtn">Xem kết quả chi tiết ➔</button>
+          </div>
+        ` : ''}
+      </div>
+    `;
+
+    $('#dataDiffSourceProfile')?.addEventListener('change', async (e) => {
+      sourceProfileId = e.target.value;
+      sourceDb = '';
+      sourceTable = '';
+      await renderConfigTab();
+    });
+
+    $('#dataDiffSourceDb')?.addEventListener('change', async (e) => {
+      sourceDb = e.target.value;
+      sourceTable = '';
+      await renderConfigTab();
+    });
+
+    $('#dataDiffSourceTable')?.addEventListener('change', (e) => {
+      sourceTable = e.target.value;
+    });
+
+    $('#dataDiffTargetProfile')?.addEventListener('change', async (e) => {
+      targetProfileId = e.target.value;
+      targetDb = '';
+      targetTable = '';
+      await renderConfigTab();
+    });
+
+    $('#dataDiffTargetDb')?.addEventListener('change', async (e) => {
+      targetDb = e.target.value;
+      targetTable = '';
+      await renderConfigTab();
+    });
+
+    $('#dataDiffTargetTable')?.addEventListener('change', (e) => {
+      targetTable = e.target.value;
+    });
+
+    $('#dataDiffRowLimitSelect')?.addEventListener('change', (e) => {
+      rowLimit = Number(e.target.value) || 500;
+    });
+
+    $('#dataDiffViewOverviewQuickBtn')?.addEventListener('click', () => switchTab('overview'));
+
+    $('#dataDiffRunCompareBtn')?.addEventListener('click', async () => {
+      if (isComparing) return;
+      if (!sourceDb || !sourceTable || !targetDb || !targetTable) {
+        toast('Vui lòng chọn đầy đủ Bảng Nguồn và Bảng Đích.', 'error');
+        return;
+      }
+
+      isComparing = true;
+      $('#dataDiffRunCompareBtn').textContent = '⏳ Đang đọc và so sánh...';
+      $('#dataDiffRunCompareBtn').disabled = true;
+
+      try {
+        sourceColumns = await call(desktop.db.columns(sourceDb, sourceTable, sourceProfileId));
+        targetColumns = await call(desktop.db.columns(targetDb, targetTable, targetProfileId));
+
+        if (!sourceColumns.length || !targetColumns.length) {
+          throw new Error('Không đọc được cấu trúc cột của bảng.');
+        }
+
+        primaryKeys = sourceColumns.filter((c) => c.key === 'PRI').map((c) => c.name);
+        if (!primaryKeys.length) {
+          primaryKeys = sourceColumns.filter((c) => c.key === 'UNI').map((c) => c.name);
+        }
+
+        if (!primaryKeys.length) {
+          throw new Error(`Bảng \`${sourceTable}\` không có Khóa chính (Primary Key) hoặc Khóa duy nhất (Unique Key). Việc đối chiếu dữ liệu từng dòng yêu cầu định danh duy nhất.`);
+        }
+
+        const sQuery = `SELECT * FROM ${quoteId(sourceDb)}.${quoteId(sourceTable)} LIMIT ${rowLimit};`;
+        const tQuery = `SELECT * FROM ${quoteId(targetDb)}.${quoteId(targetTable)} LIMIT ${rowLimit};`;
+
+        const sRes = await call(desktop.db.query({ profileId: sourceProfileId, database: sourceDb, sql: sQuery }));
+        const tRes = await call(desktop.db.query({ profileId: targetProfileId, database: targetDb, sql: tQuery }));
+
+        sourceRows = sRes.rows || [];
+        targetRows = tRes.rows || [];
+
+        diffResult = SqlDataDiff.compareTableData({
+          sourceRows,
+          targetRows,
+          primaryKeys,
+          columns: sRes.columns || sourceColumns
+        });
+
+        $('#dataDiffOverviewTabBtn').disabled = false;
+        $('#dataDiffDiffTabBtn').disabled = false;
+        $('#dataDiffMissingTabBtn').disabled = false;
+        $('#dataDiffSyncTabBtn').disabled = false;
+
+        isComparing = false;
+        toast(`So sánh hoàn tất! Phát hiện ${diffResult.summary.differentCount} dòng khác biệt, ${diffResult.summary.onlyInSourceCount} dòng mới.`, 'success');
+        switchTab('overview');
+      } catch (err) {
+        toast(err.message, 'error');
+        isComparing = false;
+        await renderConfigTab();
+      }
+    });
+  }
+
+  function renderOverviewTab() {
+    const container = $('#dataDiffTabContent');
+    if (!container || !diffResult) return;
+
+    const { summary } = diffResult;
+
+    container.innerHTML = `
+      <div style="padding:16px;">
+        <div class="diff-summary-cards" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px; margin-bottom:20px;">
+          <div class="stat-card" style="border-left:4px solid #16a34a;">
+            <div class="stat-number" style="color:#16a34a;">${summary.identicalCount}</div>
+            <div class="stat-label">Dòng giống nhau hoàn toàn</div>
+          </div>
+          <div class="stat-card" style="border-left:4px solid #ca8a04;">
+            <div class="stat-number" style="color:#ca8a04;">${summary.differentCount}</div>
+            <div class="stat-label">Dòng khác biệt giá trị</div>
+          </div>
+          <div class="stat-card" style="border-left:4px solid #2563eb;">
+            <div class="stat-number" style="color:#2563eb;">${summary.onlyInSourceCount}</div>
+            <div class="stat-label">Chỉ có ở CSDL Nguồn (Mới)</div>
+          </div>
+          <div class="stat-card" style="border-left:4px solid #dc2626;">
+            <div class="stat-number" style="color:#dc2626;">${summary.onlyInTargetCount}</div>
+            <div class="stat-label">Chỉ có ở CSDL Đích (Thừa)</div>
+          </div>
+        </div>
+
+        <div style="background:#fff; border:1px solid #e2e8f0; border-radius:6px; padding:16px; margin-bottom:16px;">
+          <h4 style="margin:0 0 10px 0; font-size:1em; color:#334155;">Thông tin so sánh bảng</h4>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; font-size:0.9em;">
+            <div>
+              <p><strong>Nguồn:</strong> <code>${esc(sourceDb)}.${esc(sourceTable)}</code> (${summary.totalSource} dòng đã nạp)</p>
+              <p><strong>Khóa chính:</strong> <code>${esc(primaryKeys.join(', '))}</code></p>
+            </div>
+            <div>
+              <p><strong>Đích:</strong> <code>${esc(targetDb)}.${esc(targetTable)}</code> (${summary.totalTarget} dòng đã nạp)</p>
+              <p><strong>Cột so sánh:</strong> ${diffResult.columns.length} cột</p>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:flex; gap:10px;">
+          <button class="primary" id="dataDiffGoDiffBtn">🔍 Xem các dòng khác biệt (${summary.differentCount})</button>
+          <button class="secondary" id="dataDiffGoSyncBtn">⚡ Tạo mã SQL đồng bộ</button>
+        </div>
+      </div>
+    `;
+
+    $('#dataDiffGoDiffBtn')?.addEventListener('click', () => switchTab('differences'));
+    $('#dataDiffGoSyncBtn')?.addEventListener('click', () => switchTab('sync'));
+  }
+
+  function renderDifferencesTab() {
+    const container = $('#dataDiffTabContent');
+    if (!container || !diffResult) return;
+
+    const diffs = diffResult.different;
+
+    if (!diffs.length) {
+      container.innerHTML = `
+        <div class="processlist-empty">
+          <div style="font-size:2em; margin-bottom:8px;">✓</div>
+          <div>Không có dòng nào có sự khác biệt về giá trị giữa Nguồn và Đích.</div>
+        </div>
+      `;
+      return;
+    }
+
+    function formatVal(val, colName) {
+      if (val === null || val === undefined) return '<span style="color:#94a3b8; font-style:italic;">NULL</span>';
+      if (app.maskData && typeof SqlDataMasking !== 'undefined') {
+        const type = SqlDataMasking.detectMaskType(colName);
+        if (type) {
+          switch (type) {
+            case 'email': return esc(SqlDataMasking.maskEmail(String(val)));
+            case 'phone': return esc(SqlDataMasking.maskPhone(String(val)));
+            case 'card': return esc(SqlDataMasking.maskCardNumber(String(val)));
+            case 'secret': return esc(SqlDataMasking.maskSecret(String(val)));
+            case 'id': return esc(SqlDataMasking.maskIdNumber(String(val)));
+          }
+        }
+      }
+      return esc(String(val));
+    }
+
+    container.innerHTML = `
+      <div style="padding:14px; max-height:450px; overflow-y:auto;">
+        <div style="margin-bottom:12px; font-size:0.88em; color:#64748b;">
+          Hiển thị <strong>${diffs.length}</strong> dòng có sự khác biệt về dữ liệu giữa Nguồn và Đích:
+        </div>
+        <table class="audit-table data-diff-table">
+          <thead>
+            <tr>
+              <th style="width:120px;">Khóa (PK)</th>
+              <th style="width:140px;">Cột khác biệt</th>
+              <th>Giá trị Nguồn (Desired)</th>
+              <th>Giá trị Đích (Existing)</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${diffs.map((d) => `
+              <tr class="audit-row">
+                <td style="font-family:monospace; font-weight:600; color:#0f766e;">${esc(d.rowKey)}</td>
+                <td colspan="3" style="padding:0;">
+                  <table style="width:100%; border-collapse:collapse; background:transparent;">
+                    ${d.differences.map((diffCol) => `
+                      <tr style="border-bottom:1px solid #f1f5f9;">
+                        <td style="width:140px; font-weight:600; color:#334155; padding:6px 10px;">${esc(diffCol.column)}</td>
+                        <td style="color:#15803d; background:#f0fdf4; padding:6px 10px;" title="Giá trị CSDL Nguồn">
+                          ${formatVal(diffCol.sourceValue, diffCol.column)}
+                        </td>
+                        <td style="color:#b91c1c; background:#fef2f2; padding:6px 10px;" title="Giá trị CSDL Đích">
+                          ${formatVal(diffCol.targetValue, diffCol.column)}
+                        </td>
+                      </tr>
+                    `).join('')}
+                  </table>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function renderMissingTab() {
+    const container = $('#dataDiffTabContent');
+    if (!container || !diffResult) return;
+
+    const onlySrc = diffResult.onlyInSource;
+    const onlyTgt = diffResult.onlyInTarget;
+    const cols = diffResult.columns;
+
+    container.innerHTML = `
+      <div style="padding:14px; max-height:450px; overflow-y:auto;">
+        <h4 style="margin:0 0 8px 0; color:#2563eb;">➕ Dòng chỉ có ở CSDL Nguồn (${onlySrc.length} dòng cần INSERT vào Đích)</h4>
+        ${onlySrc.length ? `
+          <div style="max-height:180px; overflow:auto; border:1px solid #e2e8f0; border-radius:6px; margin-bottom:20px;">
+            <table class="audit-table">
+              <thead>
+                <tr>
+                  <th style="width:120px;">Khóa (PK)</th>
+                  ${cols.map((c) => `<th>${esc(c.name)}</th>`).join('')}
+                </tr>
+              </thead>
+              <tbody>
+                ${onlySrc.slice(0, 100).map((item) => `
+                  <tr>
+                    <td style="font-family:monospace; font-weight:600; color:#2563eb;">${esc(item.rowKey)}</td>
+                    ${cols.map((c, i) => `<td>${esc(String(Array.isArray(item.row) ? item.row[i] : item.row[c.name]))}</td>`).join('')}
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        ` : '<p style="color:#64748b; font-size:0.9em; margin-bottom:20px;">Không có dòng nào chỉ có ở Nguồn.</p>'}
+
+        <h4 style="margin:0 0 8px 0; color:#dc2626;">➖ Dòng chỉ có ở CSDL Đích (${onlyTgt.length} dòng thừa ở Đích)</h4>
+        ${onlyTgt.length ? `
+          <div style="max-height:180px; overflow:auto; border:1px solid #e2e8f0; border-radius:6px;">
+            <table class="audit-table">
+              <thead>
+                <tr>
+                  <th style="width:120px;">Khóa (PK)</th>
+                  ${cols.map((c) => `<th>${esc(c.name)}</th>`).join('')}
+                </tr>
+              </thead>
+              <tbody>
+                ${onlyTgt.slice(0, 100).map((item) => `
+                  <tr>
+                    <td style="font-family:monospace; font-weight:600; color:#dc2626;">${esc(item.rowKey)}</td>
+                    ${cols.map((c, i) => `<td>${esc(String(Array.isArray(item.row) ? item.row[i] : item.row[c.name]))}</td>`).join('')}
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        ` : '<p style="color:#64748b; font-size:0.9em;">Không có dòng thừa nào ở Đích.</p>'}
+      </div>
+    `;
+  }
+
+  function renderSyncTab() {
+    const container = $('#dataDiffTabContent');
+    if (!container || !diffResult) return;
+
+    function getSyncResult() {
+      return SqlDataDiff.generateSyncSql({
+        targetTable,
+        diffResult,
+        options: {
+          includeInserts,
+          includeUpdates,
+          includeDeletes
+        }
+      });
+    }
+
+    let syncResult = getSyncResult();
+
+    container.innerHTML = `
+      <div style="padding:14px; display:flex; flex-direction:column; height:100%;">
+        <div class="diff-options-bar" style="margin-bottom:12px;">
+          <div style="display:flex; align-items:center; gap:16px;">
+            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+              <input type="checkbox" id="syncIncludeInserts" ${includeInserts ? 'checked' : ''}>
+              <span>Thêm dòng mới (INSERT: ${diffResult.summary.onlyInSourceCount})</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+              <input type="checkbox" id="syncIncludeUpdates" ${includeUpdates ? 'checked' : ''}>
+              <span>Cập nhật dòng khác (UPDATE: ${diffResult.summary.differentCount})</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:#dc2626;">
+              <input type="checkbox" id="syncIncludeDeletes" ${includeDeletes ? 'checked' : ''}>
+              <span>⚠️ Xóa dòng thừa (DELETE: ${diffResult.summary.onlyInTargetCount})</span>
+            </label>
+          </div>
+          <span style="color:#64748b; font-size:0.85em;" id="syncStmtCount">Tổng cộng: ${syncResult.statements.length} câu lệnh</span>
+        </div>
+
+        <textarea id="syncSqlTextarea" class="diff-sql-view" readonly style="flex:1; min-height:220px; font-family:monospace; font-size:0.88em; padding:10px; border-radius:6px; border:1px solid #cbd5e1; background:#0f172a; color:#f8fafc; resize:none;">${esc(syncResult.script)}</textarea>
+
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:12px;">
+          <div style="display:flex; gap:8px;">
+            <button class="secondary" id="syncCopySqlBtn">📋 Sao chép SQL</button>
+            <button class="secondary" id="syncDownloadSqlBtn">💾 Tải file .sql</button>
+            <button class="secondary" id="syncOpenEditorBtn">▷ Mở trong SQL Editor</button>
+          </div>
+          <button class="primary" id="syncApplyBtn" style="font-weight:600; padding:8px 18px;" ${syncResult.statements.length === 0 ? 'disabled' : ''}>
+            ⚡ Thực thi đồng bộ vào CSDL Đích
+          </button>
+        </div>
+      </div>
+    `;
+
+    function updateScriptView() {
+      syncResult = getSyncResult();
+      const ta = $('#syncSqlTextarea');
+      if (ta) ta.value = syncResult.script;
+      const cnt = $('#syncStmtCount');
+      if (cnt) cnt.textContent = `Tổng cộng: ${syncResult.statements.length} câu lệnh`;
+      const btn = $('#syncApplyBtn');
+      if (btn) btn.disabled = syncResult.statements.length === 0;
+    }
+
+    $('#syncIncludeInserts')?.addEventListener('change', (e) => {
+      includeInserts = e.target.checked;
+      updateScriptView();
+    });
+
+    $('#syncIncludeUpdates')?.addEventListener('change', (e) => {
+      includeUpdates = e.target.checked;
+      updateScriptView();
+    });
+
+    $('#syncIncludeDeletes')?.addEventListener('change', (e) => {
+      includeDeletes = e.target.checked;
+      updateScriptView();
+    });
+
+    $('#syncCopySqlBtn')?.addEventListener('click', async () => {
+      await copyText(syncResult.script);
+      toast('Đã sao chép mã SQL Đồng bộ vào bộ nhớ tạm', 'success');
+    });
+
+    $('#syncDownloadSqlBtn')?.addEventListener('click', () => {
+      try {
+        const blob = new Blob([syncResult.script], { type: 'text/sql;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `data_sync_${sourceTable}_to_${targetTable}_${Date.now()}.sql`;
+        link.click();
+        URL.revokeObjectURL(url);
+        toast('Đã tải xuống tệp SQL đồng bộ', 'success');
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    });
+
+    $('#syncOpenEditorBtn')?.addEventListener('click', () => {
+      closeModal();
+      newQuery(syncResult.script, { profileId: targetProfileId, database: targetDb });
+      toast(`Đã mở mã đồng bộ vào SQL Editor cho ${targetDb}.${targetTable}`, 'info');
+    });
+
+    $('#syncApplyBtn')?.addEventListener('click', async () => {
+      const activeStmts = syncResult.statements;
+      if (!activeStmts.length) {
+        toast('Không có câu lệnh nào để thực thi.', 'error');
+        return;
+      }
+
+      const hasDelete = activeStmts.some((s) => s.type === 'DELETE');
+      const confirmMsg = `Bạn có chắc chắn muốn thực thi ${activeStmts.length} câu lệnh đồng bộ dữ liệu vào bảng "${targetDb}.${targetTable}" không?${hasDelete ? '\n\n⚠️ CẢNH BÁO: Script có chứa lệnh DELETE dòng thừa! Thao tác này sẽ xóa dữ liệu trên bảng đích!' : ''}`;
+
+      confirmAction(confirmMsg, async () => {
+        closeModal();
+        setStatus(`Đang thực thi đồng bộ dữ liệu vào ${targetDb}.${targetTable}...`);
+
+        let executedCount = 0;
+        try {
+          for (const stmt of activeStmts) {
+            await call(desktop.db.query({ profileId: targetProfileId, database: targetDb, sql: stmt.sql, confirmed: true }));
+            executedCount++;
+          }
+
+          toast(`Đã đồng bộ thành công ${executedCount} bản ghi vào bảng ${targetDb}.${targetTable}!`, 'success');
+          setStatus(`Đồng bộ dữ liệu hoàn tất: ${executedCount} câu lệnh`);
+
+          void recordAudit({
+            profileId: targetProfileId,
+            database: targetDb,
+            table: targetTable,
+            actionType: 'UPDATE',
+            summary: `Đồng bộ dữ liệu bảng: ${executedCount} câu lệnh (${sourceDb}.${sourceTable} -> ${targetDb}.${targetTable})`,
+            affectedRows: executedCount,
+            status: 'success'
+          });
+
+          if (app.database === targetDb && table === targetTable) {
+            void loadData();
+          }
+        } catch (err) {
+          toast(`Lỗi khi đồng bộ dữ liệu (đã chạy ${executedCount}/${activeStmts.length}): ${err.message}`, 'error');
+          setStatus(`Đồng bộ dữ liệu thất bại tại câu lệnh ${executedCount + 1}`);
+
+          void recordAudit({
+            profileId: targetProfileId,
+            database: targetDb,
+            table: targetTable,
+            actionType: 'UPDATE',
+            summary: `Lỗi đồng bộ dữ liệu bảng: ${err.message}`,
+            affectedRows: executedCount,
+            status: 'error',
+            errorSummary: err.message
+          });
+        }
+      }, { separate: true });
+    });
+  }
+
+  document.querySelectorAll('[data-data-diff-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (!btn.disabled) switchTab(btn.dataset.dataDiffTab);
+    });
+  });
+
+  await renderConfigTab();
+}
+
+/* ==========================================================================
    G8.1 — LOCAL AUDIT LOGGING & AUDIT VIEWER MODAL
    ========================================================================== */
 
@@ -12909,6 +13546,7 @@ const delegatedClickActions = {
   'processlist': () => showProcesslistModal(),
   'server-vars': () => showServerVarsModal(),
   'schema-diff': () => showSchemaDiffModal(),
+  'data-diff': () => showDataDiffModal(),
   'audit-log': () => showAuditLogModal(),
   'shortcuts': () => showShortcutsModal(),
   'snippets': () => openSnippetsModal(),

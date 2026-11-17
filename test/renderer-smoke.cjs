@@ -21,6 +21,7 @@ const columns = [
   { name: 'name', type: 'varchar(255)', key: '', extra: '', nullable: 'YES', defaultValue: null }
 ];
 let rowEditorColumns = columns;
+let dataDiffQuery = null;
 let autocompleteColumns = null;
 let rowEditorFailure = false;
 let rowEditorResult = { affectedRows: 1, changedRows: 1 };
@@ -386,6 +387,7 @@ handle('db:analyze-query', () => analyzeCanceled ? ok({ canceled: true }) : ok({
   isAnalyze: true, isExplain: true, explainFormat: 'JSON', analysis: { version: 1, executed: true, engine: 'MariaDB' }
 }));
 handle('db:query', (payload) => {
+  if (dataDiffQuery) return dataDiffQuery(payload);
   if (!payload || typeof payload.sql !== 'string') return { ok: false, error: { message: 'Invalid query payload' } };
   const sql = payload.sql.trim();
   const explainResult = (names, data) => ok({ ...rows(names, data), explainContext: { version: 1,
@@ -1697,6 +1699,104 @@ app.whenReady().then(async () => {
 
     await evaluate('closeModal()');
     await until("!$('#modal').open");
+  });
+  await check('data diff shows bounded observations, keeps exact decimals and blocks every synchronization route', async () => {
+    rowEditorColumns = [{ name: 'id', type: 'bigint', key: 'PRI' }, { name: 'value', type: 'decimal(30,2)', key: '' }];
+    let reads = 0;
+    dataDiffQuery = () => ok(rows(['id', 'value'], ++reads === 1 ? [['1', '9007199254740993'], ['2', '1.00']] : [['1', '9007199254740992'], ['3', '1.00']]));
+    try {
+      await evaluate("showDataDiffModal('users')");
+      await until("Boolean($('#dataDiffRunCompareBtn'))");
+      await evaluate("$('#dataDiffRunCompareBtn').click()");
+      await until("Boolean($('#dataDiffGoSyncBtn'))");
+      assert.equal(reads, 2);
+      assert.match(await evaluate("$('#dataDiffTabContent').textContent"), /Không có snapshot nhất quán/);
+      const queries = calls.filter(call => call.name === 'db:query').slice(-2);
+      for (const query of queries) assert.match(query.args[0].sql, /SELECT `id`, `value` FROM `test`.`users` ORDER BY `id` LIMIT 500;/);
+      await evaluate("$('#dataDiffDiffTabBtn').click()");
+      assert.match(await evaluate("$('#dataDiffTabContent').textContent"), /9007199254740993/);
+      assert.match(await evaluate("$('#dataDiffTabContent').textContent"), /9007199254740992/);
+      await evaluate("$('#dataDiffSyncTabBtn').click()");
+      assert.equal(await evaluate("$('#syncApplyBtn').disabled && !$('#syncCopySqlBtn') && !$('#syncDownloadSqlBtn') && !$('#syncOpenEditorBtn')"), true);
+      await evaluate("$('#syncApplyBtn').dispatchEvent(new Event('click'))");
+      assert.equal(reads, 2);
+      win.setContentSize(940, 700);
+      await captureReview('data-diff-blocked-small', () => evaluate("$('#toast').style.display='none'"));
+      assert.equal(await evaluate("$('#syncApplyBtn').getBoundingClientRect().bottom <= innerHeight"), true);
+      await evaluate('closeModal()');
+    } finally { dataDiffQuery = null; rowEditorColumns = columns; win.setContentSize(1344, 835); }
+  });
+  await check('data diff refuses UNI guesses and incompatible metadata before SELECT', async () => {
+    const before = calls.filter(call => call.name === 'db:query').length;
+    rowEditorColumns = columns.map(column => ({ ...column, key: column.name === 'id' ? 'UNI' : '' }));
+    try {
+      await evaluate("showDataDiffModal('users')"); await until("Boolean($('#dataDiffRunCompareBtn'))");
+      await evaluate("$('#dataDiffRunCompareBtn').click()");
+      await until("$('#toast').textContent.includes('Cần cùng khóa chính')");
+      assert.equal(calls.filter(call => call.name === 'db:query').length, before);
+      rowEditorColumns = columns;
+      autocompleteColumns = new Map([['users', columns], ['table_1', columns.map(column => ({ ...column, type: 'bigint' }))]]);
+      await evaluate("{const select=$('#dataDiffTargetTable');select.value='table_1';select.dispatchEvent(new Event('change'));}$('#dataDiffRunCompareBtn').click()");
+      await until("$('#toast').textContent.includes('thứ tự cột')");
+      assert.equal(calls.filter(call => call.name === 'db:query').length, before);
+      await evaluate('closeModal()');
+    } finally { rowEditorColumns = columns; autocompleteColumns = null; }
+  });
+  await check('late data diff reads cannot populate a replacement modal or query the old target', async () => {
+    let release, reads = 0;
+    dataDiffQuery = () => { reads++; return new Promise(resolve => { release = () => resolve(ok(rows(['id', 'name'], [[1, 'Alice']]))); }); };
+    try {
+      await evaluate("showDataDiffModal('users')"); await until("Boolean($('#dataDiffRunCompareBtn'))");
+      await evaluate("$('#dataDiffRunCompareBtn').click()");
+      const deadline = Date.now() + 5000;
+      while (!release && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+      assert.ok(release);
+      await evaluate("closeModal();showDataDiffModal('table_1')");
+      await until("$('#dataDiffSourceTable')?.value==='table_1'");
+      release(); await new Promise(resolve => setTimeout(resolve, 100));
+      assert.equal(reads, 1);
+      assert.equal(await evaluate("$('#dataDiffSourceTable').value==='table_1' && $('#dataDiffOverviewTabBtn').disabled"), true);
+      await evaluate('closeModal()');
+    } finally { release?.(); dataDiffQuery = null; }
+  });
+  await check('changing the data diff target invalidates an in-flight report before the target SELECT', async () => {
+    let release, reads = 0;
+    dataDiffQuery = () => { reads++; return new Promise(resolve => { release = () => resolve(ok(rows(['id', 'name'], [[1, 'Alice']]))); }); };
+    try {
+      await evaluate("showDataDiffModal('users')"); await until("Boolean($('#dataDiffRunCompareBtn'))");
+      await evaluate("$('#dataDiffRunCompareBtn').click()");
+      const deadline = Date.now() + 5000;
+      while (!release && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+      assert.ok(release);
+      await evaluate("{const select=$('#dataDiffTargetTable');select.value='table_1';select.dispatchEvent(new Event('change'));}");
+      release(); await new Promise(resolve => setTimeout(resolve, 100));
+      assert.equal(reads, 1);
+      assert.equal(await evaluate("!$('#dataDiffRunCompareBtn').disabled && $('#dataDiffOverviewTabBtn').disabled"), true);
+      await evaluate('closeModal()');
+    } finally { release?.(); dataDiffQuery = null; }
+  });
+  await check('data diff masks PII in unmatched samples as well as changed cells', async () => {
+    rowEditorColumns = [{ name: 'id', type: 'int', key: 'PRI' }, { name: 'email', type: 'varchar(100)', key: '' }];
+    let reads = 0;
+    dataDiffQuery = () => ok(rows(['id', 'email'], ++reads === 1 ? [[1, 'alice@example.com']] : [[2, 'bob@example.com']]));
+    try {
+      await evaluate("window.previousDataDiffMask=app.maskData;app.maskData=true;showDataDiffModal('users')");
+      await until("Boolean($('#dataDiffRunCompareBtn'))"); await evaluate("$('#dataDiffRunCompareBtn').click()");
+      await until("Boolean($('#dataDiffGoSyncBtn'))"); await evaluate("$('#dataDiffMissingTabBtn').click()");
+      assert.equal(await evaluate("$('#dataDiffTabContent').textContent.includes('alice@example.com') || $('#dataDiffTabContent').textContent.includes('bob@example.com')"), false);
+      assert.match(await evaluate("$('#dataDiffTabContent').textContent"), /\*/);
+      await evaluate("app.maskData=previousDataDiffMask;delete window.previousDataDiffMask;closeModal()");
+    } finally { dataDiffQuery = null; rowEditorColumns = columns; }
+  });
+  await check('a truncated data diff result leaves no usable report or synchronization action', async () => {
+    dataDiffQuery = () => ok({ ...rows(['id', 'name'], [[1, 'Alice']]), truncated: true });
+    try {
+      await evaluate("showDataDiffModal('users')"); await until("Boolean($('#dataDiffRunCompareBtn'))");
+      await evaluate("$('#dataDiffRunCompareBtn').click()");
+      await until("$('#toast').textContent.includes('bị cắt')");
+      assert.equal(await evaluate("$('#dataDiffOverviewTabBtn').disabled && $('#dataDiffSyncTabBtn').disabled"), true);
+      await evaluate('closeModal()');
+    } finally { dataDiffQuery = null; }
   });
   await check('audit log modal opens, displays disclaimer, filters entries, and exports', async () => {
     await evaluate(`(async () => {

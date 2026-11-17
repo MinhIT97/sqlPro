@@ -2,6 +2,8 @@
 
 SqlPro là ứng dụng desktop Electron quản trị MySQL/MariaDB trên Windows và Ubuntu. Giao diện chạy trong cửa sổ native, không cần web server. Truy vấn, metadata và chỉnh sửa dữ liệu đều chạy thật trên database.
 
+Data Diff hiện là **báo cáo chỉ đọc trên các dòng đã nạp** (tối đa 2.000 mỗi phía). Hai bảng phải có cùng tên/kiểu/thứ tự cột và cùng khóa chính. Dòng chỉ thấy trong một mẫu chưa được coi là thiếu ở toàn bảng; hai lần đọc không tạo snapshot nhất quán. Tạo/copy/tải/chạy SQL đồng bộ bị khóa cho đến khi có kiểm tra phạm vi, snapshot và thay đổi trước ghi ở main.
+
 ## Chức năng
 
 - Kết nối MySQL/MariaDB qua TCP, SSL/TLS và SSH tunnel.

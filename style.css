@@ -3267,6 +3267,9 @@ body.dark-theme .audit-error-box {
   max-width: 96vw;
   max-height: 90vh;
 }
+.data-diff-limit { margin: 12px; padding: 14px; border: 1px solid #d97706; border-radius: 6px; background: #fffbeb; color: #78350f; overflow-wrap: anywhere; }
+.data-diff-limit p { color: inherit; }
+body.dark-theme .data-diff-limit { background: #422d16; color: #fef3c7; border-color: #d97706; }
 
 .data-diff-table {
   font-size: 0.86em;

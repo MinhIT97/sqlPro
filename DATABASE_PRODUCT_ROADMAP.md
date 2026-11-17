@@ -130,9 +130,12 @@ Nghiệm thu: schema sau apply khớp snapshot mong đợi trên fixture; không
 
 ## 11. G7 — so sánh và đồng bộ dữ liệu
 
-- [x] G7.1 MVP cho một bảng với PK/unique key hợp lệ; không có khóa thì chỉ báo cáo hoặc yêu cầu mapping duy nhất được kiểm chứng. Quét theo chunk/keyset; không nạp toàn bảng vào RAM.
-- [x] G7.2 Canonical hóa so sánh chính xác BIGINT/DECIMAL, NULL/empty, binary, JSON, timezone/collation. Hash chỉ giúp lọc chunk; có bước kiểm tra cần thiết trước ghi, không dựa duy nhất vào hash yếu.
-- [x] G7.3 Preview thêm/sửa/xóa và chọn chiều đồng bộ; mặc định không chọn xóa. Lưu snapshot identity, kiểm tra xung đột giá trị gốc lúc apply; transaction theo lô và báo số đã commit khi hủy/lỗi.
+Rà soát 17/11 (đợt 22): các mục G7.1–G7.3 mở lại vì code trước đó chỉ SELECT LIMIT độc lập, không chunk/keyset, snapshot hoặc original-value guards cho đồng bộ. Hiện Data Diff chỉ là báo cáo quan sát tối đa 2.000 dòng mỗi phía, cùng tên/type/thứ tự cột và cùng PK. Không suy UNI từ COLUMN_KEY, không chứng minh dòng vắng mặt toàn bảng. Đã sửa mất chính xác số/JSON, khóa ghép va chạm, kết quả trễ và khóa mọi đường sinh/chạy/xuất script đồng bộ. Đây là nền để triển khai collector/main-owned snapshots và drift-guarded writes tiếp theo, chưa nghiệm thu G7.
+
+
+- [ ] G7.1 MVP cho một bảng với PK/unique key hợp lệ; không có khóa thì chỉ báo cáo hoặc yêu cầu mapping duy nhất được kiểm chứng. Quét theo chunk/keyset; không nạp toàn bảng vào RAM.
+- [ ] G7.2 Canonical hóa so sánh chính xác BIGINT/DECIMAL, NULL/empty, binary, JSON, timezone/collation. Hash chỉ giúp lọc chunk; có bước kiểm tra cần thiết trước ghi, không dựa duy nhất vào hash yếu.
+- [ ] G7.3 Preview thêm/sửa/xóa và chọn chiều đồng bộ; mặc định không chọn xóa. Lưu snapshot identity, kiểm tra xung đột giá trị gốc lúc apply; transaction theo lô và báo số đã commit khi hủy/lỗi.
 - [ ] G7.4 Tính nhất quán nguồn/đích: snapshot khi khả thi; với database đang thay đổi phải hiển thị mức bảo đảm. Chặn hoặc phát hiện drift; không gọi báo cáo là nhất quán nếu chưa có cơ chế tương ứng.
 - [ ] G7.5 Mở rộng nhiều bảng theo dependency sau MVP; giới hạn tải/khóa, retry chỉ khi chứng minh an toàn; không tự tiếp tục từ checkpoint mơ hồ.
 

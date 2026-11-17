@@ -9,161 +9,95 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  /**
-   * Check if a value represents database NULL.
-   * @param {*} val
-   * @returns {boolean}
-   */
-  function isNullValue(val) {
-    return val === null || val === undefined;
+  const fail = message => { throw Object.assign(new Error(message), { code: 'DATA_DIFF_UNVERIFIED' }); };
+
+  // Decimal normalization uses strings only: never round BIGINT/DECIMAL via Number.
+  function decimal(value) {
+    if (typeof value === 'number' && (!Number.isFinite(value) || Number.isInteger(value) && !Number.isSafeInteger(value))) fail('Giá trị số đã mất độ chính xác; cần đọc lại dạng chuỗi.');
+    const text = String(value).trim();
+    if (text.length > 1024) fail('Giá trị số vượt giới hạn so sánh.');
+    const match = /^([+-]?)([0-9]+)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]{1,4}))?$/.exec(text);
+    if (!match) fail('Giá trị số không hợp lệ trong kết quả so sánh.');
+    let digits = (match[2] + (match[3] || '')).replace(/^0+/, '');
+    let scale = (match[3] || '').length - Number(match[4] || 0);
+    if (!digits) return '0';
+    while (digits.endsWith('0')) { digits = digits.slice(0, -1); scale--; }
+    return `${match[1] === '-' ? '-' : ''}${digits}e${-scale}`;
   }
 
-  /**
-   * Deep canonical comparison for JSON values.
-   * @param {*} a
-   * @param {*} b
-   * @returns {boolean}
-   */
-  function compareJsonValues(a, b) {
-    var objA = typeof a === 'string' ? safeJsonParse(a) : a;
-    var objB = typeof b === 'string' ? safeJsonParse(b) : b;
-
-    if (objA === null && objB === null) return true;
-    if (objA === null || objB === null) return false;
-
-    try {
-      return JSON.stringify(canonicalizeJson(objA)) === JSON.stringify(canonicalizeJson(objB));
-    } catch {
-      return String(a) === String(b);
+  // Parse JSON ourselves so numeric lexemes and duplicate keys are not lost by
+  // JSON.parse. Tagged canonical nodes also distinguish JSON strings/numbers.
+  function canonicalJson(value) {
+    if (typeof value !== 'string') {
+      const seen = new Set();
+      const check = (node, depth = 0) => {
+        if (depth > 32 || node === undefined || ['function', 'symbol', 'bigint'].includes(typeof node) || typeof node === 'number' && (!Number.isFinite(node) || Number.isInteger(node) && !Number.isSafeInteger(node))) fail('JSON có giá trị không thể kiểm chứng chính xác.');
+        if (node && typeof node === 'object') {
+          if (seen.has(node)) fail('JSON có cấu trúc vòng hoặc dùng chung node.');
+          seen.add(node); Object.keys(node).forEach(key => check(node[key], depth + 1));
+        }
+      };
+      check(value);
+      value = JSON.stringify(value);
     }
-  }
-
-  function safeJsonParse(str) {
-    try {
-      return JSON.parse(str);
-    } catch {
-      return null;
-    }
-  }
-
-  function canonicalizeJson(val) {
-    if (val === null || typeof val !== 'object') return val;
-    if (Array.isArray(val)) return val.map(canonicalizeJson);
-
-    var sorted = {};
-    var keys = Object.keys(val).sort();
-    for (var i = 0; i < keys.length; i++) {
-      sorted[keys[i]] = canonicalizeJson(val[keys[i]]);
-    }
-    return sorted;
-  }
-
-  /**
-   * Canonical comparison of two cell values taking database types into account.
-   * Ensures strict distinction between NULL, empty strings, numbers, and booleans.
-   * @param {*} valA
-   * @param {*} valB
-   * @param {string} [columnType]
-   * @returns {boolean}
-   */
-  function compareCanonicalValues(valA, valB, columnType) {
-    // Both NULL
-    if (isNullValue(valA) && isNullValue(valB)) return true;
-    // Exactly one NULL
-    if (isNullValue(valA) || isNullValue(valB)) return false;
-
-    var type = columnType ? String(columnType).toLowerCase() : '';
-
-    // Booleans / Tinyint(1)
-    if (type.indexOf('bool') !== -1 || type === 'tinyint(1)') {
-      var boolA = valA === true || valA === 1 || valA === '1' || String(valA).toLowerCase() === 'true';
-      var boolB = valB === true || valB === 1 || valB === '1' || String(valB).toLowerCase() === 'true';
-      return boolA === boolB;
-    }
-
-    // JSON
-    if (type.indexOf('json') !== -1) {
-      return compareJsonValues(valA, valB);
-    }
-
-    // Numbers: integer, decimal, bigint, float, double
-    if (type.indexOf('int') !== -1 || type.indexOf('decimal') !== -1 || type.indexOf('numeric') !== -1 || type.indexOf('float') !== -1 || type.indexOf('double') !== -1) {
-      if (typeof valA === 'number' && typeof valB === 'number') {
-        if (isNaN(valA) && isNaN(valB)) return true;
-        return valA === valB;
+    if (typeof value !== 'string' || value.length > 65536) fail('JSON vượt giới hạn so sánh 65.536 ký tự.');
+    let offset = 0, count = 0;
+    const space = () => { while (/[ \t\r\n]/.test(value[offset] || 'x')) offset++; };
+    const string = () => {
+      const start = offset++;
+      while (offset < value.length) {
+        const char = value[offset++];
+        if (char === '\\') offset++;
+        else if (char === '"') {
+          try { return JSON.parse(value.slice(start, offset)); } catch { fail('Chuỗi JSON không hợp lệ.'); }
+        }
       }
-      var strA = String(valA).trim();
-      var strB = String(valB).trim();
-      if (strA === strB) return true;
-
-      var numA = Number(strA);
-      var numB = Number(strB);
-      if (!isNaN(numA) && !isNaN(numB)) {
-        return numA === numB;
+      fail('Chuỗi JSON chưa đóng.');
+    };
+    const read = (depth = 0) => {
+      if (++count > 10000 || depth > 32) fail('JSON vượt giới hạn node hoặc độ sâu.');
+      space(); const char = value[offset];
+      if (char === '"') return ['string', string()];
+      if (char === '[') {
+        offset++; space(); const items = [];
+        if (value[offset] !== ']') do { items.push(read(depth + 1)); space(); if (value[offset] !== ',') break; offset++; } while (true);
+        if (value[offset++] !== ']') fail('Mảng JSON không hợp lệ.');
+        return ['array', items];
       }
-      return strA === strB;
-    }
-
-    // Temporal / Dates
-    if (type.indexOf('date') !== -1 || type.indexOf('time') !== -1 || type.indexOf('year') !== -1) {
-      var normDateA = String(valA).replace(/[TZ]/g, ' ').trim().replace(/\.000$/, '');
-      var normDateB = String(valB).replace(/[TZ]/g, ' ').trim().replace(/\.000$/, '');
-      if (normDateA === normDateB) return true;
-
-      var timeA = Date.parse(String(valA));
-      var timeB = Date.parse(String(valB));
-      if (!isNaN(timeA) && !isNaN(timeB)) {
-        return timeA === timeB;
+      if (char === '{') {
+        offset++; space(); const pairs = [], keys = new Set();
+        if (value[offset] !== '}') do {
+          space(); if (value[offset] !== '"') fail('Tên thuộc tính JSON không hợp lệ.');
+          const key = string(); if (keys.has(key)) fail('JSON trùng tên thuộc tính; chưa hỗ trợ đối chiếu.'); keys.add(key);
+          space(); if (value[offset++] !== ':') fail('JSON thiếu dấu hai chấm.');
+          pairs.push([key, read(depth + 1)]); space(); if (value[offset] !== ',') break; offset++;
+        } while (true);
+        if (value[offset++] !== '}') fail('Object JSON không hợp lệ.');
+        return ['object', pairs.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)];
       }
-      return String(valA) === String(valB);
-    }
-
-    // Fallback: direct string comparison (NULL vs empty string is already handled above)
-    return String(valA) === String(valB);
+      for (const literal of ['true', 'false', 'null']) if (value.startsWith(literal, offset)) { offset += literal.length; return [literal]; }
+      const match = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.exec(value.slice(offset));
+      if (!match) fail('Giá trị JSON không hợp lệ.');
+      offset += match[0].length; return ['number', decimal(match[0])];
+    };
+    const result = read(); space(); if (offset !== value.length) fail('JSON có nội dung thừa.');
+    return JSON.stringify(result);
   }
 
-  /**
-   * Escape an identifier (table or column) with backticks.
-   * @param {string} name
-   * @returns {string}
-   */
-  function quoteIdent(name) {
-    if (!name || typeof name !== 'string') return '``';
-    return '`' + name.replace(/`/g, '``') + '`';
-  }
-
-  /**
-   * Format a JavaScript value into safe SQL literal for synchronization statements.
-   * @param {*} val
-   * @param {string} [columnType]
-   * @returns {string}
-   */
-  function formatSqlValue(val, columnType) {
-    if (isNullValue(val)) return 'NULL';
-
-    var type = columnType ? String(columnType).toLowerCase() : '';
-
-    if (typeof val === 'number') {
-      return isFinite(val) ? String(val) : 'NULL';
+  function compareCanonicalValues(a, b, columnType) {
+    if (a === undefined || b === undefined) fail('Thiếu giá trị cột; không thể coi là NULL.');
+    if (a === null || b === null) return a === b;
+    const type = String(columnType || '').toLowerCase().split('(')[0].trim().replace(/\s+(?:unsigned|zerofill).*$/, '');
+    if (/^(?:binary|varbinary|tinyblob|blob|mediumblob|longblob|bit|geometry|point|linestring|polygon|multipoint|multilinestring|multipolygon|geometrycollection)$/.test(type)) fail('Kiểu nhị phân/không gian chưa có dữ liệu đầy đủ để so sánh.');
+    if (type === 'json') return canonicalJson(a) === canonicalJson(b);
+    if (/^(?:bool|boolean)$/.test(type)) {
+      const boolean = value => value === true || value === 'true' ? '1' : value === false || value === 'false' ? '0' : value;
+      return decimal(boolean(a)) === decimal(boolean(b));
     }
-
-    if (typeof val === 'boolean') {
-      return val ? '1' : '0';
-    }
-
-    if (type.indexOf('int') !== -1 || type.indexOf('decimal') !== -1 || type.indexOf('numeric') !== -1) {
-      var num = Number(val);
-      if (!isNaN(num) && String(val).trim() !== '') {
-        return String(val).trim();
-      }
-    }
-
-    if (type.indexOf('json') !== -1 && typeof val === 'object') {
-      return "'" + JSON.stringify(val).replace(/\\/g, '\\\\').replace(/'/g, "''") + "'";
-    }
-
-    var strVal = String(val);
-    return "'" + strVal.replace(/\\/g, '\\\\').replace(/'/g, "''") + "'";
+    if (/^(?:tinyint|smallint|mediumint|int|integer|bigint|decimal|numeric|float|double|real|year)$/.test(type)) return decimal(typeof a === 'boolean' ? Number(a) : a) === decimal(typeof b === 'boolean' ? Number(b) : b);
+    // No timezone/collation guessing. SQL temporal strings are compared exactly.
+    if (typeof a === 'object' || typeof b === 'object') fail('Dạng dữ liệu object/nhị phân chưa được hỗ trợ trong báo cáo.');
+    return String(a) === String(b);
   }
 
   /**
@@ -192,14 +126,16 @@
         if (colIndex === -1) return null;
         val = row[colIndex];
       } else if (typeof row === 'object') {
+        if (!Object.hasOwn(row, colRef)) return null;
         val = row[colRef];
       }
 
-      if (isNullValue(val)) return null; // Primary keys cannot have NULL components
+      if (val === null || val === undefined) return null; // Primary keys cannot have NULL components
+      if (typeof val === 'object' || typeof val === 'number' && !Number.isSafeInteger(val)) fail('Khóa không thể kiểm chứng chính xác.');
       keyParts.push(String(val));
     }
 
-    return keyParts.join('::');
+    return JSON.stringify(keyParts);
   }
 
   /**
@@ -208,15 +144,12 @@
    * @returns {Array<{ name: string, type: string }>}
    */
   function normalizeColumns(columns) {
-    if (!Array.isArray(columns)) return [];
-    return columns.map(function (col, idx) {
-      if (typeof col === 'string') {
-        return { name: col, type: 'VARCHAR' };
-      }
-      return {
-        name: col && col.name ? String(col.name) : 'col_' + idx,
-        type: col && col.type ? String(col.type) : 'VARCHAR'
-      };
+    if (!Array.isArray(columns) || !columns.length || columns.length > 1024) fail('Metadata cột thiếu hoặc vượt giới hạn.');
+    const seen = new Set();
+    return Array.from(columns, column => {
+      if (!column || typeof column.name !== 'string' || !column.name || seen.has(column.name) || typeof column.type !== 'string' || !column.type) fail('Metadata cột không hợp lệ hoặc trùng tên.');
+      seen.add(column.name);
+      return Object.freeze({ name: column.name, type: column.type });
     });
   }
 
@@ -232,16 +165,38 @@
    */
   function compareTableData(params) {
     params = params || {};
+    if (!Array.isArray(params.sourceRows) || !Array.isArray(params.targetRows)) fail('Thiếu kết quả dòng ở một phía.');
     var sourceRows = Array.isArray(params.sourceRows) ? params.sourceRows : [];
     var targetRows = Array.isArray(params.targetRows) ? params.targetRows : [];
     var primaryKeys = Array.isArray(params.primaryKeys) ? params.primaryKeys : [];
     var columns = normalizeColumns(params.columns);
     var colNames = columns.map(function (c) { return c.name; });
 
-    if (!primaryKeys.length) {
+    if (!primaryKeys.length || new Set(primaryKeys).size !== primaryKeys.length || primaryKeys.some(key => !colNames.includes(key))) {
       throw new Error('So sánh dữ liệu yêu cầu ít nhất một cột Khóa chính (Primary Key) hoặc Khóa duy nhất (Unique Key).');
     }
 
+    if (sourceRows.length > 2000 || targetRows.length > 2000) fail('Báo cáo chỉ đọc tối đa 2.000 dòng mỗi phía.');
+    const snapshot = rows => Array.from(rows, row => {
+      if (!row || typeof row !== 'object') fail('Dòng so sánh không hợp lệ.');
+      const cell = (value, column) => {
+        compareCanonicalValues(value, value, column.type);
+        if (typeof value === 'object' && value !== null) return JSON.stringify(value);
+        if (typeof value === 'string' && value.length > 65536) fail('Giá trị cột vượt giới hạn so sánh.');
+        return value;
+      };
+      if (Array.isArray(row)) {
+        if (row.length !== columns.length || columns.some((_column, index) => !Object.hasOwn(row, index) || row[index] === undefined)) fail('Dòng thiếu giá trị cột.');
+        return Object.freeze(columns.map((column, index) => cell(row[index], column)));
+      }
+      const result = Object.create(null);
+      for (const column of columns) {
+        if (!Object.hasOwn(row, column.name) || row[column.name] === undefined) fail('Dòng thiếu giá trị cột.');
+        result[column.name] = cell(row[column.name], column);
+      }
+      return Object.freeze(result);
+    });
+    sourceRows = snapshot(sourceRows); targetRows = snapshot(targetRows);
     var sourceMap = new Map();
     var targetMap = new Map();
 
@@ -249,18 +204,16 @@
     for (var i = 0; i < sourceRows.length; i++) {
       var sRow = sourceRows[i];
       var sKey = extractRowKey(sRow, primaryKeys, colNames);
-      if (sKey !== null) {
-        sourceMap.set(sKey, sRow);
-      }
+      if (sKey === null || sourceMap.has(sKey)) fail('Khóa nguồn thiếu, NULL hoặc trùng; không thể đối chiếu.');
+      sourceMap.set(sKey, sRow);
     }
 
     // Index target rows
     for (var j = 0; j < targetRows.length; j++) {
       var tRow = targetRows[j];
       var tKey = extractRowKey(tRow, primaryKeys, colNames);
-      if (tKey !== null) {
-        targetMap.set(tKey, tRow);
-      }
+      if (tKey === null || targetMap.has(tKey)) fail('Khóa đích thiếu, NULL hoặc trùng; không thể đối chiếu.');
+      targetMap.set(tKey, tRow);
     }
 
     var identical = [];
@@ -324,8 +277,9 @@
     });
 
     return Object.freeze({
-      primaryKeys: primaryKeys,
-      columns: columns,
+      coverage: Object.freeze({ version: 1, kind: 'bounded-observation', complete: false, consistent: false, canSynchronize: false }),
+      primaryKeys: Object.freeze([...primaryKeys]),
+      columns: Object.freeze(columns),
       summary: Object.freeze({
         totalSource: sourceRows.length,
         totalTarget: targetRows.length,
@@ -334,153 +288,20 @@
         differentCount: different.length,
         onlyInTargetCount: onlyInTarget.length
       }),
-      identical: identical,
-      onlyInSource: onlyInSource,
-      different: different,
-      onlyInTarget: onlyInTarget
+      identical: Object.freeze(identical.map(Object.freeze)),
+      onlyInSource: Object.freeze(onlyInSource.map(Object.freeze)),
+      different: Object.freeze(different.map(item => Object.freeze({ ...item, differences: Object.freeze(item.differences.map(Object.freeze)) }))),
+      onlyInTarget: Object.freeze(onlyInTarget.map(Object.freeze))
     });
   }
 
-  /**
-   * Generate executable synchronization SQL statements.
-   * @param {Object} params
-   * @param {string} params.targetTable
-   * @param {Object} params.diffResult
-   * @param {Object} [params.options]
-   * @returns {Object}
-   */
-  function generateSyncSql(params) {
-    params = params || {};
-    var targetTable = params.targetTable || 'target_table';
-    var diff = params.diffResult;
-    var options = params.options || {};
-
-    var includeInserts = options.includeInserts !== false;
-    var includeUpdates = options.includeUpdates !== false;
-    var includeDeletes = Boolean(options.includeDeletes); // Safety: deletes false by default
-
-    if (!diff || !diff.summary) {
-      return { statements: [], script: '' };
-    }
-
-    var statements = [];
-    var columns = diff.columns || [];
-    var colNames = columns.map(function (c) { return c.name; });
-    var pkNames = diff.primaryKeys || [];
-
-    // Helper to get value from row
-    function getVal(row, colIndex, colName) {
-      if (Array.isArray(row)) return row[colIndex];
-      if (row && typeof row === 'object') return row[colName];
-      return null;
-    }
-
-    // Helper to build PK WHERE clause
-    function buildPkWhereClause(row) {
-      var conditions = [];
-      for (var k = 0; k < pkNames.length; k++) {
-        var pk = pkNames[k];
-        var pkIdx = colNames.indexOf(pk);
-        var colType = pkIdx !== -1 ? columns[pkIdx].type : '';
-        var val = getVal(row, pkIdx, pk);
-        conditions.push(quoteIdent(pk) + ' = ' + formatSqlValue(val, colType));
-      }
-      return conditions.join(' AND ');
-    }
-
-    // 1. INSERT missing rows
-    if (includeInserts && diff.onlyInSource.length > 0) {
-      for (var i = 0; i < diff.onlyInSource.length; i++) {
-        var sItem = diff.onlyInSource[i];
-        var vals = [];
-
-        for (var c = 0; c < columns.length; c++) {
-          var val = getVal(sItem.row, c, columns[c].name);
-          vals.push(formatSqlValue(val, columns[c].type));
-        }
-
-        var quotedCols = colNames.map(quoteIdent).join(', ');
-        var insertSql = 'INSERT INTO ' + quoteIdent(targetTable) + ' (' + quotedCols + ') VALUES (' + vals.join(', ') + ');';
-
-        statements.push({
-          type: 'INSERT',
-          severity: 'safe',
-          rowKey: sItem.rowKey,
-          sql: insertSql,
-          enabled: true
-        });
-      }
-    }
-
-    // 2. UPDATE modified rows
-    if (includeUpdates && diff.different.length > 0) {
-      for (var u = 0; u < diff.different.length; u++) {
-        var dItem = diff.different[u];
-        var setClauses = [];
-
-        for (var d = 0; d < dItem.differences.length; d++) {
-          var diffCol = dItem.differences[d];
-          var colIdent = quoteIdent(diffCol.column);
-          var formattedVal = formatSqlValue(diffCol.sourceValue, diffCol.columnType);
-          setClauses.push(colIdent + ' = ' + formattedVal);
-        }
-
-        var whereClause = buildPkWhereClause(dItem.sourceRow);
-        var updateSql = 'UPDATE ' + quoteIdent(targetTable) + ' SET ' + setClauses.join(', ') + ' WHERE ' + whereClause + ';';
-
-        statements.push({
-          type: 'UPDATE',
-          severity: 'warning',
-          rowKey: dItem.rowKey,
-          changedColumns: dItem.differences.map(function (x) { return x.column; }),
-          sql: updateSql,
-          enabled: true
-        });
-      }
-    }
-
-    // 3. DELETE extra rows (Optional Safety Gate)
-    if (includeDeletes && diff.onlyInTarget.length > 0) {
-      for (var del = 0; del < diff.onlyInTarget.length; del++) {
-        var tItem = diff.onlyInTarget[del];
-        var delWhere = buildPkWhereClause(tItem.row);
-        var deleteSql = 'DELETE FROM ' + quoteIdent(targetTable) + ' WHERE ' + delWhere + ';';
-
-        statements.push({
-          type: 'DELETE',
-          severity: 'destructive',
-          rowKey: tItem.rowKey,
-          sql: deleteSql,
-          enabled: true
-        });
-      }
-    }
-
-    var scriptLines = [
-      '-- =========================================================================',
-      '-- SqlPro Data Synchronization Script',
-      '-- Generated: ' + new Date().toISOString(),
-      '-- Target Table: ' + targetTable,
-      '-- Total Statements: ' + statements.length,
-      '-- =========================================================================',
-      ''
-    ];
-
-    statements.forEach(function (s) {
-      scriptLines.push(s.sql);
-    });
-
-    return Object.freeze({
-      statements: statements,
-      script: scriptLines.join('\n')
-    });
+  // Bounded SELECT results do not prove absence or establish a source/target
+  // snapshot. Keep every script/execution path closed until main owns evidence,
+  // drift checks and guarded writes; renderer flags cannot grant this authority.
+  function generateSyncSql() {
+    return Object.freeze({ statements: Object.freeze([]), script: '', blocked: true,
+      reason: 'Báo cáo chỉ gồm các dòng đã đọc, chưa có snapshot nhất quán hoặc kiểm tra thay đổi trước ghi. Đồng bộ và xuất SQL đang bị khóa.' });
   }
 
-  return Object.freeze({
-    compareCanonicalValues: compareCanonicalValues,
-    extractRowKey: extractRowKey,
-    compareTableData: compareTableData,
-    generateSyncSql: generateSyncSql,
-    formatSqlValue: formatSqlValue
-  });
+  return Object.freeze({ compareCanonicalValues, extractRowKey, compareTableData, generateSyncSql });
 }));

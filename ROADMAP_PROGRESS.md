@@ -758,6 +758,8 @@ Các yêu cầu cùng profile/database/backup và file identity được gộp v
 | G1.3 | Đã triển khai các đường chính, còn mở rộng kiểm chứng | Grid/SQL/Commit dùng token một lần; import/restore dùng xác nhận native tại main với kiểm tra file/profile trước tạo worker |
 | G1.4–G1.5 | Một phần | Thanh transaction, xác nhận Commit/Rollback, session identity + revision, chặn bận/stale/reconnect, không replay commit lỗi; đã kiểm chứng trạng thái trên MySQL 8.4, còn MariaDB và audit toàn bộ vòng đời |
 | G5.1 | Một phần | EXPLAIN ALL không còn kết luận bắt buộc thêm index; còn giải thích plan có ngữ cảnh đầy đủ |
+| G5.4 / G4.2 | Đã hoàn thành (Batch 11) | Prepared statements cho toàn bộ các luồng ghi (insertRow, updateRow, deleteRows), importFile theo lô và đọc metadata schema |
+| G5.5 | Đã hoàn thành (Batch 12) | Quản lý mẫu truy vấn SQL (Snippets) và Lịch sử truy vấn nâng cao (Advanced History) với che giấu mật khẩu/token và cắt tỉa theo thời gian |
 | G2–G9 còn lại | Chưa triển khai | Theo dependency roadmap, không được coi là đã hoàn tất |
 
 ## Bằng chứng và giới hạn
@@ -811,3 +813,25 @@ Kết quả đợt này: check **50/50 nhóm**, Electron **50/50**, website **14
 Kiểm chứng đợt này: `npm run check` **49/49 nhóm**, Electron **49/49**, website **14/14**, server **17/17**, server syntax check pass. MySQL 8.4 tạm riêng: **19/19 pass** gồm 18 kịch bản và test cha, không skip; kiểm tra read-only account, từ chối ghi cả khi gọi raw trực tiếp theo quyền server, CTE/metadata đọc được và dữ liệu không đổi sau batch bị chặn. Container tmpfs đã dọn. Ảnh UI kiểm tra ở `/tmp/sqlpro-readonly-review/`.
 
 Một lượt Electron cuối timeout ở test kéo chọn 3 dòng; chạy lại không thay code đạt 49/49. Cần theo dõi độ ổn định test drag-selection trong CI; không coi việc rerun là bằng chứng lỗi đó đã được sửa.
+
+## Đợt 12 — Quản lý mẫu truy vấn SQL (Snippets) và Lịch sử truy vấn nâng cao (Advanced History)
+
+- **Pure module UMD (`query-snippets.js`)**:
+  - Chuẩn hóa snippet với kiểm tra độ dài title, shortcut, tags, SQL (`normalizeSnippet`).
+  - Hỗ trợ thư viện mẫu mặc định (`defaultSnippets`): SELECT phân trang, GROUP BY tổng hợp, CTE đệ quy, Batch INSERT, EXPLAIN ANALYZE.
+  - Tìm kiếm đa trường không phân biệt hoa thường theo tiêu đề, phím tắt, tag và nội dung câu lệnh (`searchSnippets`).
+  - Che giấu tự động mật khẩu (`IDENTIFIED BY`, `SET PASSWORD`, hàm `PASSWORD(...)`), API tokens, secrets (`scrubSensitiveSql` và `hasSensitiveSql`).
+  - Chuẩn hóa lịch sử truy vấn (`normalizeHistoryEntry`), tìm kiếm/lọc lịch sử theo câu truy vấn, trạng thái thành công/lỗi, database và nhãn (`searchHistory`).
+  - Cắt tỉa lịch sử an toàn theo giới hạn số lượng và số ngày lưu trữ (`pruneHistory`).
+- **Giao diện người dùng trong `app.js` và `style.css`**:
+  - Nút `📋 Snippets` trên toolbar SQL Editor và phím tắt `F2` để mở thư viện mẫu.
+  - Hộp thoại quản lý Snippet hỗ trợ tìm kiếm trực tiếp, bộ lọc thẻ tag, sao chép SQL, chỉnh sửa, xóa và tạo snippet mới.
+  - Khi chèn snippet (`insertSnippetIntoEditor`), câu lệnh được chèn tại đúng vị trí con trỏ (hoặc thay thế vùng chọn) và bảo toàn hoàn hảo ngăn xếp Undo/Redo (`Ctrl+Z`).
+  - Giao diện lịch sử nâng cao (`renderHistoryView`) với ô tìm kiếm tức thì, bộ lọc trạng thái, checkbox "Ẩn thông tin nhạy cảm", menu chọn thời gian dọn dẹp (7 ngày, 30 ngày, xóa hết), cùng các nút thao tác nhanh trên mỗi dòng lịch sử (mở tab SQL, sao chép, tạo nhanh Snippet).
+  - Trạng thái được lưu tự động qua `desktop.saveState` (tối đa 200 snippets và 500 dòng lịch sử).
+- **Kiểm chứng**:
+  - `npm run check`: **907 đạt / 0 lỗi / 13 skip** (920 tổng), tăng 7 unit tests cho module thuần `query-snippets.js`.
+  - `node test/run-renderer-smoke.cjs --no-sandbox`: **89/89 pass** (bổ sung 2 UI smoke tests bao quát mở modal, lọc snippet, chèn vào editor với undo và tìm kiếm/lọc/dọn dẹp lịch sử).
+  - `node test/run-website-smoke.cjs --no-sandbox`: **14/14 pass**.
+  - `npm --prefix server test`: **17/17 pass**.
+

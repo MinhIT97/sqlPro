@@ -4,6 +4,10 @@ let table = null;
 let mode = 'data';
 let historyRows = [];
 let savedQueries = [];
+let snippets = [];
+let snippetSearchTerm = '';
+let snippetFilterTag = '';
+let historyFilter = { query: '', status: 'all', scrubSensitive: false };
 let activeTransfer = null;
 let transferView = null;
 let transferTaskSeq = 0;
@@ -17,6 +21,7 @@ const desktop = window.sqlProDesktop;
 const RowValues = window.SqlRowValues;
 const ExportValues = window.SqlExportValues;
 const QueryResults = window.SqlQueryResults;
+const QuerySnippets = window.QuerySnippets;
 
 const DEFAULT_WORKSPACE_ID = 'ws-personal';
 const openTreeGroups = new Set(['tables']);
@@ -992,17 +997,29 @@ function acceptSqlSuggestion(editor, index = sqlAutocomplete.selected) {
 }
 
 function normalizeHistory(item) {
-  if (typeof item === 'string') return { sql: item, ok: true, at: '', durationMs: null, profileId: null, database: null };
+  if (typeof QuerySnippets !== 'undefined' && typeof QuerySnippets.normalizeHistoryEntry === 'function') {
+    return QuerySnippets.normalizeHistoryEntry(item);
+  }
+  if (typeof item === 'string') return { id: `h_${Date.now()}`, sql: item, ok: true, at: '', durationMs: null, message: '', profileId: null, database: null, tags: [] };
   if (!item || typeof item !== 'object' || typeof item.sql !== 'string') return null;
   return {
+    id: typeof item.id === 'string' && item.id ? item.id : `h_${Date.now()}`,
     sql: item.sql,
     ok: item.ok !== false,
     at: typeof item.at === 'string' ? item.at : '',
     durationMs: Number.isFinite(item.durationMs) ? item.durationMs : null,
     message: typeof item.message === 'string' ? item.message : '',
     profileId: typeof item.profileId === 'string' ? item.profileId : null,
-    database: typeof item.database === 'string' ? item.database : null
+    database: typeof item.database === 'string' ? item.database : null,
+    tags: Array.isArray(item.tags) ? item.tags : []
   };
+}
+
+function normalizeSnippetItem(item) {
+  if (typeof QuerySnippets !== 'undefined' && typeof QuerySnippets.normalizeSnippet === 'function') {
+    return QuerySnippets.normalizeSnippet(item);
+  }
+  return null;
 }
 
 function normalizeSavedQuery(item) {
@@ -1044,8 +1061,9 @@ function persistState() {
         database: tab.database || null
       })),
       activeQuery,
-      history: historyRows.slice(0, 100),
-      savedQueries: savedQueries.slice(0, 200)
+      history: historyRows.slice(0, 500),
+      savedQueries: savedQueries.slice(0, 200),
+      snippets: snippets.slice(0, 200)
     }).catch(() => undefined);
   }, 150);
 }
@@ -1408,10 +1426,16 @@ async function init() {
     sessionStorage.setItem('query', saved.savedQuery);
   }
   if (saved && Array.isArray(saved.history)) {
-    historyRows = saved.history.map(normalizeHistory).filter(Boolean).slice(0, 100);
+    historyRows = saved.history.map(normalizeHistory).filter(Boolean).slice(0, 500);
   }
   if (saved && Array.isArray(saved.savedQueries)) {
     savedQueries = saved.savedQueries.map(normalizeSavedQuery).filter(Boolean).slice(0, 200);
+  }
+  if (saved && Array.isArray(saved.snippets)) {
+    snippets = saved.snippets.map(normalizeSnippetItem).filter(Boolean).slice(0, 200);
+  }
+  if (!snippets.length && typeof QuerySnippets !== 'undefined' && typeof QuerySnippets.defaultSnippets === 'function') {
+    snippets = QuerySnippets.defaultSnippets();
   }
   if (saved && typeof saved.table === 'string') table = saved.table;
   if (saved && typeof saved.workspaceId === 'string') app.activeWorkspaceId = saved.workspaceId;
@@ -6970,7 +6994,10 @@ function trimSqlEditorHistory(history) {
 
 function recordSqlEditorChange(editor, { before, inputType } = {}) {
   const history = sqlEditorHistory(app.query, editor);
-  const previous = before || { ...history.current };
+  const normalizedBefore = typeof before === 'string'
+    ? { value: before, start: 0, end: before.length }
+    : before;
+  const previous = normalizedBefore || { ...history.current };
   if (history.beforeSelection && !before) {
     previous.start = history.beforeSelection.start;
     previous.end = history.beforeSelection.end;
@@ -7279,6 +7306,10 @@ function showShortcutsModal() {
               <td><kbd>F1</kbd></td>
               <td>Mở bảng tra cứu phím tắt này</td>
             </tr>
+            <tr>
+              <td><kbd>F2</kbd></td>
+              <td><strong>Mở thư viện mẫu SQL (Snippets)</strong></td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -7293,8 +7324,259 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'F1') {
     e.preventDefault();
     showShortcutsModal();
+  } else if (e.key === 'F2') {
+    e.preventDefault();
+    openSnippetsModal();
   }
 });
+
+function openSnippetsModal(modalMode = 'list', editingSnippet = null) {
+  if (modalMode === 'edit' || modalMode === 'create') {
+    renderSnippetFormModal(editingSnippet);
+  } else {
+    renderSnippetListModal();
+  }
+}
+
+function renderSnippetListModal() {
+  const filtered = QuerySnippets ? QuerySnippets.searchSnippets(snippets, {
+    query: snippetSearchTerm,
+    tag: snippetFilterTag
+  }) : snippets;
+
+  const allTags = new Set();
+  snippets.forEach((s) => {
+    if (Array.isArray(s.tags)) s.tags.forEach((t) => allTags.add(t));
+  });
+
+  modal(`
+    <div class="modal-card snippets-modal-card">
+      <div class="modal-header">
+        <div class="modal-title-row">
+          <h3>📋 Thư viện Mẫu SQL (Snippets)</h3>
+          <span class="subtle">${filtered.length} / ${snippets.length} mẫu</span>
+        </div>
+        <button class="close-btn" data-click="close-modal" title="Đóng (Esc)">✕</button>
+      </div>
+      <div class="modal-body snippets-modal-body">
+        <div class="snippets-toolbar">
+          <input type="search" id="snippetSearchInput" class="snippet-search-input" placeholder="🔍 Tìm kiếm mẫu theo tên, phím tắt, nội dung SQL hoặc nhãn..." value="${esc(snippetSearchTerm)}" />
+          <button class="primary" id="newSnippetBtn">＋ Thêm Snippet mới</button>
+        </div>
+        ${allTags.size > 0 ? `
+          <div class="snippet-tag-filters" role="tablist">
+            <button class="snippet-tag-chip ${!snippetFilterTag ? 'active' : ''}" data-snippet-tag="">Tất cả</button>
+            ${Array.from(allTags).sort().map((tag) => `
+              <button class="snippet-tag-chip ${snippetFilterTag === tag ? 'active' : ''}" data-snippet-tag="${esc(tag)}">#${esc(tag)}</button>
+            `).join('')}
+          </div>
+        ` : ''}
+        <div class="snippets-list">
+          ${filtered.length > 0 ? filtered.map((snippet) => `
+            <div class="snippet-card" data-snippet-id="${esc(snippet.id)}">
+              <div class="snippet-card-header">
+                <div class="snippet-title-group">
+                  <strong class="snippet-title">${esc(snippet.title)}</strong>
+                  ${snippet.shortcut ? `<span class="snippet-shortcut" title="Phím tắt">${esc(snippet.shortcut)}</span>` : ''}
+                </div>
+                <div class="snippet-card-actions">
+                  <button class="primary small-btn" data-snippet-action="insert" data-snippet-id="${esc(snippet.id)}" title="Chèn vào SQL Editor tại vị trí con trỏ">▷ Chèn</button>
+                  <button class="small-btn" data-snippet-action="copy" data-snippet-id="${esc(snippet.id)}" title="Sao chép SQL vào clipboard">📋 Chép</button>
+                  <button class="small-btn" data-snippet-action="edit" data-snippet-id="${esc(snippet.id)}" title="Chỉnh sửa mẫu này">✏️ Sửa</button>
+                  <button class="danger small-btn" data-snippet-action="delete" data-snippet-id="${esc(snippet.id)}" title="Xóa mẫu này">✕</button>
+                </div>
+              </div>
+              ${Array.isArray(snippet.tags) && snippet.tags.length > 0 ? `
+                <div class="snippet-tags">
+                  ${snippet.tags.map((t) => `<span class="snippet-tag">#${esc(t)}</span>`).join('')}
+                </div>
+              ` : ''}
+              <pre class="snippet-sql-preview mono">${esc(snippet.sql)}</pre>
+            </div>
+          `).join('') : `
+            <div class="empty">
+              <p>Không tìm thấy mẫu SQL nào phù hợp.</p>
+              ${snippetSearchTerm || snippetFilterTag ? '<button id="resetSnippetSearchBtn">Xóa bộ lọc tìm kiếm</button>' : ''}
+            </div>
+          `}
+        </div>
+      </div>
+    </div>
+  `, true);
+
+  const searchInput = $('#snippetSearchInput');
+  if (searchInput) {
+    searchInput.focus();
+    searchInput.setSelectionRange(snippetSearchTerm.length, snippetSearchTerm.length);
+    searchInput.addEventListener('input', (e) => {
+      snippetSearchTerm = e.target.value;
+      renderSnippetListModal();
+    });
+  }
+
+  $('#newSnippetBtn')?.addEventListener('click', () => {
+    renderSnippetFormModal(null);
+  });
+
+  $('#resetSnippetSearchBtn')?.addEventListener('click', () => {
+    snippetSearchTerm = '';
+    snippetFilterTag = '';
+    renderSnippetListModal();
+  });
+
+  document.querySelectorAll('[data-snippet-tag]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      snippetFilterTag = btn.dataset.snippetTag || '';
+      renderSnippetListModal();
+    });
+  });
+
+  document.querySelectorAll('[data-snippet-action]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const action = btn.dataset.snippetAction;
+      const id = btn.dataset.snippetId;
+      const snippet = snippets.find((s) => s.id === id);
+      if (!snippet) return;
+
+      if (action === 'insert') {
+        insertSnippetIntoEditor(snippet);
+      } else if (action === 'copy') {
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(snippet.sql);
+        }
+        toast(`Đã sao chép SQL mẫu "${snippet.title}"`, 'info');
+      } else if (action === 'edit') {
+        renderSnippetFormModal(snippet);
+      } else if (action === 'delete') {
+        snippets = snippets.filter((s) => s.id !== id);
+        persistState();
+        toast(`Đã xóa mẫu "${snippet.title}"`, 'info');
+        renderSnippetListModal();
+      }
+    });
+  });
+}
+
+function renderSnippetFormModal(editingSnippet = null) {
+  const isEdit = Boolean(editingSnippet);
+  const title = editingSnippet?.title || '';
+  const shortcut = editingSnippet?.shortcut || '';
+  const tagsStr = Array.isArray(editingSnippet?.tags) ? editingSnippet.tags.join(', ') : '';
+  const sql = editingSnippet?.sql || '';
+
+  modal(`
+    <div class="modal-card snippets-form-modal-card">
+      <div class="modal-header">
+        <h3>${isEdit ? '✏️ Chỉnh sửa Snippet' : '＋ Thêm Snippet Mới'}</h3>
+        <button class="close-btn" data-click="close-modal" title="Đóng (Esc)">✕</button>
+      </div>
+      <div class="modal-body">
+        <label for="snippetTitleInput">Tiêu đề mẫu <span class="subtle">(bắt buộc, tối đa 100 ký tự)</span></label>
+        <input id="snippetTitleInput" type="text" maxlength="100" placeholder="VD: Lọc đơn hàng gần đây" value="${esc(title)}" required />
+
+        <div class="formrow">
+          <div>
+            <label for="snippetShortcutInput">Phím tắt viết tắt <span class="subtle">(tùy chọn, tối đa 30 ký tự)</span></label>
+            <input id="snippetShortcutInput" type="text" maxlength="30" placeholder="VD: sel_recent" value="${esc(shortcut)}" />
+          </div>
+          <div>
+            <label for="snippetTagsInput">Nhãn / Thẻ <span class="subtle">(cách nhau bằng dấu phẩy)</span></label>
+            <input id="snippetTagsInput" type="text" placeholder="VD: select, orders, report" value="${esc(tagsStr)}" />
+          </div>
+        </div>
+
+        <label for="snippetSqlInput">Nội dung SQL <span class="subtle">(bắt buộc)</span></label>
+        <textarea id="snippetSqlInput" class="editor mono" rows="8" placeholder="SELECT * FROM table_name WHERE ..." style="height: 180px;">${esc(sql)}</textarea>
+      </div>
+      <div class="actions">
+        <button id="cancelSnippetEditBtn">← Quay lại danh sách</button>
+        <span class="spacer"></span>
+        <button class="primary" id="saveSnippetFormBtn">Lưu Snippet</button>
+      </div>
+    </div>
+  `, true);
+
+  $('#snippetTitleInput')?.focus();
+
+  $('#cancelSnippetEditBtn')?.addEventListener('click', () => {
+    renderSnippetListModal();
+  });
+
+  $('#saveSnippetFormBtn')?.addEventListener('click', () => {
+    const rawTitle = $('#snippetTitleInput').value.trim();
+    const rawShortcut = $('#snippetShortcutInput').value.trim();
+    const rawTags = $('#snippetTagsInput').value.split(',').map((s) => s.trim()).filter(Boolean);
+    const rawSql = $('#snippetSqlInput').value.trim();
+
+    if (!rawTitle) {
+      toast('Vui lòng nhập tiêu đề cho Snippet.', 'error');
+      $('#snippetTitleInput')?.focus();
+      return;
+    }
+    if (!rawSql) {
+      toast('Vui lòng nhập nội dung SQL cho Snippet.', 'error');
+      $('#snippetSqlInput')?.focus();
+      return;
+    }
+
+    const normalized = QuerySnippets ? QuerySnippets.normalizeSnippet({
+      id: editingSnippet?.id || undefined,
+      title: rawTitle,
+      shortcut: rawShortcut,
+      tags: rawTags,
+      sql: rawSql,
+      createdAt: editingSnippet?.createdAt || undefined,
+      updatedAt: new Date().toISOString()
+    }) : {
+      id: editingSnippet?.id || `snip_${Date.now()}`,
+      title: rawTitle,
+      shortcut: rawShortcut,
+      tags: rawTags,
+      sql: rawSql
+    };
+
+    if (!normalized) {
+      toast('Dữ liệu snippet không hợp lệ.', 'error');
+      return;
+    }
+
+    if (isEdit) {
+      const idx = snippets.findIndex((s) => s.id === editingSnippet.id);
+      if (idx !== -1) snippets[idx] = normalized;
+      else snippets.unshift(normalized);
+    } else {
+      snippets.unshift(normalized);
+    }
+    snippets = snippets.slice(0, 200);
+    persistState();
+    toast(`Đã lưu snippet "${normalized.title}"!`, 'info');
+    renderSnippetListModal();
+  });
+}
+
+function insertSnippetIntoEditor(snippet) {
+  if (!snippet || !snippet.sql) return;
+  closeModal();
+
+  if (mode !== 'query') {
+    mode = 'query';
+    renderQueryView();
+  }
+
+  const editor = $('#sql');
+  if (!editor) return;
+
+  const before = sqlEditorSnapshot(editor);
+  const start = editor.selectionStart ?? editor.value.length;
+  const end = editor.selectionEnd ?? start;
+
+  editor.setRangeText(snippet.sql, start, end, 'end');
+  recordSqlEditorChange(editor, { before });
+  if (app.query) app.query.sql = editor.value;
+  editor.focus();
+  toast(`Đã chèn mẫu "${snippet.title}" vào SQL Editor`, 'info');
+}
 
 function renderQueryView() {
   sqlAutocomplete.requestId += 1;
@@ -7314,6 +7596,7 @@ function renderQueryView() {
       <label class="explain-settings-option" title="Đọc SHOW CREATE TABLE trước/sau cho SELECT trên một bảng trực tiếp. Chưa hỗ trợ JOIN/CTE/subquery/view hoặc chứng nhận toàn schema."><input id="explainSchema" type="checkbox" ${app.query.explainSchema === true ? 'checked' : ''}> Kèm định nghĩa bảng</label>
       <button id="formatSqlBtn" title="Định dạng SQL chuẩn đẹp (Ctrl+Shift+F)">🪄 Định dạng</button>
       <button id="saveQueryBtn">⌑ Lưu</button>
+      <button id="snippetsBtn" title="Quản lý và chèn mẫu truy vấn SQL (F2)">📋 Snippets</button>
       <select id="queryTimeout" aria-label="Thời gian chờ truy vấn" title="Giới hạn cho toàn bộ lượt chạy, gồm thực thi và nhận dữ liệu">
         ${[[30000, '30 giây'], [60000, '1 phút'], [300000, '5 phút'], [900000, '15 phút']].map(([value, label]) => `<option value="${value}" ${queryTimeoutMs(app.query) === value ? 'selected' : ''}>Chờ ${label}</option>`).join('')}
       </select>
@@ -7439,6 +7722,7 @@ function renderQueryView() {
   });
   $('#formatSqlBtn').addEventListener('click', formatCurrentSql);
   $('#saveQueryBtn').addEventListener('click', saveQuery);
+  $('#snippetsBtn')?.addEventListener('click', () => openSnippetsModal());
   $('#queryTimeout').addEventListener('change', (event) => {
     app.query.timeoutMs = Number(event.target.value);
     persistState();
@@ -8277,7 +8561,7 @@ async function runQuery() {
     const historyMessage = result.kind === 'batch'
       ? `${result.succeededCount}/${result.statementCount} câu lệnh`
       : (result.kind === 'ok' ? `${result.affectedRows} dòng` : `${result.rows.length} dòng`);
-    historyRows.unshift({
+    historyRows.unshift(normalizeHistory({
       sql: sqlToRun,
       ok: !batchFailed,
       at: new Date().toISOString(),
@@ -8285,8 +8569,8 @@ async function runQuery() {
       message: historyMessage,
       profileId: target.profileId,
       database: tab.database || null
-    });
-    historyRows = historyRows.slice(0, 100);
+    }));
+    historyRows = historyRows.slice(0, 500);
     if (batchFailed) {
       const failed = result.results.find((entry) => !entry.ok);
       setStatus(`Lỗi ở câu lệnh #${failed?.index || result.executedCount} • ${result.durationMs} ms`);
@@ -8299,7 +8583,7 @@ async function runQuery() {
   } catch (error) {
     tab.error = error.message;
     tab.result = null;
-    historyRows.unshift({
+    historyRows.unshift(normalizeHistory({
       sql: sqlToRun,
       ok: false,
       at: new Date().toISOString(),
@@ -8307,8 +8591,8 @@ async function runQuery() {
       message: error.message,
       profileId: target.profileId,
       database: tab.database || null
-    });
-    historyRows = historyRows.slice(0, 100);
+    }));
+    historyRows = historyRows.slice(0, 500);
     setStatus(error.message);
     if (error.code === 'SESSION_CLOSED' || error.code === 'QUERY_TIMEOUT' || error.code === 'QUERY_CANCELED') {
       toast(`${error.message} Kết nối sẽ tự thiết lập lại ở lần chạy sau.`, 'error');
@@ -8347,27 +8631,131 @@ function renderHistoryView() {
     const connection = app.connections.find((item) => item.id === profileId);
     return connection ? connection.name : 'connection đã xóa';
   };
+
+  const filteredRows = QuerySnippets ? QuerySnippets.searchHistory(historyRows, {
+    query: historyFilter.query,
+    status: historyFilter.status
+  }) : historyRows;
+
   $('#workspace').innerHTML = `
-    <div class="toolbar"><strong>${historyRows.length} truy vấn</strong><span class="spacer"></span><button id="clearHistory">⌫ Xóa lịch sử</button></div>
-    ${historyRows.map((entry, index) => `
-      <div class="historyrow" data-history="${index}">
-        <span class="badge ${entry.ok ? '' : 'pending'}">${entry.ok ? 'OK' : 'Lỗi'}</span>
-        <span class="mono history-sql">${esc(entry.sql.slice(0, 300))}</span>
-        <span class="muted">${esc(connectionName(entry.profileId))} · ${esc(entry.database || '—')} · ${entry.durationMs === null ? '' : `${entry.durationMs} ms`} ${entry.at ? esc(new Date(entry.at).toLocaleString('vi-VN')) : ''}</span>
-      </div>
-    `).join('') || '<div class="empty">Chưa có truy vấn. Mở SQL Editor để bắt đầu.</div>'}
+    <div class="toolbar history-toolbar">
+      <input type="search" id="historySearchInput" class="history-search-input" placeholder="🔍 Tìm kiếm trong lịch sử SQL..." value="${esc(historyFilter.query)}" />
+      <select id="historyStatusFilter" aria-label="Bộ lọc trạng thái">
+        <option value="all" ${historyFilter.status === 'all' ? 'selected' : ''}>Tất cả trạng thái</option>
+        <option value="ok" ${historyFilter.status === 'ok' ? 'selected' : ''}>Thành công</option>
+        <option value="error" ${historyFilter.status === 'error' ? 'selected' : ''}>Lỗi</option>
+      </select>
+      <label class="history-scrub-label" title="Tự động ẩn mật khẩu, token và khóa bí mật trong câu lệnh SQL">
+        <input type="checkbox" id="scrubSensitiveCheckbox" ${historyFilter.scrubSensitive ? 'checked' : ''} /> Ẩn thông tin nhạy cảm
+      </label>
+      <span class="spacer"></span>
+      <select id="historyPruneSelect" aria-label="Dọn dẹp lịch sử">
+        <option value="">Dọn dẹp lịch sử…</option>
+        <option value="7">Giữ 7 ngày gần nhất</option>
+        <option value="30">Giữ 30 ngày gần nhất</option>
+        <option value="clear">Xóa toàn bộ lịch sử</option>
+      </select>
+      <button id="clearHistory" class="small-btn danger" title="Xóa toàn bộ lịch sử truy vấn">⌫ Xóa</button>
+      <span class="subtle"><strong>${filteredRows.length}</strong> / ${historyRows.length} truy vấn</span>
+    </div>
+    <div class="history-list">
+      ${filteredRows.map((entry, index) => {
+        const displaySql = historyFilter.scrubSensitive && QuerySnippets
+          ? QuerySnippets.scrubSensitiveSql(entry.sql)
+          : entry.sql;
+        return `
+          <div class="historyrow" data-history="${index}">
+            <span class="badge ${entry.ok ? '' : 'pending'}">${entry.ok ? 'OK' : 'Lỗi'}</span>
+            <span class="mono history-sql" title="${esc(displaySql)}">${esc(displaySql.slice(0, 300))}</span>
+            <span class="muted">${esc(connectionName(entry.profileId))} · ${esc(entry.database || '—')} · ${entry.durationMs === null ? '' : `${entry.durationMs} ms`} ${entry.at ? esc(new Date(entry.at).toLocaleString('vi-VN')) : ''}</span>
+            <div class="history-row-actions">
+              <button class="small-btn" data-history-action="open" data-history-idx="${index}" title="Mở trong tab SQL Editor">▷ Mở</button>
+              <button class="small-btn" data-history-action="copy" data-history-idx="${index}" title="Sao chép SQL">📋 Chép</button>
+              <button class="small-btn" data-history-action="snippet" data-history-idx="${index}" title="Lưu câu lệnh này thành Snippet">＋ Snippet</button>
+            </div>
+          </div>
+        `;
+      }).join('') || '<div class="empty">Chưa có truy vấn nào phù hợp với bộ lọc.</div>'}
+    </div>
   `;
-  $('#workspace').querySelectorAll('[data-history]').forEach((row) => {
-    row.addEventListener('click', () => {
-      const entry = historyRows[Number(row.dataset.history)];
-      if (!entry) return;
-      newQuery(entry.sql, { profileId: entry.profileId, database: entry.database });
+
+  const searchInput = $('#historySearchInput');
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      historyFilter.query = e.target.value;
+      renderHistoryView();
+      const updatedInput = $('#historySearchInput');
+      if (updatedInput) {
+        updatedInput.focus();
+        updatedInput.setSelectionRange(historyFilter.query.length, historyFilter.query.length);
+      }
     });
+  }
+
+  $('#historyStatusFilter')?.addEventListener('change', (e) => {
+    historyFilter.status = e.target.value;
+    renderHistoryView();
   });
-  $('#clearHistory').addEventListener('click', () => {
+
+  $('#scrubSensitiveCheckbox')?.addEventListener('change', (e) => {
+    historyFilter.scrubSensitive = e.target.checked;
+    renderHistoryView();
+  });
+
+  $('#historyPruneSelect')?.addEventListener('change', (e) => {
+    const val = e.target.value;
+    if (!val) return;
+    if (val === 'clear') {
+      historyRows = [];
+      toast('Đã xóa toàn bộ lịch sử truy vấn.', 'info');
+    } else if (val === '7' || val === '30') {
+      const days = Number(val);
+      historyRows = QuerySnippets ? QuerySnippets.pruneHistory(historyRows, { maxDays: days }) : historyRows;
+      toast(`Đã dọn dẹp lịch sử, chỉ giữ ${days} ngày gần nhất.`, 'info');
+    }
+    persistState();
+    renderHistoryView();
+  });
+
+  $('#clearHistory')?.addEventListener('click', () => {
     historyRows = [];
     persistState();
     renderHistoryView();
+  });
+
+  $('#workspace').querySelectorAll('[data-history-action]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const action = btn.dataset.historyAction;
+      const idx = Number(btn.dataset.historyIdx);
+      const entry = filteredRows[idx];
+      if (!entry) return;
+
+      if (action === 'open') {
+        newQuery(entry.sql, { profileId: entry.profileId, database: entry.database });
+      } else if (action === 'copy') {
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(entry.sql);
+        }
+        toast('Đã sao chép SQL vào clipboard', 'info');
+      } else if (action === 'snippet') {
+        renderSnippetFormModal({
+          title: `Truy vấn ${entry.database || 'SQL'} (${new Date().toLocaleDateString('vi-VN')})`,
+          shortcut: '',
+          tags: entry.database ? [entry.database] : [],
+          sql: entry.sql
+        });
+      }
+    });
+  });
+
+  $('#workspace').querySelectorAll('[data-history]').forEach((row) => {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('button')) return;
+      const entry = filteredRows[Number(row.dataset.history)];
+      if (!entry) return;
+      newQuery(entry.sql, { profileId: entry.profileId, database: entry.database });
+    });
   });
 }
 
@@ -11063,6 +11451,7 @@ const delegatedClickActions = {
   'processlist': () => showProcesslistModal(),
   'server-vars': () => showServerVarsModal(),
   'shortcuts': () => showShortcutsModal(),
+  'snippets': () => openSnippetsModal(),
   'toggle-theme': () => toggleTheme(),
   'erd': () => showErDiagramModal(),
   'load-data': () => loadData(),

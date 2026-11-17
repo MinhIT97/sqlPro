@@ -2295,3 +2295,236 @@ body.dark-theme .query-mode-badge.readonly {
 @media (prefers-reduced-motion: reduce) {
   .connection-loading-spinner { animation: none; border-color: #087f72; }
 }
+
+/* --- query snippets & enhanced history --- */
+.snippets-modal-card {
+  max-width: 760px;
+  width: 100%;
+}
+.modal-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.snippets-modal-body {
+  max-height: 70vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.snippets-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.snippet-search-input {
+  flex: 1;
+  min-width: 0;
+}
+.snippet-tag-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.snippet-tag-chip {
+  border: 1px solid #dfe5eb;
+  background: #f8fafc;
+  border-radius: 12px;
+  font-size: 11px;
+  padding: 3px 9px;
+  cursor: pointer;
+  color: #475569;
+}
+.snippet-tag-chip:hover {
+  background: #edf6f5;
+  color: #087d70;
+}
+.snippet-tag-chip.active {
+  background: #087f72;
+  color: white;
+  border-color: #087f72;
+}
+.snippets-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.snippet-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #fff;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.snippet-card:hover {
+  border-color: #cbd5e1;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+.snippet-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.snippet-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.snippet-title {
+  font-size: 13px;
+  color: #1e293b;
+}
+.snippet-shortcut {
+  font-size: 10px;
+  font-family: monospace;
+  background: #eff6ff;
+  color: #2563eb;
+  border: 1px solid #bfdbfe;
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.snippet-card-actions {
+  display: flex;
+  gap: 6px;
+}
+.snippet-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 6px 0 2px;
+}
+.snippet-tag {
+  font-size: 10px;
+  color: #64748b;
+  background: #f1f5f9;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.snippet-sql-preview {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+  color: #334155;
+  user-select: text;
+}
+.small-btn {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+/* History enhancements */
+.history-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 0;
+  flex-wrap: wrap;
+}
+.history-search-input {
+  min-width: 220px;
+  flex: 1 1 220px;
+}
+.history-scrub-label {
+  font-size: 11px;
+  color: #475569;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.history-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #e2e8ec;
+  border-radius: 7px;
+  background: #fff;
+  overflow: hidden;
+}
+.historyrow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #edf0f3;
+  cursor: pointer;
+}
+.historyrow:last-child {
+  border-bottom: none;
+}
+.historyrow:hover {
+  background: #f7fbfa;
+}
+.history-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  opacity: 0.85;
+}
+.historyrow:hover .history-row-actions {
+  opacity: 1;
+}
+
+/* Dark theme overrides */
+body.dark-theme .snippet-card {
+  background: #1a2629;
+  border-color: #2d3f43;
+}
+body.dark-theme .snippet-card:hover {
+  border-color: #3d555b;
+}
+body.dark-theme .snippet-title {
+  color: #e2e8f0;
+}
+body.dark-theme .snippet-shortcut {
+  background: #1e3a5f;
+  color: #93c5fd;
+  border-color: #2563eb;
+}
+body.dark-theme .snippet-tag-chip {
+  background: #233438;
+  border-color: #374b50;
+  color: #94a3b8;
+}
+body.dark-theme .snippet-tag-chip:hover {
+  background: #2b4247;
+  color: #77e0c8;
+}
+body.dark-theme .snippet-tag-chip.active {
+  background: #087f72;
+  color: white;
+  border-color: #087f72;
+}
+body.dark-theme .snippet-tag {
+  background: #243539;
+  color: #94a3b8;
+}
+body.dark-theme .snippet-sql-preview {
+  background: #141f22;
+  border-color: #2d3f43;
+  color: #cbd5e1;
+}
+body.dark-theme .history-list {
+  background: #162427;
+  border-color: #2c3e42;
+}
+body.dark-theme .historyrow {
+  border-color: #243539;
+}
+body.dark-theme .historyrow:hover {
+  background: #1e2e32;
+}
+body.dark-theme .history-scrub-label {
+  color: #94a3b8;
+}

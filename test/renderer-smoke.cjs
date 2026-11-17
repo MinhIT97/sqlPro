@@ -1643,6 +1643,37 @@ app.whenReady().then(async () => {
 
     await evaluate('closeModal()');
   });
+  await check('smart data masking toggles and masks sensitive PII columns in data grid and query grid', async () => {
+    // 1. Table grid masking test
+    await evaluate(`(() => {
+      app.columns = [
+        { name: 'id', type: 'int' },
+        { name: 'email', type: 'varchar(255)' },
+        { name: 'phone', type: 'varchar(50)' }
+      ];
+      app.rows = [
+        { id: 1, email: 'secret.user@company.com', phone: '0912345678' }
+      ];
+      app.maskData = false;
+      renderDataView();
+    })()`);
+
+    let emailCell = await evaluate("document.querySelector('td[data-col=\"email\"]').textContent");
+    assert.equal(emailCell, 'secret.user@company.com');
+
+    // Click toggle mask button
+    await evaluate("$('#maskDataBtn').click()");
+    emailCell = await evaluate("document.querySelector('td[data-col=\"email\"]').textContent");
+    assert.equal(emailCell, 's***r@company.com');
+
+    let phoneCell = await evaluate("document.querySelector('td[data-col=\"phone\"]').textContent");
+    assert.equal(phoneCell, '091****678');
+
+    // Toggle off
+    await evaluate("$('#maskDataBtn').click()");
+    emailCell = await evaluate("document.querySelector('td[data-col=\"email\"]').textContent");
+    assert.equal(emailCell, 'secret.user@company.com');
+  });
   await check('schema diff modal opens, configures source/target, and navigates tabs', async () => {
     await evaluate('showSchemaDiffModal()');
     await until("Boolean($('#modal .schema-diff-card'))");

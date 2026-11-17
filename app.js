@@ -1064,7 +1064,8 @@ function persistState() {
       activeQuery,
       history: historyRows.slice(0, 500),
       savedQueries: savedQueries.slice(0, 200),
-      snippets: snippets.slice(0, 200)
+      snippets: snippets.slice(0, 200),
+      maskData: Boolean(app.maskData)
     }).catch(() => undefined);
   }, 150);
 }
@@ -1440,6 +1441,7 @@ async function init() {
   }
   if (saved && typeof saved.table === 'string') table = saved.table;
   if (saved && typeof saved.workspaceId === 'string') app.activeWorkspaceId = saved.workspaceId;
+  app.maskData = Boolean(saved && saved.maskData);
 
   try {
     await refreshWorkspaces();
@@ -2088,10 +2090,13 @@ async function exportCurrentResult(format) {
     return;
   }
   const cols = target.columns.map((c) => c.name);
+  const rowsToExport = app.maskData && typeof SqlDataMasking !== 'undefined'
+    ? SqlDataMasking.maskRows(target.rows, target.columns, SqlDataMasking.createMaskingConfig(target.columns))
+    : target.rows;
   if (format === 'csv') {
     const csvContent = '\uFEFF' + [
       cols.map((name) => ExportValues.csvField(name, ',')).join(','),
-      ...target.rows.map((row) => row.map((value) => ExportValues.csvField(value, ',')).join(','))
+      ...rowsToExport.map((row) => row.map((value) => ExportValues.csvField(value, ',')).join(','))
     ].join('\r\n');
     desktop.saveTextFile({
       suggestedName: 'query-result.csv',
@@ -2105,7 +2110,7 @@ async function exportCurrentResult(format) {
     }).catch((err) => toast(err.message, 'error'));
   } else {
     const names = ExportValues.uniqueColumnNames(cols);
-    const json = '[\n' + target.rows.map((row) => '{' + names.map((name, index) =>
+    const json = '[\n' + rowsToExport.map((row) => '{' + names.map((name, index) =>
       `${JSON.stringify(name)}:${ExportValues.jsonField(row[index], target.columns[index])}`).join(',') + '}').join(',\n') + '\n]';
     desktop.saveTextFile({
       suggestedName: 'query-result.json',
@@ -7142,6 +7147,7 @@ function renderDataView() {
       <button id="refreshBtn">↻</button>
       <button id="importBtn" ${readOnly ? 'disabled title="Kết nối chỉ đọc"' : ''}>↥ Nhập</button>
       <button id="exportBtn">↧ Xuất</button>
+      <button id="maskDataBtn" class="${app.maskData ? 'active' : ''}" title="Bật/Tắt che giấu dữ liệu nhạy cảm PII (Email, SĐT, Thẻ, Mật khẩu)">🎭 ${app.maskData ? 'Đang che PII' : 'Che PII'}</button>
     </div>
     <div id="grid">${dataGridHtml()}</div>
     <div class="hint">
@@ -7190,6 +7196,17 @@ function renderDataView() {
   $('#refreshBtn').addEventListener('click', () => loadData());
   $('#importBtn').addEventListener('click', () => transfer('import'));
   $('#exportBtn').addEventListener('click', () => transfer('export'));
+  $('#maskDataBtn')?.addEventListener('click', () => {
+    app.maskData = !app.maskData;
+    $('#grid').innerHTML = dataGridHtml();
+    const btn = $('#maskDataBtn');
+    if (btn) {
+      btn.className = app.maskData ? 'active' : '';
+      btn.textContent = `🎭 ${app.maskData ? 'Đang che PII' : 'Che PII'}`;
+    }
+    toast(app.maskData ? 'Đã bật che giấu dữ liệu nhạy cảm PII' : 'Đã tắt che giấu dữ liệu', 'info');
+    persistState();
+  });
   const grid = $('#grid');
   grid.addEventListener('dblclick', (event) => {
     const td = event.target.closest('td[data-col]');
@@ -7227,7 +7244,11 @@ function dataGridHtml() {
     <tr data-row="${index}">
       <td>${editable ? `<input class="rowcheck" type="checkbox" value="${index}" aria-label="Chọn bản ghi ${index + 1}">` : ''}</td>
       ${visible.map((column) => {
-        const value = row[column.name];
+        let value = row[column.name];
+        if (app.maskData && typeof SqlDataMasking !== 'undefined') {
+          const rule = SqlDataMasking.detectMaskType(column.name, column.type);
+          if (rule) value = SqlDataMasking.maskValue(value, rule);
+        }
         const isNull = value === null || value === undefined;
         const text = isNull ? 'NULL' : String(value);
         const shown = text.length > 180 ? `${text.slice(0, 180)}…` : text;
@@ -9138,11 +9159,16 @@ function queryGridBodyHtml(result, start = 0) {
       <tr data-query-row="${origIndex}" class="${selection.rows.has(origIndex) ? 'query-row-selected' : ''}" aria-selected="${selection.rows.has(origIndex)}">
         <td class="muted">${index + 1}</td>
         ${row.map((value, colIdx) => {
-          const isNull = value === null || value === undefined;
-          const text = isNull ? 'NULL' : String(value);
+          let displayVal = value;
+          const colMeta = result.columns[colIdx];
+          if (app.maskData && !result.isExplain && typeof SqlDataMasking !== 'undefined') {
+            const rule = SqlDataMasking.detectMaskType(colMeta?.name, colMeta?.type);
+            if (rule) displayVal = SqlDataMasking.maskValue(value, rule);
+          }
+          const isNull = displayVal === null || displayVal === undefined;
+          const text = isNull ? 'NULL' : String(displayVal);
           const shown = text.length > 180 ? `${text.slice(0, 180)}…` : text;
           let cellDisplay = isNull ? '<span class="null-badge">NULL</span>' : esc(shown);
-          const colMeta = result.columns[colIdx];
           const colName = colMeta ? colMeta.name.toLowerCase() : '';
           if (result.isExplain && colName === 'type' && !isNull) {
             const access = window.SqlQueryResults.explainAccess(value);
@@ -9290,6 +9316,7 @@ function singleQueryResultHtml(result, compact = false) {
         ${badgeHtml}
       </div>
       <div class="actions-right">
+        <button type="button" data-click="toggle-mask" class="${app.maskData ? 'active' : ''}" title="Bật/Tắt che giấu dữ liệu nhạy cảm PII (Email, SĐT, Số thẻ, Mật khẩu)">🎭 ${app.maskData ? 'Đang che PII' : 'Che PII'}</button>
         <button type="button" data-click="export-result" data-format="csv" title="Xuất kết quả truy vấn ra CSV">↧ Xuất CSV</button>
         <button type="button" data-click="export-result" data-format="json" title="Xuất kết quả truy vấn ra JSON">↧ Xuất JSON</button>
       </div>
@@ -12441,6 +12468,23 @@ async function transfer(type) {
   await importFileModal();
 }
 
+function toggleMaskData() {
+  app.maskData = !app.maskData;
+  if (mode === 'query') {
+    renderQueryView();
+  } else if (mode === 'data') {
+    const grid = $('#grid');
+    if (grid) grid.innerHTML = dataGridHtml();
+    const btn = $('#maskDataBtn');
+    if (btn) {
+      btn.className = app.maskData ? 'active' : '';
+      btn.textContent = `🎭 ${app.maskData ? 'Đang che PII' : 'Che PII'}`;
+    }
+  }
+  toast(app.maskData ? 'Đã bật che giấu dữ liệu nhạy cảm PII' : 'Đã tắt che giấu dữ liệu', 'info');
+  persistState();
+}
+
 const delegatedClickActions = {
   'close-modal': () => closeModal(),
   'new-connection': () => connection(),
@@ -12456,6 +12500,7 @@ const delegatedClickActions = {
   'shortcuts': () => showShortcutsModal(),
   'snippets': () => openSnippetsModal(),
   'toggle-theme': () => toggleTheme(),
+  'toggle-mask': () => toggleMaskData(),
   'erd': () => showErDiagramModal(),
   'load-data': () => loadData(),
   'view': (target) => view(target.dataset.view),

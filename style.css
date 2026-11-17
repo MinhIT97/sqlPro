@@ -2940,3 +2940,18 @@ body.dark-theme .diff-options-bar {
   background: #1e293b;
   border-color: #334155;
 }
+
+/* Smart Data Masking Toolbar Indicators */
+.toolbar button#maskDataBtn.active,
+.query-grid-toolbar button[data-click="toggle-mask"].active {
+  background: #087f72 !important;
+  color: #ffffff !important;
+  border-color: #065f54 !important;
+  font-weight: 600;
+}
+body.dark-theme .toolbar button#maskDataBtn.active,
+body.dark-theme .query-grid-toolbar button[data-click="toggle-mask"].active {
+  background: #0d9488 !important;
+  color: #ffffff !important;
+  border-color: #14b8a6 !important;
+}

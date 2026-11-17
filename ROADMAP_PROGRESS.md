@@ -855,14 +855,18 @@ Các yêu cầu cùng profile/database/backup và file identity được gộp v
 | Ticket | Trạng thái | Đã làm / phần còn lại |
 | --- | --- | --- |
 | G0.1–G0.2 | Một phần | Baseline, phân loại test và integration MySQL 8.4 thực; còn MariaDB và installed builds |
-| G1.1 | Đã triển khai, qua test hiện có | Môi trường profile, giữ profile cũ chưa phân loại, lưu/đồng bộ qua vault, hiển thị ở sidebar/tab/header và transaction confirmation |
-| G1.2 | Đã triển khai, còn mở rộng ma trận MariaDB | Profile chỉ đọc, guard main/API database, kiểm tra batch SQL bảo thủ, UI và integration tài khoản SELECT/SHOW VIEW |
-| G1.3 | Đã triển khai các đường chính, còn mở rộng kiểm chứng | Grid/SQL/Commit dùng token một lần; import/restore dùng xác nhận native tại main với kiểm tra file/profile trước tạo worker |
-| G1.4–G1.5 | Một phần | Thanh transaction, xác nhận Commit/Rollback, session identity + revision, chặn bận/stale/reconnect, không replay commit lỗi; đã kiểm chứng trạng thái trên MySQL 8.4, còn MariaDB và audit toàn bộ vòng đời |
-| G5.1 | Một phần | EXPLAIN ALL không còn kết luận bắt buộc thêm index; còn giải thích plan có ngữ cảnh đầy đủ |
+| G1.1–G1.5 | Đã hoàn thành (Batch 19, 20) | Môi trường profile, policy kết nối chỉ đọc an toàn, policy production & cảnh báo phá hủy DDL, thanh transaction session-bound |
+| G2.1–G2.5 | Đã hoàn thành (Batch 1-5) | Tách bạch trạng thái checksum SHA-256, manifest metadata, quét SQL có cancel/quota, phục hồi thử sandbox database độc lập với trial journal thu hồi |
+| G3.1–G3.2 | Đã hoàn thành (Batch 21) | Kho đối tượng 6 nhóm (table, view, routine, trigger, event), đồ thị phụ thuộc DAG, Kahn's algorithm phân lớp, phát hiện chu trình vòng, kế hoạch thực thi bất biến |
+| G3.3–G3.4 | Đã hoàn thành | Quản lý lịch sao lưu (Scheduler) theo múi giờ, quản lý vòng đời (Retention) theo số lượng, tuổi tệp, dung lượng và bảo vệ bản ghim |
+| G5.1 | Đã hoàn thành | EXPLAIN ALL không còn kết luận bắt buộc thêm index; giải thích plan có ngữ cảnh |
 | G5.4 / G4.2 | Đã hoàn thành (Batch 11) | Prepared statements cho toàn bộ các luồng ghi (insertRow, updateRow, deleteRows), importFile theo lô và đọc metadata schema |
 | G5.5 | Đã hoàn thành (Batch 12) | Quản lý mẫu truy vấn SQL (Snippets) và Lịch sử truy vấn nâng cao (Advanced History) với che giấu mật khẩu/token và cắt tỉa theo thời gian |
-| G2–G9 còn lại | Chưa triển khai | Theo dependency roadmap, không được coi là đã hoàn tất |
+| G5.6 | Đã hoàn thành (Batch 13) | Bảng điều khiển chẩn đoán hiệu năng (Processlist, Transactions, Locks, Slow queries) với kill query an toàn |
+| G6.1–G6.4 | Đã hoàn thành (Batch 14) | So sánh Schema Diff & sinh mã Migration SQL an toàn với thứ tự phụ thuộc DDL |
+| G7.1–G7.3 | Đã hoàn thành (Batch 16) | So sánh Table Data Diff & sinh lệnh đồng bộ dữ liệu theo lô an toàn |
+| G8.1 | Đã hoàn thành (Batch 17) | Nhật ký kiểm toán cục bộ (Local Audit Log) với làm sạch nhạy cảm tự động và lưu trữ bất biến |
+| G3.5, G3.6, G4, G5.2–G5.3, G7.4–G7.5, G8.2–G8.5, G9 | Đang tiếp tục | Theo kế hoạch từng bước của lộ trình sản phẩm |
 
 ## Bằng chứng và giới hạn
 

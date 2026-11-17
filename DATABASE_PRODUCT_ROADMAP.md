@@ -66,8 +66,8 @@ Nghiệm thu: báo cáo có cách tái chạy, commit và môi trường; failur
 - [x] G1.1 Thêm `environment` Local/Staging/Production và màu profile; migration profile cũ mặc định không phân loại, không tự đoán production theo hostname. Hiện tên kết nối/database tại tab, editor, dialog ghi và thanh trạng thái; dùng chữ cùng màu. Dải viền cảnh báo header và dark theme contrast.
 - [x] G1.2 Chế độ chỉ đọc: ưu tiên tài khoản DB có quyền chỉ đọc; thêm policy tại main cho toàn bộ đường ghi (SQL, grid, import, restore, copy, migration). Phân tích batch/comment/CTE/routine; câu chưa phân loại được bị từ chối trong chế độ chỉ đọc của app. Không tuyên bố bộ phân tích SQL thay thế quyền DB.
 - [x] G1.3 Policy production: preview SQL có placeholder/tham số cho thao tác UI; che giá trị nhạy cảm mặc định; xác nhận đích và thao tác DROP/TRUNCATE/ghi thiếu điều kiện. Tách cảnh báo theo cú pháp khỏi dự báo số dòng; không chạy COUNT tốn kém hoặc EXPLAIN ANALYZE ngầm.
-- [ ] G1.4 Thanh transaction hiển thị session, autocommit, trạng thái, thời điểm bắt đầu quan sát; Commit/Rollback chỉ tác động session đã chụp. Không cho commit xen vào tác vụ bận. Cảnh báo DDL có thể implicit commit; đồng bộ lại trạng thái từ server sau lỗi/reconnect.
-- [ ] G1.5 Đóng/đổi/ngắt kết nối: báo đúng transaction chưa kết thúc; giữ pin session đang có transaction; không tự chạy lại câu ghi sau mất mạng. Xác định và trình bày rõ quan hệ tab/session.
+- [x] G1.4 Thanh transaction hiển thị session, autocommit, trạng thái, thời điểm bắt đầu quan sát; Commit/Rollback chỉ tác động session đã chụp. Không cho commit xen vào tác vụ bận. Cảnh báo DDL có thể implicit commit; đồng bộ lại trạng thái từ server sau lỗi/reconnect.
+- [x] G1.5 Đóng/đổi/ngắt kết nối: báo đúng transaction chưa kết thúc; giữ pin session đang có transaction; không tự chạy lại câu ghi sau mất mạng. Xác định và trình bày rõ quan hệ tab/session.
 
 File chính: `electron/store-schema.cjs`, `store.cjs`, `session-registry.cjs`, `database.cjs`, `main.cjs`, `preload.cjs`, `app.js`, `style.css`, test tương ứng. Module mới dự kiến: policy SQL thuần và controller transaction.
 
@@ -75,20 +75,20 @@ Nghiệm thu: không đường IPC ghi nào vượt policy; profile cũ đọc �
 
 ## 6. G2 — backup dễ hiểu và có thể kiểm chứng phục hồi
 
-- [ ] G2.1 Hoàn thiện tên/ghi chú, nguồn, lựa chọn backup, consistency, cảnh báo engine/DDL, phiên bản app/DB, checksum và lịch sử kiểm tra. Tách trạng thái ghi tệp, checksum, phục hồi thử; không dùng một dấu tích chung.
-- [ ] G2.2 Quét SQL: taskId, tiến độ, cancel, hàng đợi hữu hạn, timeout và giới hạn kết quả; gộp yêu cầu trùng. Cache theo profile/database/id và file identity; vô hiệu khi đổi nội dung. Kiểm tra tệp thay đổi trong/sau quét. Không dùng cache stale để cho phép restore.
-- [ ] G2.3 Phục hồi thử bằng kết nối riêng vào database sandbox do ứng dụng tạo và nhận diện; có preflight quyền/dung lượng, quota, timeout, hủy và cleanup. Không đụng database người dùng trùng tên; còn sandbox sau lỗi phải hiển thị và cho dọn có kiểm tra ownership.
-- [ ] G2.4 Đánh giá schema/đối tượng, số dòng theo mức đáng tin và hash dữ liệu có canonicalization khi khả thi. Phạm vi không xác minh được phải là unknown. Đối với SQL có schema ghi rõ, dùng rewrite có phân tích và kiểm chứng hoặc báo không hỗ trợ sandbox; không replace tên bằng chuỗi toàn cục. Không nới kiểm tra scope của restore hiện tại.
-- [ ] G2.5 Lưu báo cáo gắn hash tệp, phiên bản server, thời gian và phạm vi xác minh. Chạy fixture restore lỗi/hủy/disk full/file đổi; kết quả không được báo hoàn tác toàn bộ khi DDL đã thay đổi đích.
+- [x] G2.1 Hoàn thiện tên/ghi chú, nguồn, lựa chọn backup, consistency, cảnh báo engine/DDL, phiên bản app/DB, checksum và lịch sử kiểm tra. Tách trạng thái ghi tệp, checksum, phục hồi thử; không dùng một dấu tích chung.
+- [x] G2.2 Quét SQL: taskId, tiến độ, cancel, hàng đợi hữu hạn, timeout và giới hạn kết quả; gộp yêu cầu trùng. Cache theo profile/database/id và file identity; vô hiệu khi đổi nội dung. Kiểm tra tệp thay đổi trong/sau quét. Không dùng cache stale để cho phép restore.
+- [x] G2.3 Phục hồi thử bằng kết nối riêng vào database sandbox do ứng dụng tạo và nhận diện; có preflight quyền/dung lượng, quota, timeout, hủy và cleanup. Không đụng database người dùng trùng tên; còn sandbox sau lỗi phải hiển thị và cho dọn có kiểm tra ownership.
+- [x] G2.4 Đánh giá schema/đối tượng, số dòng theo mức đáng tin và hash dữ liệu có canonicalization khi khả thi. Phạm vi không xác minh được phải là unknown. Đối với SQL có schema ghi rõ, dùng rewrite có phân tích và kiểm chứng hoặc báo không hỗ trợ sandbox; không replace tên bằng chuỗi toàn cục. Không nới kiểm tra scope của restore hiện tại.
+- [x] G2.5 Lưu báo cáo gắn hash tệp, phiên bản server, thời gian và phạm vi xác minh. Chạy fixture restore lỗi/hủy/disk full/file đổi; kết quả không được báo hoàn tác toàn bộ khi DDL đã thay đổi đích.
 
 Nghiệm thu: backup cũ vẫn đọc được; hủy quét giải phóng worker; không trộn kết quả khi đổi selection; phục hồi thử không thể chọn nhầm DB thật; thành công có bằng chứng đối chiếu. Nội dung backup không được coi là tin cậy; sandbox cần tài khoản DB hạn chế quyền vì routine/trigger có thể có tác động gián tiếp.
 
 ## 7. G3 — phục hồi chọn đối tượng và vận hành backup
 
-- [ ] G3.1 Inventory theo bảng/view/routine/trigger/event; chọn cấu trúc/dữ liệu; dependency graph, xung đột, thứ tự FK/view/routine và chính sách đích rõ ràng. Trường hợp dependency động không phân tích được cần cảnh báo/báo không hỗ trợ; không tự bỏ qua lỗi.
-- [ ] G3.2 Tạo execution plan bất biến gắn hash tệp và selection; preview CREATE/DROP/ghi dữ liệu; preflight lại sát lúc chạy. Bảo đảm mỗi statement được chọn đúng đối tượng; FK vòng và dữ liệu phụ thuộc có fixture riêng.
-- [ ] G3.3 Scheduler: lịch theo múi giờ người dùng, DST, missed run, sleep/wake, retry có backoff và chống trùng. MVP chạy khi app đang mở và nói rõ giới hạn; bước sau tích hợp scheduler hệ điều hành cho chạy khi app đóng, có kiểm tra khả năng truy cập secret khi không có desktop session.
-- [ ] G3.4 Retention theo số bản/tuổi/tổng dung lượng; preview dọn; chỉ dọn sau backup mới thành công; giữ bản ghim và bản đang được dùng. Phân biệt lỗi ghi tệp, lỗi verify và lỗi xóa; thử disk full, đồng hồ thay đổi và crash.
+- [x] G3.1 Inventory theo bảng/view/routine/trigger/event; chọn cấu trúc/dữ liệu; dependency graph, xung đột, thứ tự FK/view/routine và chính sách đích rõ ràng. Trường hợp dependency động không phân tích được cần cảnh báo/báo không hỗ trợ; không tự bỏ qua lỗi.
+- [x] G3.2 Tạo execution plan bất biến gắn hash tệp và selection; preview CREATE/DROP/ghi dữ liệu; preflight lại sát lúc chạy. Bảo đảm mỗi statement được chọn đúng đối tượng; FK vòng và dữ liệu phụ thuộc có fixture riêng.
+- [x] G3.3 Scheduler: lịch theo múi giờ người dùng, DST, missed run, sleep/wake, retry có backoff và chống trùng. MVP chạy khi app đang mở và nói rõ giới hạn; bước sau tích hợp scheduler hệ điều hành cho chạy khi app đóng, có kiểm tra khả năng truy cập secret khi không có desktop session.
+- [x] G3.4 Retention theo số bản/tuổi/tổng dung lượng; preview dọn; chỉ dọn sau backup mới thành công; giữ bản ghim và bản đang được dùng. Phân biệt lỗi ghi tệp, lỗi verify và lỗi xóa; thử disk full, đồng hồ thay đổi và crash.
 - [ ] G3.5 Nén/mã hóa theo luồng, định dạng versioned; thiết kế KDF, authenticated encryption và recovery trước khi code. Hỗ trợ file SQL cũ; checksum tệp lưu và hash nội dung là hai giá trị riêng. Không lưu mật khẩu giải mã trong manifest/log; xuất hướng dẫn quản lý khóa.
 - [ ] G3.6 Bản sao ngoài máy: thư mục/ổ khác trước, remote storage sau qua adapter. Ghi atomic, verify đích, retry an toàn, trạng thái từng nơi lưu; không coi copy chưa xác minh là bản đủ điều kiện retention. Không đặt credential trong renderer.
 

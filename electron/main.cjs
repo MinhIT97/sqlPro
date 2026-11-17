@@ -43,7 +43,9 @@ const { previewRestoreSelection } = require('./restore-selection.cjs');
 const { collectSelectionTargetFacts, buildSelectionTargetPreview } = require('./restore-selection-target.cjs');
 const { buildSelectionDraft } = require('./restore-selection-plan.cjs');
 const { normalizeConflictPolicy } = require('./restore-selection-policy.cjs');
-const { stripLeadingComments } = require('./sql-script.cjs');
+const { stripLeadingComments, SqlScriptParser } = require('./sql-script.cjs');
+const { RestoreObjectInventory } = require('./restore-object-inventory.cjs');
+const { RestoreDependencyGraph } = require('./restore-dependency-graph.cjs');
 const { validateAnalyzeSource, buildAnalyzeQuery, assertAnalyzeSession, assertPlanExport } = require('./query-analyze.cjs');
 const { explainSettings, explainSchema } = require('../query-results.js');
 let scheduleServices;
@@ -1967,6 +1969,107 @@ handle('db:preview-backup-selection-target', async payload => {
   }
   check();
   return report;
+});
+
+handle('db:inspect-restore-objects', async payload => {
+  if (activeDatabaseTransfer?.operation === 'backup-retention') throw new Error('Đang dọn backup. Hãy đợi hoàn tất.');
+  const profileId = payload?.profileId;
+  const database = payload?.database;
+  const id = payload?.id;
+  const taskId = payload?.taskId;
+  if (!profileId || !database || !id || !taskId) throw new Error('Thiếu tham số quét đối tượng backup.');
+  store.getWithSecrets(profileId);
+  const filePath = await resolveBackup(app.getPath('userData'), profileId, database, id);
+  const stat = await fs.promises.lstat(filePath);
+  if (!stat.isFile()) throw new Error('Tệp backup không hợp lệ.');
+
+  const inv = new RestoreObjectInventory(database);
+  const parser = new SqlScriptParser();
+  const hash = crypto.createHash('sha256');
+
+  const stream = fs.createReadStream(filePath, { encoding: 'utf8', highWaterMark: 64 * 1024 });
+  let statementCount = 0;
+
+  for await (const chunk of stream) {
+    hash.update(chunk);
+    for (const stmt of parser.push(chunk)) {
+      statementCount++;
+      inv.addStatement(stmt, statementCount);
+    }
+  }
+  for (const stmt of parser.end()) {
+    statementCount++;
+    inv.addStatement(stmt, statementCount);
+  }
+
+  const checksum = hash.digest('hex');
+  const graph = inv.buildDependencyGraph();
+  const cycles = graph.detectCycles();
+
+  return {
+    checksum,
+    database,
+    counts: {
+      tables: inv.tables.size,
+      views: inv.views.size,
+      functions: inv.functions.size,
+      procedures: inv.procedures.size,
+      triggers: inv.triggers.size,
+      events: inv.events.size,
+      statements: statementCount
+    },
+    tables: Array.from(inv.tables.values()).map(t => ({ name: t.name, createStatements: t.createStatements, dataStatements: t.dataStatements, dropStatements: t.dropStatements, dependencies: t.dependencies })),
+    views: Array.from(inv.views.values()).map(v => ({ name: v.name, createStatements: v.createStatements, dropStatements: v.dropStatements, referencedTables: v.referencedTables })),
+    functions: Array.from(inv.functions.values()).map(f => ({ name: f.name, createStatements: f.createStatements, dropStatements: f.dropStatements, hasDynamicSql: f.hasDynamicSql })),
+    procedures: Array.from(inv.procedures.values()).map(p => ({ name: p.name, createStatements: p.createStatements, dropStatements: p.dropStatements, hasDynamicSql: p.hasDynamicSql })),
+    triggers: Array.from(inv.triggers.values()).map(tr => ({ name: tr.name, createStatements: tr.createStatements, dropStatements: tr.dropStatements, targetTable: tr.targetTable, timing: tr.timing, event: tr.event })),
+    events: Array.from(inv.events.values()).map(e => ({ name: e.name, createStatements: e.createStatements, dropStatements: e.dropStatements })),
+    findings: inv.findings,
+    hasCycles: cycles.length > 0,
+    cycles
+  };
+});
+
+handle('db:preview-object-restore-plan', async payload => {
+  if (activeDatabaseTransfer?.operation === 'backup-retention') throw new Error('Đang dọn backup. Hãy đợi hoàn tất.');
+  const { profileId, database, id, taskId } = payload || {};
+  if (!profileId || !database || !id || !taskId) throw new Error('Thiếu thông tin yêu cầu kế hoạch phục hồi.');
+  const profile = store.getWithSecrets(profileId);
+  const filePath = await resolveBackup(app.getPath('userData'), profileId, database, id);
+  const stat = await fs.promises.lstat(filePath);
+  if (!stat.isFile()) throw new Error('Tệp backup không hợp lệ.');
+
+  const inv = new RestoreObjectInventory(database);
+  const parser = new SqlScriptParser();
+  const hash = crypto.createHash('sha256');
+
+  const stream = fs.createReadStream(filePath, { encoding: 'utf8', highWaterMark: 64 * 1024 });
+  let statementCount = 0;
+
+  for await (const chunk of stream) {
+    hash.update(chunk);
+    for (const stmt of parser.push(chunk)) {
+      statementCount++;
+      inv.addStatement(stmt, statementCount);
+    }
+  }
+  for (const stmt of parser.end()) {
+    statementCount++;
+    inv.addStatement(stmt, statementCount);
+  }
+
+  const checksum = hash.digest('hex');
+  const targetId = targetIdentity(profile);
+
+  const plan = inv.generateExecutionPlan({
+    selection: payload.selection || {},
+    fileChecksum: checksum,
+    targetIdentity: targetId,
+    targetFacts: payload.targetFacts || null,
+    dropExisting: Boolean(payload.dropExisting)
+  });
+
+  return { plan, checksum };
 });
 
 function trialJournal() {

@@ -62,7 +62,48 @@ test('DatabaseSession blocks all public write paths before using the connection'
   for (const run of [
     () => session.insertRow({}), () => session.updateRow({}), () => session.deleteRows({}),
     () => session.importFile({}), () => session.restoreDatabase({}),
+    () => session.analyzeQuery('SELECT 1'),
     () => session.runQueryScript('SELECT 1; DELETE FROM users', 30000, true),
     () => session.exportQueryFile({sql:'SELECT change_data()'}, () => {})
   ]) await assert.rejects(run(), (error) => ['CONNECTION_READ_ONLY', 'READ_ONLY_SQL_UNSUPPORTED'].includes(error.code));
+});
+
+test('read-only policy supports CTE with column lists, recursive CTE, JOIN subqueries, CASE WHEN, and safe metadata', () => {
+  for (const sql of [
+    'WITH cte(col1, col2) AS (SELECT 1, 2) SELECT * FROM cte',
+    'WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 5) SELECT * FROM seq',
+    'WITH a(x) AS (SELECT 1), b(y) AS (SELECT 2) SELECT * FROM a JOIN b ON a.x = b.y',
+    'SELECT * FROM a JOIN (SELECT id FROM b) x ON a.id = x.id',
+    'SELECT * FROM a LEFT JOIN (SELECT id FROM b) x ON a.id = x.id',
+    'SELECT * FROM a STRAIGHT_JOIN (SELECT id FROM b) x ON a.id = x.id',
+    'SELECT CASE WHEN (status = 1) THEN (10) ELSE (20) END FROM orders',
+    'SELECT CASE status WHEN 1 THEN 10 ELSE 20 END FROM orders',
+    'SELECT * FROM orders WHERE amount BETWEEN (10) AND (50)',
+    'SELECT * FROM users WHERE name LIKE (\'%test%\')',
+    'SHOW TABLE STATUS',
+    'SHOW PROCEDURE STATUS',
+    'SHOW FUNCTION STATUS',
+    'SHOW TRIGGERS',
+    'SHOW EVENTS',
+    'SHOW OPEN TABLES',
+    'SHOW PLUGINS',
+    'SHOW PRIVILEGES',
+    'SHOW PROFILES',
+    'SHOW SLAVE STATUS',
+    'SHOW REPLICA STATUS',
+    'SELECT JSON_ARRAYAGG(name), JSON_PRETTY(data) FROM items',
+    'SELECT ASCII(\'a\'), BIT_COUNT(15), LAST_DAY(NOW()) FROM tbl',
+    'SELECT NOW(), LOCALTIME(), SYSDATE() FROM tbl'
+  ]) assert.doesNotThrow(() => assertReadOnlySql(readOnly, sql), sql);
+});
+
+test('read-only policy strictly blocks CTE attempts to mutate or call unrecognized routines', () => {
+  for (const sql of [
+    'WITH cte(col1) AS (SELECT 1) SELECT dangerous_func(1)',
+    'WITH x(y) AS (SELECT 1) UPDATE users SET id = 1',
+    'WITH func(x) AS (SELECT 1) DELETE FROM users',
+    'WITH cte(x) AS (SELECT 1) INSERT INTO users(id) VALUES(2)',
+    'WITH cte(x) AS (SELECT 1) DROP TABLE users',
+    'WITH cte(col1) AS (SELECT 1) CALL my_procedure()'
+  ]) assert.throws(() => assertReadOnlySql(readOnly, sql), (error) => ['READ_ONLY_SQL_UNSUPPORTED', 'CONNECTION_READ_ONLY'].includes(error.code), sql);
 });

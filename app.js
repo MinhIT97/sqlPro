@@ -3624,6 +3624,7 @@ async function showSchemaDiffModal() {
   function renderMigrationTab() {
     const container = $('#diffTabContent');
     if (!container || !diffResult) return;
+    const targetIsReadOnly = connectionIsReadOnly(targetProfileId);
 
     function getFormattedScript() {
       return window.SchemaDiff.formatMigrationScript(migrationStatements, {
@@ -3656,11 +3657,13 @@ async function showSchemaDiffModal() {
         <textarea class="diff-sql-script-area" id="diffSqlScriptArea" readonly>${esc(getFormattedScript())}</textarea>
 
         <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
-          <span style="font-size:0.82em; color:#64748b;">
-            ⚠️ Luôn sao lưu CSDL đích trước khi thực thi script migration DDL.
+          <span style="font-size:0.82em; color:${targetIsReadOnly ? '#dc2626' : '#64748b'};">
+            ${targetIsReadOnly
+              ? '🔒 CSDL Đích thuộc kết nối chỉ đọc. Thao tác áp dụng trực tiếp bị khóa để bảo vệ an toàn.'
+              : '⚠️ Luôn sao lưu CSDL đích trước khi thực thi script migration DDL.'}
           </span>
-          <button type="button" class="primary" id="diffApplyTargetBtn" style="background:#b91c1c; border-color:#991b1b;">
-            ⚡ Áp dụng trực tiếp vào CSDL Đích (${esc(targetDb)})
+          <button type="button" class="primary" id="diffApplyTargetBtn" style="background:${targetIsReadOnly ? '#64748b' : '#b91c1c'}; border-color:${targetIsReadOnly ? '#475569' : '#991b1b'}; cursor:${targetIsReadOnly ? 'not-allowed' : 'pointer'};" ${targetIsReadOnly ? 'disabled title="Kết nối đích đang ở chế độ chỉ đọc"' : ''}>
+            ${targetIsReadOnly ? '🔒 CSDL Đích Chỉ Đọc' : `⚡ Áp dụng trực tiếp vào CSDL Đích (${esc(targetDb)})`}
           </button>
         </div>
       </div>
@@ -3705,6 +3708,10 @@ async function showSchemaDiffModal() {
     });
 
     $('#diffApplyTargetBtn')?.addEventListener('click', async () => {
+      if (connectionIsReadOnly(targetProfileId)) {
+        toast('Kết nối đích đang ở chế độ chỉ đọc. Không thể thực thi thay đổi schema.', 'error');
+        return;
+      }
       const activeStatements = migrationStatements.filter((s) => s.enabled);
       if (!activeStatements.length) {
         toast('Không có câu lệnh nào được chọn để áp dụng.', 'error');
@@ -4227,6 +4234,7 @@ async function showDataDiffModal(initialTable = null) {
   function renderSyncTab() {
     const container = $('#dataDiffTabContent');
     if (!container || !diffResult) return;
+    const targetIsReadOnly = connectionIsReadOnly(targetProfileId);
 
     function getSyncResult() {
       return SqlDataDiff.generateSyncSql({
@@ -4265,13 +4273,14 @@ async function showDataDiffModal(initialTable = null) {
         <textarea id="syncSqlTextarea" class="diff-sql-view" readonly style="flex:1; min-height:220px; font-family:monospace; font-size:0.88em; padding:10px; border-radius:6px; border:1px solid #cbd5e1; background:#0f172a; color:#f8fafc; resize:none;">${esc(syncResult.script)}</textarea>
 
         <div style="display:flex; justify-content:space-between; align-items:center; margin-top:12px;">
-          <div style="display:flex; gap:8px;">
+          <div style="display:flex; gap:8px; align-items:center;">
             <button class="secondary" id="syncCopySqlBtn">📋 Sao chép SQL</button>
             <button class="secondary" id="syncDownloadSqlBtn">💾 Tải file .sql</button>
             <button class="secondary" id="syncOpenEditorBtn">▷ Mở trong SQL Editor</button>
+            ${targetIsReadOnly ? '<span style="color:#dc2626; font-size:0.84em; font-weight:500;">🔒 CSDL Đích chỉ đọc — áp dụng trực tiếp bị khóa</span>' : ''}
           </div>
-          <button class="primary" id="syncApplyBtn" style="font-weight:600; padding:8px 18px;" ${syncResult.statements.length === 0 ? 'disabled' : ''}>
-            ⚡ Thực thi đồng bộ vào CSDL Đích
+          <button class="primary" id="syncApplyBtn" style="font-weight:600; padding:8px 18px; ${targetIsReadOnly ? 'background:#64748b; border-color:#475569; cursor:not-allowed;' : ''}" ${syncResult.statements.length === 0 || targetIsReadOnly ? 'disabled' : ''} ${targetIsReadOnly ? 'title="Kết nối đích đang ở chế độ chỉ đọc"' : ''}>
+            ${targetIsReadOnly ? '🔒 CSDL Đích Chỉ Đọc' : '⚡ Thực thi đồng bộ vào CSDL Đích'}
           </button>
         </div>
       </div>
@@ -4284,7 +4293,7 @@ async function showDataDiffModal(initialTable = null) {
       const cnt = $('#syncStmtCount');
       if (cnt) cnt.textContent = `Tổng cộng: ${syncResult.statements.length} câu lệnh`;
       const btn = $('#syncApplyBtn');
-      if (btn) btn.disabled = syncResult.statements.length === 0;
+      if (btn) btn.disabled = syncResult.statements.length === 0 || targetIsReadOnly;
     }
 
     $('#syncIncludeInserts')?.addEventListener('change', (e) => {
@@ -4329,6 +4338,10 @@ async function showDataDiffModal(initialTable = null) {
     });
 
     $('#syncApplyBtn')?.addEventListener('click', async () => {
+      if (connectionIsReadOnly(targetProfileId)) {
+        toast('Kết nối đích đang ở chế độ chỉ đọc. Không thể thực thi đồng bộ dữ liệu.', 'error');
+        return;
+      }
       const activeStmts = syncResult.statements;
       if (!activeStmts.length) {
         toast('Không có câu lệnh nào để thực thi.', 'error');
@@ -5261,9 +5274,10 @@ function setupContextMenu() {
       const selectedIndexes = queryGridSelectedIndexes(result);
       const source = result.columns[colIdx];
       const tableTarget = queryResultTableTarget(result);
-      const cellEditable = selectedIndexes.length === 1 && !queryTd.classList.contains('muted')
+      const isReadOnly = connectionIsReadOnly(tableTarget?.profileId || app.query?.resultContext?.profileId || app.query?.profileId || app.connection?.id);
+      const cellEditable = !isReadOnly && selectedIndexes.length === 1 && !queryTd.classList.contains('muted')
         && !result.isExplain && Boolean(source.orgTable || source.table);
-      menu.innerHTML = queryResultContextMenuHtml({ source, cellEditable, tableTarget, rowEditable: false,
+      menu.innerHTML = queryResultContextMenuHtml({ source, cellEditable, tableTarget: isReadOnly ? null : tableTarget, rowEditable: false,
         selectedCount: selectedIndexes.length,
         canInsertSql: selectedIndexes.every((index) => Boolean(queryResultStatement(result, index, 'insert'))),
         canUpdateSql: false });
@@ -5314,7 +5328,7 @@ function setupContextMenu() {
             || getActiveQueryResult() !== result) return;
           const cacheKey = JSON.stringify([tableTarget.profileId || '', tableTarget.database, tableTarget.targetTable]);
           queryTablePkCache.set(cacheKey, columns.filter((column) => column.key === 'PRI').map((column) => column.name));
-          const editable = queryResultPrimaryKeyIndexes(result, tableTarget).length > 0;
+          const editable = !isReadOnly && queryResultPrimaryKeyIndexes(result, tableTarget).length > 0;
           const deleteButton = menu.querySelector('[data-query-action="delete"]');
           const updateButton = menu.querySelector('[data-query-action="update"]');
           if (deleteButton) {
@@ -9982,6 +9996,7 @@ async function inlineEditQueryResultCell(td) {
   const row = result.rows[Number(tr.dataset.queryRow)];
   if (!row) return;
   const profileId = app.query?.resultContext?.profileId || app.query?.profileId || app.connection?.id || null;
+  if (connectionIsReadOnly(profileId)) { toast('Kết nối đang ở chế độ chỉ đọc. Không thể sửa trực tiếp.', 'error'); return; }
   td.dataset.editorLoading = '1';
   try {
     const { info, column, keys, original } = await queryResultWriteContext(result, Number(tr.dataset.queryRow), colIdx, profileId);
@@ -10001,6 +10016,8 @@ async function inlineEditQueryResultCell(td) {
 }
 
 async function pasteQueryResultCell(td) {
+  const profileId = app.query?.resultContext?.profileId || app.query?.profileId || app.connection?.id || null;
+  if (connectionIsReadOnly(profileId)) { toast('Kết nối đang ở chế độ chỉ đọc. Không thể dán dữ liệu.', 'error'); return; }
   let text;
   try { text = await readClipboardText(); }
   catch {
@@ -10041,6 +10058,7 @@ async function setQueryResultCellValue(td, value) {
   const result = getActiveQueryResult();
   if (!tr || !result?.rows?.[rowIndex] || !result.columns?.[colIdx]) return;
   const profileId = app.query?.resultContext?.profileId || app.query?.profileId || app.connection?.id || null;
+  if (connectionIsReadOnly(profileId)) { toast('Kết nối đang ở chế độ chỉ đọc. Không thể sửa trực tiếp.', 'error'); return; }
   try {
     const { info, column, keys, original, row } = await queryResultWriteContext(result, rowIndex, colIdx, profileId);
     if (getActiveQueryResult() !== result || td.isConnected === false) return;
@@ -10066,6 +10084,7 @@ async function deleteQueryResultRows(result, rowIndexes) {
   if (getActiveQueryResult() !== result) return;
   const target = queryResultTableTarget(result);
   if (!target) { toast('Kết quả cần thuộc một bảng và có đầy đủ khóa chính để xóa.', 'error'); return; }
+  if (connectionIsReadOnly(target.profileId)) { toast('Kết nối đang ở chế độ chỉ đọc. Không thể xóa bản ghi.', 'error'); return; }
   const selection = queryGridSelection(result);
   if (selection.deleting) return;
   const indexes = [...new Set(rowIndexes)].filter((index) => Number.isInteger(index) && result.rows[index]);
@@ -12560,6 +12579,7 @@ function restoreDatabase(backupId = null) {
   }
   const sourceDb = app.database;
   const sourceProfileId = app.connection.id;
+  const isReadOnly = connectionIsReadOnly(sourceProfileId);
   const selectedBackup = backupId ? (app.backups || []).find((entry) => entry.id === backupId) : null;
   const backupSummary = backupObjectSummary(selectedBackup);
   const defaultNew = Boolean(backupId);
@@ -12595,9 +12615,10 @@ function restoreDatabase(backupId = null) {
     <div class="hint"><strong>Không có rollback toàn bộ:</strong> MySQL/MariaDB không bảo đảm hoàn tác DDL nếu lỗi giữa chừng. Nếu phục hồi thất bại hoặc bị hủy sau khi đã ghi, SqlPro sẽ báo phần đã chạy và không tự retry, tự xóa hay tự rollback database đích.</div>
     <div class="hint">Tệp .sql được chạy tuần tự vào database đích. Trước khi ghi, SqlPro kiểm tra toàn bộ tệp: câu lệnh ghi ra ngoài database đích, CALL/PREPARE/EXECUTE và câu lệnh không phân tích được sẽ bị chặn. Các lệnh USE và CREATE/DROP DATABASE trong tệp sẽ bị bỏ qua; khóa ngoại tạm thời tắt trong lúc phục hồi nhưng được kiểm tra lại sau đó. Trigger/routine trong tệp vẫn có thể ghi gián tiếp hoặc dùng SQL động ngoài phần đã phân tích, nên hãy dùng tài khoản chỉ có quyền trên database đích.</div>
     <div class="hint"><strong>Chỉ phục hồi tệp bạn tin cậy</strong> — nội dung tệp có thể thay đổi dữ liệu.</div>
+    ${isReadOnly ? '<div class="errorbox" style="margin-top: 10px;"><strong>🔒 Kết nối đang ở chế độ chỉ đọc.</strong> Thao tác phục hồi database bị khóa để bảo vệ dữ liệu.</div>' : ''}
     <div class="actions">
       <button data-click="close-modal">Hủy</button>
-      <button class="primary" id="restoreGo">${backupId ? 'Phục hồi bản này' : 'Chọn tệp .sql…'}</button>
+      <button class="primary" id="restoreGo" ${isReadOnly ? 'disabled title="Kết nối đang ở chế độ chỉ đọc"' : ''}>${backupId ? 'Phục hồi bản này' : 'Chọn tệp .sql…'}</button>
     </div>
   `);
 
@@ -12615,7 +12636,10 @@ function restoreDatabase(backupId = null) {
     copyCatalogLine.style.display = (isDifferent && backupId) ? 'flex' : 'none';
     const existing = !isNew && (app.databases || []).includes(targetSelect.value);
     existingWarning.style.display = existing ? 'block' : 'none';
-    if (existing) {
+    if (isReadOnly) {
+      restoreGoBtn.disabled = true;
+      restoreGoBtn.title = 'Kết nối đang ở chế độ chỉ đọc';
+    } else if (existing) {
       confirmNameInput.placeholder = `Nhập "${targetSelect.value}"`;
       restoreGoBtn.disabled = confirmNameInput.value.trim() !== targetSelect.value;
     } else {
@@ -12632,6 +12656,10 @@ function restoreDatabase(backupId = null) {
   updateTargetUi();
 
   $('#restoreGo').addEventListener('click', async () => {
+    if (connectionIsReadOnly(sourceProfileId)) {
+      toast('Kết nối đang ở chế độ chỉ đọc. Không thể phục hồi CSDL.', 'error');
+      return;
+    }
     const isNew = targetSelect.value === '__NEW__';
     const targetDb = isNew ? ($('#restoreNewDbName').value || '').trim() : targetSelect.value;
     if (!targetDb) {
@@ -12867,6 +12895,7 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
 
   $('#pasteGoBtn').addEventListener('click', async () => {
     const targetConnId = connSelect ? connSelect.value : selectedConnId;
+    const targetConnObj = allConnections.find((c) => c.id === targetConnId);
     const isNew = dbSelect.value === '__NEW__';
     const finalTargetDb = isNew ? ($('#pasteNewDbName').value || '').trim() : dbSelect.value;
     if (!finalTargetDb) {
@@ -12877,12 +12906,16 @@ async function pasteBackupModal(targetDb = null, targetConnectionId = null) {
     const doCatalog = $('#pasteActionCatalog').checked;
     const dropExisting = actionDrop.checked;
 
+    if (doRestore && targetConnObj?.readOnly) {
+      toast('Kết nối đích đang ở chế độ chỉ đọc. Không thể phục hồi CSDL.', 'error');
+      return;
+    }
+
     if (!doRestore && !doCatalog) {
       toast('Hãy chọn ít nhất một thao tác (Khôi phục dữ liệu hoặc Lưu vào danh mục).', 'error');
       return;
     }
 
-    const targetConnObj = allConnections.find((c) => c.id === targetConnId);
     const targetConnName = targetConnObj ? (targetConnObj.name || targetConnObj.host) : 'Kết nối đích';
 
     const confirmed = await confirmAction(
@@ -13097,6 +13130,7 @@ function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn
 
   $('#copyGoBtn').addEventListener('click', async () => {
     const targetConnId = connSelect ? connSelect.value : selectedConnId;
+    const targetConnObj = allConnections.find((c) => c.id === targetConnId);
     const isNew = copyTargetSelect.value === '__NEW__';
     const targetDb = isNew ? ($('#copyNewDbName').value || '').trim() : copyTargetSelect.value;
     if (!targetDb) {
@@ -13111,12 +13145,16 @@ function copyBackupToDatabaseModal(backupId, sourceDb = app.database, sourceConn
     const doCatalog = $('#copyActionCatalog').checked;
     const dropExisting = copyActionDrop.checked;
 
+    if (doRestore && targetConnObj?.readOnly) {
+      toast('Kết nối đích đang ở chế độ chỉ đọc. Không thể phục hồi CSDL.', 'error');
+      return;
+    }
+
     if (!doRestore && !doCatalog) {
       toast('Hãy chọn ít nhất một thao tác (Khôi phục dữ liệu hoặc Lưu vào danh mục).', 'error');
       return;
     }
 
-    const targetConnObj = allConnections.find((c) => c.id === targetConnId);
     const targetConnName = targetConnObj ? (targetConnObj.name || targetConnObj.host) : 'Kết nối đích';
 
     const confirmed = await confirmAction(

@@ -1,5 +1,7 @@
 'use strict';
 
+const TableFilters = require('../table-filters.js');
+
 // Shared read-only predicate for grid, COUNT and streaming export. Identifiers
 // come from metadata; values stay in parameters and never become SQL syntax.
 function buildTableSearch(options, columns, { quoteId, coerceValue }) {
@@ -26,10 +28,10 @@ function buildTableSearch(options, columns, { quoteId, coerceValue }) {
       && /^(?:char|varchar|tinytext|text|mediumtext|longtext|enum|set)\b/i.test(column.type || '');
     return `${nativeText ? reference : `CAST(${reference} AS CHAR)`} LIKE ? ESCAPE '='`;
   }) : [];
-  return {
-    where: clauses.length ? `(${clauses.join(' OR ')})` : '', params,
-    key: JSON.stringify([term, options.searchColumn || '', mode])
-  };
+  const advanced = TableFilters.compile(options.filterTree, columns, { quoteId, coerceValue });
+  const simple = clauses.length ? `(${clauses.join(' OR ')})` : '';
+  return { where: [simple, advanced.where].filter(Boolean).join(' AND '), params: [...params, ...advanced.params],
+    key: JSON.stringify([term, options.searchColumn || '', mode, advanced.key]) };
 }
 
 module.exports = { buildTableSearch };

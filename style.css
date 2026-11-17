@@ -1216,6 +1216,23 @@ textarea.inline-cell-editor:focus {
 .toolbar:has(#filterColumn) { flex-wrap: wrap; }
 #filterColumn { max-width: 180px; min-width: 90px; }
 #filterMode { width: 140px; min-width: 140px; flex-shrink: 0; }
+.filter-group { min-width: 0; margin: 10px 0; padding: 10px; border: 1px solid #cbd5e1; border-radius: 6px; }
+.filter-group-actions, .filter-rule { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+#tableFilterEditor { max-height: 78vh; overflow: hidden; display: flex; flex-direction: column; }
+#filterGroups { min-height: 0; overflow: auto; flex: 1 1 auto; padding-right: 4px; }
+#tableFilterEditor select, #tableFilterEditor input { width: auto; min-width: 0; max-width: 100%; flex: 1 1 130px; }
+#tableFilterEditor button { flex-shrink: 0; }
+#tableFilterEditor > h2, #tableFilterEditor > p, #tableFilterEditor .actions { flex-shrink: 0; }
+#tableFilterEditor > .hint { margin: 10px 0; padding: 8px; }
+#tableFilterEditor .actions { margin-top: 10px; padding: 4px 0; flex-wrap: wrap; }
+.group-filter-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 100px; overflow: auto; font-size: 12px; flex-shrink: 0; margin: 8px 0; }
+#groupFilterError { color: #b45309; margin: 10px 0; }
+#groupFilterError:empty { display: none; }
+body.dark-theme dialog:has(#tableFilterEditor) { background: #182635; color: #e2e8f0; border-color: #475569; }
+body.dark-theme #tableFilterEditor .filter-group { border-color: #475569; }
+body.dark-theme #tableFilterEditor input, body.dark-theme #tableFilterEditor select { background: #0f172a; color: #e2e8f0; border-color: #475569; }
+body.dark-theme #tableFilterEditor button:not(.primary) { background: #24344a; color: #e2e8f0; border-color: #475569; }
+body.dark-theme #groupFilterError { color: #fbbf24; }
 
 /* Schema-aware editors shared by row forms, data grids and SQL result grids. */
 .sql-value-editor {

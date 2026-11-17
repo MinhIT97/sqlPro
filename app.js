@@ -49,6 +49,7 @@ const app = {
   page: 1,
   pageSize: 100,
   search: '',
+  filterTree: null,
   orderBy: null,
   orderDir: 'ASC',
   query: { sql: '', result: null, error: null, running: false },
@@ -3631,6 +3632,7 @@ async function connectTo(id, options = {}) {
       columns: app.columns, primaryKey: app.primaryKey, rows: app.rows,
       total: app.total, page: app.page, search: app.search,
       searchColumn: app.searchColumn, searchMode: app.searchMode,
+      filterTree: app.filterTree,
       pageCursor: app.pageCursor, nextCursor: app.nextCursor, previousCursor: app.previousCursor, hasMore: app.hasMore,
       orderBy: app.orderBy, orderDir: app.orderDir,
       indexes: app.indexes, relations: app.relations, table, mode
@@ -5163,6 +5165,7 @@ async function selectTable(name, options = {}) {
   app.search = '';
   app.searchColumn = null;
   app.searchMode = 'contains';
+  app.filterTree = null;
   app.pageCursor = null;
   app.nextCursor = null;
   app.previousCursor = null;
@@ -5199,6 +5202,7 @@ async function loadData({ keepScroll = false } = {}) {
       search: app.search,
       searchColumn: app.searchColumn || null,
       searchMode: app.searchMode || 'contains',
+      filterTree: app.filterTree || null,
       cursor: app.pageCursor || null,
       orderBy: app.orderBy,
       orderDir: app.orderDir
@@ -5788,6 +5792,107 @@ async function inlineEditCell(td) {
   });
 }
 
+function tableFilterDialog() {
+  const Filters = window.SqlTableFilters;
+  const target = { profileId: app.connection?.id, database: app.database, table, tree: app.filterTree };
+  const current = () => mode === 'data' && target.profileId === app.connection?.id && target.database === app.database && target.table === table && target.tree === app.filterTree;
+  if (!app.columns.length) return;
+  const firstRule = () => {
+    const column = app.columns[0], operator = Filters.operators(column)[0];
+    return { column: column.name, operator, ...(!['is-null', 'not-null'].includes(operator) ? { value: '' } : {}) };
+  };
+  const draft = app.filterTree ? JSON.parse(JSON.stringify(app.filterTree)) : { version: 1, op: 'AND', items: [firstRule()] };
+  modal(`<div id="tableFilterEditor"><h2>Bộ lọc AND/OR</h2><p>${esc(target.database)}.${esc(target.table)} · Tối đa 20 điều kiện, 8 nhóm, 3 mức.</p>
+    <div id="filterGroups"></div><p class="hint">Kết hợp bằng AND với tìm kiếm nhanh đang áp dụng. Giữ nguyên khoảng trắng và chuỗi rỗng; NULL chọn bằng toán tử riêng. Ngày giờ dùng giá trị SQL theo phiên database.</p>
+    <pre id="groupFilterPreview" class="group-filter-preview" aria-label="Xem trước điều kiện"></pre><p id="groupFilterError" role="status" aria-live="polite"></p>
+    <div class="actions"><button type="button" id="removeGroupFilter">Xóa bộ lọc AND/OR</button><button type="button" data-click="close-modal">Hủy</button><button type="button" class="primary" id="applyGroupFilter">Áp dụng (Ctrl+Enter)</button></div></div>`, true);
+  const editor = $('#tableFilterEditor');
+  const nodeAt = path => path.reduce((node, index) => node?.items?.[index], draft);
+  const counts = (node = draft) => node.items ? node.items.reduce((total, item) => {
+    const count = counts(item); return { groups: total.groups + count.groups, rules: total.rules + count.rules };
+  }, { groups: 1, rules: 0 }) : { groups: 0, rules: 1 };
+  const preview = () => {
+    try {
+      if (!current()) throw new Error('Đích hoặc bộ lọc đã thay đổi. Hãy đóng và mở lại hộp thoại.');
+      const plan = Filters.compile(draft, app.columns);
+      $('#groupFilterPreview').textContent = `WHERE ${plan.where}\n${plan.params.length} giá trị được truyền riêng.`;
+      $('#groupFilterError').textContent = ''; $('#applyGroupFilter').disabled = false;
+      return plan.tree;
+    } catch (error) {
+      $('#groupFilterPreview').textContent = ''; $('#groupFilterError').textContent = error.message; $('#applyGroupFilter').disabled = true;
+      return null;
+    }
+  };
+  const render = () => {
+    const count = counts();
+    const html = (node, path = []) => {
+      const key = path.join('.');
+      if (node.items) return `<fieldset class="filter-group" data-filter-path="${key}"><legend>${path.length ? 'Nhóm điều kiện' : 'Điều kiện gốc'}</legend>
+        <div class="filter-group-actions"><select data-filter-field="op" data-filter-path="${key}" aria-label="Kết hợp nhóm"><option value="AND" ${node.op === 'AND' ? 'selected' : ''}>AND — Tất cả</option><option value="OR" ${node.op === 'OR' ? 'selected' : ''}>OR — Bất kỳ</option></select>
+        <button type="button" data-filter-action="rule" data-filter-path="${key}" ${count.rules >= Filters.limits.rules ? 'disabled' : ''}>＋ Điều kiện</button>
+        <button type="button" data-filter-action="group" data-filter-path="${key}" ${path.length >= 2 || count.groups >= Filters.limits.groups || count.rules >= Filters.limits.rules ? 'disabled' : ''}>＋ Nhóm</button>
+        ${path.length ? `<button type="button" data-filter-action="remove" data-filter-path="${key}">Xóa nhóm</button>` : ''}</div>
+        ${node.items.map((item, index) => html(item, [...path, index])).join('')}</fieldset>`;
+      const column = app.columns.find(entry => entry.name === node.column), operators = Filters.operators(column || {});
+      const isNull = ['is-null', 'not-null'].includes(node.operator), between = node.operator === 'between';
+      const values = between ? node.value : [node.value];
+      return `<div class="filter-rule"><select data-filter-field="column" data-filter-path="${key}" aria-label="Cột điều kiện">${app.columns.map(entry => `<option value="${esc(entry.name)}" ${node.column === entry.name ? 'selected' : ''}>${esc(entry.name)}</option>`).join('')}</select>
+        <select data-filter-field="operator" data-filter-path="${key}" aria-label="Toán tử điều kiện">${operators.map(operator => `<option value="${operator}" ${node.operator === operator ? 'selected' : ''}>${esc(Filters.labels[operator])}</option>`).join('')}</select>
+        ${isNull ? '<span class="muted">Không cần giá trị</span>' : (Array.isArray(values) ? values : ['', '']).map((value, index) => `<input type="text" maxlength="200" value="${esc(value ?? '')}" data-filter-field="value" data-filter-index="${index}" data-filter-path="${key}" aria-label="${between ? index ? 'Đến giá trị' : 'Từ giá trị' : 'Giá trị điều kiện'}" placeholder="${between ? index ? 'Đến' : 'Từ' : 'Giá trị'}">`).join('')}
+        <button type="button" data-filter-action="remove" data-filter-path="${key}" aria-label="Xóa điều kiện">×</button></div>`;
+    };
+    $('#filterGroups').innerHTML = html(draft); preview();
+  };
+  const pathOf = element => /^(?:[0-9]+(?:\.[0-9]+)*)?$/.test(element.dataset.filterPath || '')
+    ? (element.dataset.filterPath ? element.dataset.filterPath.split('.').map(Number) : []) : null;
+  editor.addEventListener('click', event => {
+    const button = event.target.closest('[data-filter-action]');
+    if (!button) return;
+    const path = pathOf(button), node = path && nodeAt(path);
+    if (!node || !current()) { preview(); return; }
+    const action = button.dataset.filterAction, count = counts();
+    if (action === 'rule' && node.items && count.rules < Filters.limits.rules) node.items.push(firstRule());
+    else if (action === 'group' && node.items && path.length < 2 && count.groups < Filters.limits.groups && count.rules < Filters.limits.rules) node.items.push({ op: 'AND', items: [firstRule()] });
+    else if (action === 'remove' && path.length) nodeAt(path.slice(0, -1)).items.splice(path.at(-1), 1);
+    render();
+  });
+  const edit = event => {
+    const control = event.target.closest('[data-filter-field]');
+    if (!control) return;
+    const path = pathOf(control), node = path && nodeAt(path), field = control.dataset.filterField;
+    if (!node || !current()) { preview(); return; }
+    if (field === 'value' && event.type === 'input') {
+      if (node.operator === 'between') node.value[Number(control.dataset.filterIndex)] = control.value;
+      else node.value = control.value;
+      preview();
+    } else if (event.type === 'change' && field !== 'value') {
+      if (field === 'op') node.op = control.value;
+      else {
+        if (field === 'column') { node.column = control.value; node.operator = Filters.operators(app.columns.find(column => column.name === node.column) || {})[0]; }
+        else node.operator = control.value;
+        if (['is-null', 'not-null'].includes(node.operator)) delete node.value;
+        else node.value = node.operator === 'between' ? ['', ''] : '';
+      }
+      render();
+      editor.querySelector(`[data-filter-field="${field}"][data-filter-path="${path.join('.')}"]`)?.focus();
+    }
+  };
+  editor.addEventListener('input', edit); editor.addEventListener('change', edit);
+  const apply = () => {
+    const tree = preview(); if (!tree || !current()) return;
+    app.filterTree = tree; app.page = 1; app.pageCursor = null; closeModal(); void loadData();
+  };
+  $('#applyGroupFilter').addEventListener('click', apply);
+  $('#removeGroupFilter').addEventListener('click', () => {
+    if (!current()) { preview(); return; }
+    app.filterTree = null; app.page = 1; app.pageCursor = null; closeModal(); void loadData();
+  });
+  editor.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); apply(); }
+  });
+  render(); editor.querySelector('select')?.focus();
+}
+
 function tableSearchSummary(state) {
   if (state.searchMode === 'is-null' || state.searchMode === 'not-null') {
     return state.searchColumn ? `${state.searchColumn} ${state.searchMode === 'is-null' ? 'là NULL' : 'khác NULL'}` : '';
@@ -5801,13 +5906,14 @@ function renderDataView() {
   const readOnly = connectionIsReadOnly();
   const editable = !readOnly && app.primaryKey.length > 0;
   const nullSearch = app.searchMode === 'is-null' || app.searchMode === 'not-null';
-  const canResetSearch = Boolean(app.search || app.searchColumn || app.searchMode && app.searchMode !== 'contains');
+  const canResetSearch = Boolean(app.filterTree || app.search || app.searchColumn || app.searchMode && app.searchMode !== 'contains');
   $('#workspace').innerHTML = `
     <div class="toolbar">
       <input class="filter" id="filter" aria-label="Giá trị tìm kiếm" maxlength="200" placeholder="${nullSearch ? 'Không cần nhập giá trị' : '⌕  Tìm trong bảng…'}" value="${esc(app.search)}" ${nullSearch ? 'disabled' : ''} title="Tối đa 200 ký tự; % và _ là ký tự thường.">
       <select id="filterColumn" aria-label="Cột tìm kiếm"><option value="">Tất cả cột</option>${app.columns.map((column) => `<option value="${esc(column.name)}" ${app.searchColumn === column.name ? 'selected' : ''}>${esc(column.name)}</option>`).join('')}</select>
       <select id="filterMode" aria-label="Cách tìm kiếm"><option value="contains">Chứa</option><option value="exact" ${app.searchMode === 'exact' ? 'selected' : ''}>Bằng</option><option value="prefix" ${app.searchMode === 'prefix' ? 'selected' : ''}>Bắt đầu bằng</option><option value="is-null" ${nullSearch && app.searchMode === 'is-null' ? 'selected' : ''} ${app.searchColumn ? '' : 'disabled'}>Là NULL</option><option value="not-null" ${app.searchMode === 'not-null' ? 'selected' : ''} ${app.searchColumn ? '' : 'disabled'}>Khác NULL</option></select>
       <button id="clearFilterBtn" type="button" ${canResetSearch ? '' : 'disabled'}>Đặt lại bộ lọc</button>
+      <button id="groupFilterBtn" type="button">Bộ lọc AND/OR${app.filterTree ? ' · đang bật' : ''}</button>
       <button id="addRowBtn" ${readOnly ? 'disabled title="Kết nối chỉ đọc"' : ''}>＋ Thêm bản ghi</button>
       <button class="danger" id="deleteRowsBtn" ${editable ? '' : `disabled title="${readOnly ? 'Kết nối chỉ đọc' : 'Bảng không có khóa chính'}"`}>⌫ Xóa</button>
       <button id="refreshBtn">↻</button>
@@ -5827,11 +5933,11 @@ function renderDataView() {
   filter.addEventListener('input', debounce(() => {
     if (!current() || $('#filter') !== filter || filter.disabled) return;
     app.search = filter.value;
-    const search = app.search, searchColumn = app.searchColumn, searchMode = app.searchMode;
+    const search = app.search, searchColumn = app.searchColumn, searchMode = app.searchMode, filterTree = app.filterTree;
     app.page = 1;
     app.pageCursor = null;
     loadData().then(() => {
-      if (!current() || search !== app.search || searchColumn !== app.searchColumn || searchMode !== app.searchMode) return;
+      if (!current() || search !== app.search || searchColumn !== app.searchColumn || searchMode !== app.searchMode || filterTree !== app.filterTree) return;
       const next = $('#filter');
       if (next && !next.disabled) {
         next.focus();
@@ -5850,8 +5956,10 @@ function renderDataView() {
   $('#clearFilterBtn').addEventListener('click', () => {
     if (!current()) return;
     app.search = ''; app.searchColumn = null; app.searchMode = 'contains';
+    app.filterTree = null;
     app.page = 1; app.pageCursor = null; void loadData();
   });
+  $('#groupFilterBtn').addEventListener('click', tableFilterDialog);
   $('#addRowBtn').addEventListener('click', () => editRow(null));
   $('#deleteRowsBtn').addEventListener('click', deleteSelectedRows);
   $('#refreshBtn').addEventListener('click', () => loadData());
@@ -5920,12 +6028,12 @@ function pageCountText() {
 
 function positionPagination() {
   $('#countRowsBtn')?.addEventListener('click', async () => {
-    const target = { profileId: app.connection?.id, database: app.database, table, search: app.search, searchColumn: app.searchColumn || null, searchMode: app.searchMode || 'contains', force: true };
+    const target = { profileId: app.connection?.id, database: app.database, table, search: app.search, searchColumn: app.searchColumn || null, searchMode: app.searchMode || 'contains', filterTree: app.filterTree || null, force: true };
     const button = $('#countRowsBtn');
     button.disabled = true;
     try {
       const result = await call(desktop.db.tableCount(target));
-      if (target.profileId !== app.connection?.id || target.database !== app.database || target.table !== table || target.search !== app.search || target.searchColumn !== (app.searchColumn || null) || target.searchMode !== (app.searchMode || 'contains')) return;
+      if (target.profileId !== app.connection?.id || target.database !== app.database || target.table !== table || target.search !== app.search || target.searchColumn !== (app.searchColumn || null) || target.searchMode !== (app.searchMode || 'contains') || target.filterTree !== (app.filterTree || null)) return;
       app.total = result.total; renderDataView();
     } catch (error) { toast(error.message, 'error'); }
     finally { button.disabled = false; }
@@ -10675,7 +10783,8 @@ async function transfer(type) {
     const profileId = app.connection?.id || null;
     const searchState = { search: app.search, searchColumn: app.searchColumn || null, searchMode: app.searchMode || 'contains' };
     const orderBy = app.orderBy ? { column: app.orderBy, direction: app.orderDir || 'ASC' } : null;
-    const searchSummary = tableSearchSummary(searchState);
+    const filterTree = app.filterTree || null;
+    const searchSummary = [tableSearchSummary(searchState), filterTree ? 'Nhóm AND/OR đang áp dụng' : ''].filter(Boolean).join(' AND ');
     const hasSearch = Boolean(searchSummary);
     modal(`
       <h2>Xuất dữ liệu</h2>
@@ -10712,6 +10821,7 @@ async function transfer(type) {
           search: useFilter ? searchState.search : '',
           searchColumn: useFilter ? searchState.searchColumn : null,
           searchMode: useFilter ? searchState.searchMode : 'contains',
+          filterTree: useFilter ? filterTree : null,
           orderBy
         }));
         activeTransfer = null;

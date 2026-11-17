@@ -249,7 +249,7 @@ function resolveFileColumns(columns, requested) {
   return selected;
 }
 
-function buildFileWhere(filters, columns, search = '', { searchColumn, searchMode } = {}) {
+function buildFileWhere(filters, columns, search = '', { searchColumn, searchMode, filterTree } = {}) {
   const filterParts = [];
   const params = [];
   if (Array.isArray(filters) && filters.length > 20) throw fail('Chỉ hỗ trợ tối đa 20 điều kiện lọc.', 'TOO_MANY_FILTERS');
@@ -292,7 +292,7 @@ function buildFileWhere(filters, columns, search = '', { searchColumn, searchMod
     filterParts.push(`${reference} ${operator} ?`);
     params.push(value);
   }
-  const searchPlan = buildTableSearch({ search, searchColumn, searchMode }, columns, { quoteId, coerceValue });
+  const searchPlan = buildTableSearch({ search, searchColumn, searchMode, filterTree }, columns, { quoteId, coerceValue });
   params.push(...searchPlan.params);
   let sql = '';
   if (filterParts.length && searchPlan.where) {

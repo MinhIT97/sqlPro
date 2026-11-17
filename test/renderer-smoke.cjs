@@ -437,7 +437,7 @@ async function untilNode(predicate) {
   }
 }
 async function check(name, fn) {
-  await fn();
+  try { await fn(); } catch (error) { error.message = `${name}: ${error.message}`; throw error; }
   checks += 1;
   console.log(`PASS ${name}`);
 }
@@ -871,7 +871,7 @@ app.whenReady().then(async () => {
     await until('innerWidth===900 && innerHeight===650');
     for (const [index, marked] of markedSql.entries()) {
       const caret = marked.indexOf('|'), sql = marked.replace('|', '');
-      await evaluate(`app.query.sql=${JSON.stringify(sql)};renderQueryView();$('#sql').style.height='75px';clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();$('#sql').setSelectionRange(${caret},${caret});refreshSqlSuggestions($('#sql'),true)`);
+      await evaluate(`app.query.sql=${JSON.stringify(sql)};renderQueryView();$('#sql').style.height='75px';$('#sql').focus();$('#sql').setSelectionRange(${caret},${caret});new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>{clearTimeout(sqlAutocomplete.blurTimer);resolve(refreshSqlSuggestions($('#sql'),true))})))`);
       assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['u.name']);
       if (index === 1) await captureReview('autocomplete-range-small', () => evaluate("clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();refreshSqlSuggestions($('#sql'),true)"));
       assert.equal(await evaluate("$('#sqlSuggestions').getBoundingClientRect().bottom<=innerHeight"), true);
@@ -896,13 +896,14 @@ app.whenReady().then(async () => {
     win.setContentSize(1344, 835); autocompleteColumns = null;
   });
   await check('review regressions preserve function arguments and block ambiguous qualified owners', async () => {
+    win.webContents.focus();
     autocompleteColumns = new Map([['accounts', [{ name: 'good_key', type: 'int' }]]]);
     await evaluate('invalidateSqlAutocomplete()');
     const columns = calls.filter(call => call.name === 'db:columns').length;
     const queries = calls.filter(call => call.name === 'db:query').length;
     const set = async marked => {
       const caret = marked.indexOf('|'), sql = marked.replace('|', '');
-      await evaluate(`app.query.sql=${JSON.stringify(sql)};renderQueryView();clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();$('#sql').setSelectionRange(${caret},${caret});refreshSqlSuggestions($('#sql'),true)`);
+      await evaluate(`app.query.sql=${JSON.stringify(sql)};renderQueryView();$('#sql').focus();$('#sql').setSelectionRange(${caret},${caret});new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>{clearTimeout(sqlAutocomplete.blurTimer);resolve(refreshSqlSuggestions($('#sql'),true))})))`);
     };
     await set('SELECT * FROM accounts x JOIN x ON 1=1 WHERE x.|');
     assert.equal(await evaluate('sqlAutocomplete.items.length'), 0);
@@ -1279,6 +1280,68 @@ app.whenReady().then(async () => {
     await evaluate('new Promise(resolve=>setTimeout(resolve,450))');
     assert.equal(await evaluate('app.search'), '');
     assert.equal(calls.filter(call => call.name === 'db:table-data').slice(before).some(call => call.args[0].search === 'stale-filter-marker'), false);
+  });
+  await check('grouped filters preview safely, apply with keyboard and keep count/export predicates identical', async () => {
+    await evaluate("mode='data';app.filterTree=null;app.search='';app.searchColumn=null;app.searchMode='contains';renderDataView();$('#groupFilterBtn').click()");
+    const queries = calls.filter(call => call.name === 'db:query').length;
+    const reads = calls.filter(call => call.name === 'db:table-data').length;
+    const edit = async (path, field, value, index = 0) => evaluate(`(() => {const element=$(${JSON.stringify(`[data-filter-field="${field}"][data-filter-path="${path}"]${field === 'value' ? `[data-filter-index="${index}"]` : ''}`)});element.value=${JSON.stringify(value)};element.dispatchEvent(new Event(${JSON.stringify(field === 'value' ? 'input' : 'change')},{bubbles:true}));})()`);
+    assert.equal(await evaluate("$('#applyGroupFilter').disabled"), true);
+    await edit('0', 'operator', 'gte'); await edit('0', 'value', '2');
+    await evaluate("$('[data-filter-action=\"group\"][data-filter-path=\"\"]').click()");
+    await edit('1', 'op', 'OR'); await edit('1.0', 'column', 'name');
+    await edit('1.0', 'value', '<img src=x onerror=alert(1)>');
+    await evaluate("$('[data-filter-action=\"rule\"][data-filter-path=\"1\"]').click()");
+    await edit('1.1', 'operator', 'between'); await edit('1.1', 'value', '1'); await edit('1.1', 'value', '3', 1);
+    assert.equal(await evaluate("$('#applyGroupFilter').disabled"), false);
+    assert.equal(await evaluate("$('#tableFilterEditor img')===null"), true);
+    assert.match(await evaluate("$('#groupFilterPreview').textContent"), /`id` >= \? AND \(`name` = \? OR `id` BETWEEN \? AND \?\)/);
+    assert.doesNotMatch(await evaluate("$('#groupFilterPreview').textContent"), /img src/);
+    assert.equal(calls.filter(call => call.name === 'db:table-data').length, reads);
+    win.setContentSize(940, 700); win.webContents.focus(); await until('innerWidth===940 && innerHeight===700');
+    await captureReview('table-filter-groups-small', () => evaluate("$('#toast').style.display='none';$('#tableFilterEditor select').focus()"));
+    assert.equal(await evaluate("$('#modal').getBoundingClientRect().right<=innerWidth && $('#applyGroupFilter').getBoundingClientRect().bottom<=innerHeight"), true);
+    assert.equal(await evaluate("$('#groupFilterPreview').getBoundingClientRect().bottom<=$('#applyGroupFilter').getBoundingClientRect().top"), true);
+    assert.equal(await evaluate("$('#tableFilterEditor').scrollWidth<=$('#tableFilterEditor').clientWidth"), true);
+    await evaluate("document.body.classList.add('dark-theme');document.body.classList.remove('light-theme')");
+    await captureReview('table-filter-groups-small-dark', () => evaluate("$('#tableFilterEditor select').focus()"));
+    assert.equal(await evaluate("getComputedStyle($('#modal')).backgroundColor"), 'rgb(24, 38, 53)');
+    await evaluate("document.body.classList.remove('dark-theme');document.body.classList.add('light-theme')");
+    for (const type of ['keyDown', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return', modifiers: ['control'] });
+    await until("!$('#modal').open && Boolean($('#groupFilterBtn')) && Boolean(app.filterTree)");
+    const expected = { version: 1, op: 'AND', items: [{ column: 'id', operator: 'gte', value: '2' }, { op: 'OR', items: [{ column: 'name', operator: 'eq', value: '<img src=x onerror=alert(1)>' }, { column: 'id', operator: 'between', value: ['1', '3'] }] }] };
+    assert.deepEqual(calls.filter(call => call.name === 'db:table-data').at(-1).args[0].filterTree, expected);
+    await evaluate("$('#countRowsBtn').click()"); await until('app.total===42');
+    assert.deepEqual(calls.filter(call => call.name === 'db:table-count').at(-1).args[0].filterTree, expected);
+    await evaluate("$('#groupFilterBtn').click()"); await edit('0', 'value', '5');
+    for (const type of ['keyDown', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Escape' });
+    await until("!$('#modal').open");
+    assert.deepEqual(await evaluate('JSON.parse(JSON.stringify(app.filterTree))'), expected);
+    await evaluate("transfer('export')");
+    assert.equal(await evaluate("$('#exportFiltered').disabled"), false);
+    assert.match(await evaluate("$('#modal').textContent"), /Nhóm AND\/OR/);
+    await evaluate("app.filterTree=null;$('#exportFiltered').checked=true;$('#exportGo').click()");
+    await until("!$('#modal').open");
+    assert.deepEqual(calls.filter(call => call.name === 'db:export-file').at(-1).args[0].filterTree, expected);
+    assert.equal(calls.filter(call => call.name === 'db:query').length, queries);
+    await evaluate("renderDataView();$('#groupFilterBtn').click();$('#removeGroupFilter').click()");
+    await until("!$('#modal').open && Boolean($('#groupFilterBtn')) && app.filterTree===null");
+    win.setContentSize(1344, 835);
+  });
+  await check('empty, stale-target and changed-metadata filter drafts stay open without issuing reads', async () => {
+    await evaluate("app.filterTree=null;renderDataView();$('#groupFilterBtn').click();$('[data-filter-action=\"remove\"][data-filter-path=\"0\"]').click()");
+    const before = calls.filter(call => call.name === 'db:table-data').length;
+    assert.equal(await evaluate("$('#applyGroupFilter').disabled"), true);
+    await evaluate("$('#tableFilterEditor').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,bubbles:true}))");
+    assert.equal(await evaluate("$('#modal').open && app.filterTree===null"), true);
+    await evaluate("{ $('[data-filter-action=\"rule\"][data-filter-path=\"\"]').click();const value=$('[data-filter-field=\"value\"]');value.value='1';value.dispatchEvent(new Event('input',{bubbles:true}));window.groupSavedConnection=app.connection;app.connection={...app.connection,id:'other-profile'};$('#applyGroupFilter').click(); }");
+    assert.match(await evaluate("$('#groupFilterError').textContent"), /Đích hoặc bộ lọc đã thay đổi/);
+    assert.equal(await evaluate('app.filterTree===null'), true);
+    await evaluate("{ app.connection=groupSavedConnection;delete window.groupSavedConnection;closeModal();tableFilterDialog();const value=$('[data-filter-field=\"value\"]');value.value='1';value.dispatchEvent(new Event('input',{bubbles:true}));window.groupSavedColumns=app.columns;app.columns=app.columns.filter(column=>column.name!=='id');$('#applyGroupFilter').click(); }");
+    assert.equal(await evaluate("$('#modal').open && $('#applyGroupFilter').disabled && app.filterTree===null"), true);
+    assert.match(await evaluate("$('#groupFilterError').textContent"), /Cột hoặc toán tử/);
+    assert.equal(calls.filter(call => call.name === 'db:table-data').length, before);
+    await evaluate("app.columns=groupSavedColumns;delete window.groupSavedColumns;closeModal();renderDataView()");
   });
   await check('file import previews mapping and sends a streaming payload', async () => {
     const before = calls.filter((call) => call.name === 'db:import-file').length;

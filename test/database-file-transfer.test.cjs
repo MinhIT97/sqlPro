@@ -142,6 +142,19 @@ test('export uses the same prefix and NULL predicates as grid/count, combined wi
   assert.equal(calls.queries.length, 0); assert.equal(session.activeTask, null);
 });
 
+test('stream export combines advanced groups, quick search and legacy filters without changing precedence', async () => {
+  const { session, calls } = createSession(COLUMNS);
+  const filterTree = { version: 1, op: 'OR', items: [{ column: 'id', operator: 'gte', value: '2' }, { column: 'name', operator: 'is-null' }] };
+  const options = { database: 'sample', table: 'items', format: 'json', search: 'a%', searchColumn: 'name', filterTree, filters: [{ column: 'score', operator: '>=', value: 1 }] };
+  const plan = await session.tableDataService.plan(options);
+  await session.exportTableFile(options, async () => {});
+  assert.ok(calls.queries[0].sql.includes(`WHERE (\`score\` >= ?) AND ${plan.where}`));
+  assert.deepEqual(calls.queries[0].values, [1, ...plan.params]);
+  const before = calls.queries.length;
+  await assert.rejects(session.exportTableFile({ ...options, filterTree: { version: 1, op: 'OR', items: [] } }, async () => {}), { code: 'INVALID_FILTER' });
+  assert.equal(calls.queries.length, before); assert.equal(session.activeTask, null);
+});
+
 test('xuất JSON là mảng hợp lệ và giữ NULL, object, binary', async () => {
   const rows = [
     [1, 'Alice, "A"', { a: 1 }, Buffer.from('00ff', 'hex')],

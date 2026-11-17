@@ -48,7 +48,17 @@ Chọn một cột cụ thể để dùng **Là NULL** hoặc **Khác NULL**; ha
 
 Xem trước WHERE có placeholder và số tham số ngay trong hộp thoại, không gửi query để preview. Giá trị mỗi điều kiện tối đa 200 ký tự; so sánh văn bản giữ khoảng trắng và chuỗi rỗng, số/ngày giờ dùng kiểm tra kiểu hiện có, BIGINT/DECIMAL giữ dạng chính xác. Không tự đổi múi giờ hoặc đảo thứ tự khoảng. Cột generated có thể dùng để lọc theo kiểu kết quả; khả năng ghi cột không đổi. **Ctrl+Enter** áp dụng, **Escape/Hủy** bỏ bản nháp; lỗi giữ bản nháp, đổi đích hoặc metadata không hợp lệ chặn áp dụng.
 
-Nhóm nâng cao kết hợp bằng **AND** với tìm kiếm nhanh. **Đếm tổng** chỉ chạy khi bấm; grid/count/export dùng cùng predicate, cache và cursor gắn toàn bộ cây điều kiện. Hộp xuất tệp nhận cả nhóm AND/OR kể cả khi tìm kiếm nhanh trống; bật **Chỉ xuất các dòng khớp bộ lọc hiện tại** để dùng điều kiện đã chụp. Hộp giữ profile/database/table, điều kiện và thứ tự lúc mở. Debounce cũ không được áp sang bảng/control đã thay. **Đặt lại bộ lọc** xóa cả tìm kiếm nhanh và nhóm; **Xóa bộ lọc AND/OR** chỉ bỏ nhóm. Cấu hình nhóm chỉ giữ trong bộ nhớ của view kết nối hiện tại, chọn lại bảng sẽ xóa; chưa lưu sau restart/sync. Chưa có chọn cột hiển thị/sort nhiều cột và toàn bộ toán tử/dialect; G5.4/G4.2 chưa nghiệm thu toàn bộ.
+Nhóm nâng cao kết hợp bằng **AND** với tìm kiếm nhanh. **Đếm tổng** chỉ chạy khi bấm; grid/count/export dùng cùng predicate, cache và cursor gắn toàn bộ cây điều kiện. Hộp xuất tệp nhận cả nhóm AND/OR kể cả khi tìm kiếm nhanh trống; bật **Chỉ xuất các dòng khớp bộ lọc hiện tại** để dùng điều kiện đã chụp. Hộp giữ profile/database/table, điều kiện và thứ tự lúc mở. Debounce cũ không được áp sang bảng/control đã thay. **Đặt lại bộ lọc** xóa cả tìm kiếm nhanh và nhóm; **Xóa bộ lọc AND/OR** chỉ bỏ nhóm. Cấu hình nhóm chỉ giữ trong bộ nhớ của view kết nối hiện tại, chọn lại bảng sẽ xóa; chưa lưu sau restart/sync. Toàn bộ toán tử/dialect và nghiệm thu G5.4/G4.2 vẫn còn lại.
+
+### Cột hiển thị và sắp xếp nhiều cột
+
+Mở **Cột / Sắp xếp** để chọn ít nhất một cột hiển thị và tối đa 5 cột sắp xếp khác nhau. Mỗi cột có ASC/DESC riêng; nút ↑/↓ đổi thứ tự ưu tiên. Ctrl+Enter áp dụng, Escape/Hủy bỏ bản nháp. Cột sai/trùng, hướng sai, bỏ hết cột hoặc đổi đích/metadata không hợp lệ chặn áp dụng. Chọn lại bảng trả cấu hình mặc định; hiện chỉ giữ trong bộ nhớ của view kết nối, chưa lưu theo bảng sau restart.
+
+Ẩn cột chỉ thay giao diện: app vẫn đọc và giữ đầy đủ trường, khóa chính và snapshot gốc để sửa/xóa. Đây không phải cơ chế che dữ liệu nhạy cảm hoặc giảm dung lượng SELECT. Copy dòng JSON/INSERT và hộp sửa dòng vẫn dùng toàn bộ dòng. Cột hiển thị giữ thứ tự metadata. Tên cột trên lưới có mũi tên và số ưu tiên khi dùng nhiều cột; bấm/Enter/Space trên tiêu đề chuyển sang sort riêng cột đó.
+
+Các phần còn thiếu của khóa chính được thêm sau danh sách sort, dùng hướng của cột sort đầu (mặc định ASC). Chỉ sort trên các cột PK mới dùng keyset khi cursor hợp lệ; hỗ trợ hướng ASC/DESC khác nhau và lật từng hướng khi đi lùi. Sort có cột ngoài PK dùng OFFSET với PK làm thứ tự phụ. Cursor gắn thứ tự/hướng thực tế; COUNT cache không phụ thuộc sort. Không có PK thì chưa đảm bảo thứ tự ổn định giữa các dòng có cùng giá trị sort; dữ liệu thay đổi đồng thời cũng có thể làm kết quả phân trang thay đổi.
+
+Export từ bảng giữ cùng sort và PK phụ như lưới, kể cả sort theo cột đang ẩn. Mặc định xuất toàn bộ cột; bật **Chỉ xuất các cột đang hiển thị** để xuất danh sách cột đã chụp lúc mở hộp. Danh sách cột/sort/đích/filter không đổi theo sidebar hoặc cấu hình sửa sau đó. Chưa có kéo thả thứ tự cột hoặc lưu cấu hình lâu dài.
 
 ### Gợi ý cột trong SQL Editor
 

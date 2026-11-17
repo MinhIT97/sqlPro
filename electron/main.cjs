@@ -1377,6 +1377,7 @@ handle('db:export-file', async (payload) => {
         searchColumn: payload.searchColumn,
         searchMode: payload.searchMode,
         filterTree: payload.filterTree,
+        sorts: payload.sorts,
         orderBy: payload.orderBy,
         taskId
       }, write, (progress) => sendDbProgress({

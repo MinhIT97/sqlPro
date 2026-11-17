@@ -155,6 +155,19 @@ test('stream export combines advanced groups, quick search and legacy filters wi
   assert.equal(calls.queries.length, before); assert.equal(session.activeTask, null);
 });
 
+test('multi-sort export uses grid tie breakers even when exporting only visible columns', async () => {
+  const { session, calls } = createSession(COLUMNS, [['Alice']]);
+  const sorts = [{ column: 'score', direction: 'DESC' }, { column: 'name', direction: 'ASC' }];
+  let output = '';
+  await session.exportTableFile({ database: 'sample', table: 'items', format: 'json', columns: ['name'], sorts }, async chunk => { output += chunk; });
+  assert.match(calls.queries[0].sql, /^SELECT `name` FROM/);
+  assert.match(calls.queries[0].sql, /ORDER BY `score` DESC, `name` ASC, `id` DESC$/);
+  assert.deepEqual(JSON.parse(output), [{ name: 'Alice' }]);
+  const before = calls.queries.length;
+  await assert.rejects(session.exportTableFile({ database: 'sample', table: 'items', format: 'csv', sorts: [{ column: 'missing', direction: 'ASC' }] }, async () => {}), { code: 'INVALID_ORDER' });
+  assert.equal(calls.queries.length, before); assert.equal(session.activeTask, null);
+});
+
 test('xuất JSON là mảng hợp lệ và giữ NULL, object, binary', async () => {
   const rows = [
     [1, 'Alice, "A"', { a: 1 }, Buffer.from('00ff', 'hex')],

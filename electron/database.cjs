@@ -21,6 +21,7 @@ const ExportValues = require('../export-values.js');
 const { ResultBudget } = require('./result-budget.cjs');
 const { TableDataService } = require('./table-data.cjs');
 const { buildTableSearch } = require('./table-search.cjs');
+const TableView = require('../table-view.js');
 
 const MAX_QUERY_ROWS = 100000;
 const ANALYZE_ROWS = Symbol('validated-analyze-rows');
@@ -2000,7 +2001,8 @@ class DatabaseSession {
       if (!available.length) throw fail(`Không tìm thấy cột của bảng "${table}".`, 'TABLE_NOT_FOUND');
       selected = resolveFileColumns(available, settings.columns);
       const where = buildFileWhere(settings.filters, available, settings.search, settings);
-      const order = buildFileOrder(settings.orderBy, available);
+      const entries = settings.sorts !== undefined && settings.sorts !== null ? TableView.order(settings, available).entries : null;
+      const order = entries ? entries.length ? ` ORDER BY ${entries.map(entry => `${quoteId(entry.column)} ${entry.direction}`).join(', ')}` : '' : buildFileOrder(settings.orderBy, available);
       const names = selected.map((column) => quoteId(column.name));
       const sql = `SELECT ${names.join(', ')} FROM ${tableRef(database, table)}${where.sql}${order}`;
       if (format === 'json') {

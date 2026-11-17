@@ -50,6 +50,8 @@ const app = {
   pageSize: 100,
   search: '',
   filterTree: null,
+  visibleColumns: null,
+  sorts: null,
   orderBy: null,
   orderDir: 'ASC',
   query: { sql: '', result: null, error: null, running: false },
@@ -3633,6 +3635,7 @@ async function connectTo(id, options = {}) {
       total: app.total, page: app.page, search: app.search,
       searchColumn: app.searchColumn, searchMode: app.searchMode,
       filterTree: app.filterTree,
+      visibleColumns: app.visibleColumns, sorts: app.sorts,
       pageCursor: app.pageCursor, nextCursor: app.nextCursor, previousCursor: app.previousCursor, hasMore: app.hasMore,
       orderBy: app.orderBy, orderDir: app.orderDir,
       indexes: app.indexes, relations: app.relations, table, mode
@@ -5166,6 +5169,7 @@ async function selectTable(name, options = {}) {
   app.searchColumn = null;
   app.searchMode = 'contains';
   app.filterTree = null;
+  app.visibleColumns = null; app.sorts = null;
   app.pageCursor = null;
   app.nextCursor = null;
   app.previousCursor = null;
@@ -5205,6 +5209,7 @@ async function loadData({ keepScroll = false } = {}) {
       filterTree: app.filterTree || null,
       cursor: app.pageCursor || null,
       orderBy: app.orderBy,
+      sorts: app.sorts,
       orderDir: app.orderDir
     }));
     if (requestId !== dataRequestId || database !== app.database || targetTable !== table || connectionId !== app.connection?.id || mode !== 'data') return;
@@ -5792,6 +5797,88 @@ async function inlineEditCell(td) {
   });
 }
 
+function tableSorts() {
+  return app.sorts || (app.orderBy ? [{ column: app.orderBy, direction: app.orderDir || 'ASC' }] : []);
+}
+
+function tableViewDialog() {
+  const View = window.SqlTableView;
+  const target = { profileId: app.connection?.id, database: app.database, table, visible: app.visibleColumns, sorts: app.sorts, orderBy: app.orderBy, orderDir: app.orderDir };
+  const current = () => mode === 'data' && target.profileId === app.connection?.id && target.database === app.database && target.table === table
+    && target.visible === app.visibleColumns && target.sorts === app.sorts && target.orderBy === app.orderBy && target.orderDir === app.orderDir;
+  if (!app.columns.length) return;
+  const selected = new Set(View.visible(app.visibleColumns, app.columns).map(column => column.name));
+  const sorts = tableSorts().map(entry => ({ ...entry }));
+  modal(`<div id="tableViewEditor"><h2>Cột và sắp xếp</h2><p>${esc(app.database)}.${esc(table)}</p>
+    <h3>Cột hiển thị</h3><p>Ẩn cột chỉ thay cách hiển thị; dữ liệu dòng và khóa chính vẫn được giữ để chỉnh sửa.</p>
+    <div class="table-view-actions"><button type="button" id="showAllViewColumns">Chọn tất cả</button><button type="button" id="hideAllViewColumns">Bỏ chọn tất cả</button></div>
+    <div id="viewColumnChoices" class="view-column-choices">${app.columns.map((column, index) => `<label><input type="checkbox" data-view-column="${index}" ${selected.has(column.name) ? 'checked' : ''}><span>${esc(column.name)}</span></label>`).join('')}</div>
+    <h3>Thứ tự ưu tiên sắp xếp</h3><p>Tối đa 5 cột. Khóa chính còn thiếu được thêm làm thứ tự phụ; không có khóa duy nhất thì thứ tự các dòng bằng nhau có thể thay đổi.</p>
+    <div id="viewSortRows"></div><div class="table-view-actions"><button type="button" id="addViewSort">＋ Cột sắp xếp</button><button type="button" id="clearViewSort">Xóa sắp xếp</button></div>
+    <p id="viewConfigError" role="status" aria-live="polite"></p><div class="actions"><button type="button" data-click="close-modal">Hủy</button><button type="button" class="primary" id="applyTableView">Áp dụng (Ctrl+Enter)</button></div></div>`, true);
+  const editor = $('#tableViewEditor'), columns = [...app.columns];
+  const validate = () => {
+    try {
+      if (!current()) throw new Error('Đích hoặc cấu hình đã thay đổi. Hãy đóng và mở lại.');
+      const names = columns.filter(column => selected.has(column.name)).map(column => column.name);
+      if (!names.length || names.some(name => !app.columns.some(column => column.name === name))) throw new Error('Chọn ít nhất một cột còn tồn tại.');
+      const normalized = View.normalizeSorts(sorts, app.columns);
+      $('#viewConfigError').textContent = ''; $('#applyTableView').disabled = false;
+      return { names, normalized };
+    } catch (error) { $('#viewConfigError').textContent = error.message; $('#applyTableView').disabled = true; return null; }
+  };
+  const renderSorts = () => {
+    $('#viewSortRows').innerHTML = sorts.map((entry, index) => `<div class="view-sort-row" data-view-sort="${index}"><span>${index + 1}.</span>
+      <select data-view-sort-field="column" aria-label="Cột sắp xếp ${index + 1}">${columns.map(column => `<option value="${esc(column.name)}" ${column.name === entry.column ? 'selected' : ''}>${esc(column.name)}</option>`).join('')}</select>
+      <select data-view-sort-field="direction" aria-label="Hướng sắp xếp ${index + 1}"><option value="ASC" ${entry.direction === 'ASC' ? 'selected' : ''}>ASC — Tăng</option><option value="DESC" ${entry.direction === 'DESC' ? 'selected' : ''}>DESC — Giảm</option></select>
+      <button type="button" data-view-sort-action="up" ${index ? '' : 'disabled'} aria-label="Ưu tiên cao hơn">↑</button><button type="button" data-view-sort-action="down" ${index < sorts.length - 1 ? '' : 'disabled'} aria-label="Ưu tiên thấp hơn">↓</button><button type="button" data-view-sort-action="remove" aria-label="Xóa cột sắp xếp">×</button></div>`).join('');
+    $('#addViewSort').disabled = sorts.length >= 5 || sorts.length >= columns.length;
+    validate();
+  };
+  editor.addEventListener('change', event => {
+    const checkbox = event.target.closest('[data-view-column]');
+    if (checkbox) {
+      const name = columns[Number(checkbox.dataset.viewColumn)]?.name;
+      if (name !== undefined) checkbox.checked ? selected.add(name) : selected.delete(name);
+      validate(); return;
+    }
+    const control = event.target.closest('[data-view-sort-field]');
+    const entry = control && sorts[Number(control.closest('[data-view-sort]').dataset.viewSort)];
+    if (entry) { entry[control.dataset.viewSortField] = control.value; validate(); }
+  });
+  editor.addEventListener('click', event => {
+    const button = event.target.closest('[data-view-sort-action]');
+    if (!button) return;
+    const index = Number(button.closest('[data-view-sort]').dataset.viewSort), action = button.dataset.viewSortAction;
+    if (!sorts[index]) return;
+    if (action === 'remove') sorts.splice(index, 1);
+    else {
+      const next = index + (action === 'up' ? -1 : 1);
+      if (next >= 0 && next < sorts.length) [sorts[index], sorts[next]] = [sorts[next], sorts[index]];
+    }
+    renderSorts(); $('#addViewSort').focus();
+  });
+  const toggle = checked => { editor.querySelectorAll('[data-view-column]').forEach(input => { input.checked = checked; }); selected.clear(); if (checked) columns.forEach(column => selected.add(column.name)); validate(); };
+  $('#showAllViewColumns').addEventListener('click', () => toggle(true));
+  $('#hideAllViewColumns').addEventListener('click', () => toggle(false));
+  $('#addViewSort').addEventListener('click', () => {
+    const column = columns.find(column => !sorts.some(entry => entry.column === column.name));
+    if (sorts.length >= 5 || !column) return;
+    sorts.push({ column: column.name, direction: 'ASC' }); renderSorts();
+    editor.querySelector(`[data-view-sort="${sorts.length - 1}"] select`)?.focus();
+  });
+  $('#clearViewSort').addEventListener('click', () => { sorts.length = 0; renderSorts(); });
+  const apply = () => {
+    const result = validate(); if (!result) return;
+    app.visibleColumns = Object.freeze(result.names); app.sorts = result.normalized;
+    app.orderBy = null; app.orderDir = 'ASC'; app.page = 1; app.pageCursor = null;
+    closeModal(); void loadData();
+  };
+  $('#applyTableView').addEventListener('click', apply);
+  editor.addEventListener('keydown', event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); apply(); } });
+  renderSorts(); editor.querySelector('input')?.focus();
+}
+
 function tableFilterDialog() {
   const Filters = window.SqlTableFilters;
   const target = { profileId: app.connection?.id, database: app.database, table, tree: app.filterTree };
@@ -5914,6 +6001,7 @@ function renderDataView() {
       <select id="filterMode" aria-label="Cách tìm kiếm"><option value="contains">Chứa</option><option value="exact" ${app.searchMode === 'exact' ? 'selected' : ''}>Bằng</option><option value="prefix" ${app.searchMode === 'prefix' ? 'selected' : ''}>Bắt đầu bằng</option><option value="is-null" ${nullSearch && app.searchMode === 'is-null' ? 'selected' : ''} ${app.searchColumn ? '' : 'disabled'}>Là NULL</option><option value="not-null" ${app.searchMode === 'not-null' ? 'selected' : ''} ${app.searchColumn ? '' : 'disabled'}>Khác NULL</option></select>
       <button id="clearFilterBtn" type="button" ${canResetSearch ? '' : 'disabled'}>Đặt lại bộ lọc</button>
       <button id="groupFilterBtn" type="button">Bộ lọc AND/OR${app.filterTree ? ' · đang bật' : ''}</button>
+      <button id="tableViewBtn" type="button">Cột / Sắp xếp${tableSorts().length > 1 ? ` · ${tableSorts().length}` : ''}</button>
       <button id="addRowBtn" ${readOnly ? 'disabled title="Kết nối chỉ đọc"' : ''}>＋ Thêm bản ghi</button>
       <button class="danger" id="deleteRowsBtn" ${editable ? '' : `disabled title="${readOnly ? 'Kết nối chỉ đọc' : 'Bảng không có khóa chính'}"`}>⌫ Xóa</button>
       <button id="refreshBtn">↻</button>
@@ -5960,6 +6048,7 @@ function renderDataView() {
     app.page = 1; app.pageCursor = null; void loadData();
   });
   $('#groupFilterBtn').addEventListener('click', tableFilterDialog);
+  $('#tableViewBtn').addEventListener('click', tableViewDialog);
   $('#addRowBtn').addEventListener('click', () => editRow(null));
   $('#deleteRowsBtn').addEventListener('click', deleteSelectedRows);
   $('#refreshBtn').addEventListener('click', () => loadData());
@@ -5985,22 +6074,23 @@ function renderDataView() {
 
 function dataGridHtml() {
   const editable = app.primaryKey.length > 0;
+  const visible = window.SqlTableView.visible(app.visibleColumns, app.columns), sorts = tableSorts();
   const pageCount = app.total === null ? null : Math.max(1, Math.ceil(app.total / app.pageSize));
   const header = `
     <tr>
       <th>${editable ? '<input type="checkbox" id="selectAllRows" aria-label="Chọn tất cả">' : ''}</th>
-      ${app.columns.map((column) => {
-        const isSorted = app.orderBy === column.name;
-        const sortClass = isSorted ? (app.orderDir === 'ASC' ? 'sortable sorted-asc' : 'sortable sorted-desc') : 'sortable';
-        const sortArrow = isSorted ? (app.orderDir === 'ASC' ? '<span class="sort-arrow">▲</span>' : '<span class="sort-arrow">▼</span>') : '';
-        return `<th class="${sortClass}" data-sort="${esc(column.name)}" title="Bấm để sắp xếp theo cột ${esc(column.name)}">${esc(column.name)} <small>${esc(column.type)}</small>${sortArrow}</th>`;
+      ${visible.map((column) => {
+        const index = sorts.findIndex(entry => entry.column === column.name), direction = sorts[index]?.direction;
+        const sortClass = direction ? direction === 'ASC' ? 'sortable sorted-asc' : 'sortable sorted-desc' : 'sortable';
+        const sortArrow = direction ? `<span class="sort-arrow">${direction === 'ASC' ? '▲' : '▼'}${sorts.length > 1 ? index + 1 : ''}</span>` : '';
+        return `<th class="${sortClass}" tabindex="0" data-sort="${esc(column.name)}" title="Bấm hoặc Enter để sắp xếp riêng cột ${esc(column.name)}">${esc(column.name)} <small>${esc(column.type)}</small>${sortArrow}</th>`;
       }).join('')}
     </tr>
   `;
   const body = app.rows.map((row, index) => `
     <tr data-row="${index}">
       <td>${editable ? `<input class="rowcheck" type="checkbox" value="${index}" aria-label="Chọn bản ghi ${index + 1}">` : ''}</td>
-      ${app.columns.map((column) => {
+      ${visible.map((column) => {
         const value = row[column.name];
         const isNull = value === null || value === undefined;
         const text = isNull ? 'NULL' : String(value);
@@ -6009,7 +6099,7 @@ function dataGridHtml() {
         return `<td class="${isNull ? 'nullcell' : ''}" data-row="${index}" data-col="${esc(column.name)}" title="${esc(text.slice(0, 500))}">${cellDisplay}</td>`;
       }).join('')}
     </tr>
-  `).join('') || `<tr><td colspan="${app.columns.length + 1}" class="empty">Không có dữ liệu phù hợp.</td></tr>`;
+  `).join('') || `<tr><td colspan="${visible.length + 1}" class="empty">Không có dữ liệu phù hợp.</td></tr>`;
   return `<div class="tablebox"><table><thead>${header}</thead><tbody>${body}</tbody></table></div>
     <div class="pagination">
       <span>${app.total === null ? 'Chưa đếm tổng' : `${app.total} bản ghi`} <button id="countRowsBtn" type="button">${app.total === null ? 'Đếm tổng' : 'Đếm lại'}</button> <span style="margin:0 10px">·</span> ${app.pageSize} dòng / trang</span>
@@ -6047,6 +6137,7 @@ function positionPagination() {
   document.querySelectorAll('th[data-sort]').forEach((th) => {
     th.addEventListener('click', () => {
       const col = th.dataset.sort;
+      app.sorts = null;
       if (app.orderBy === col) {
         if (app.orderDir === 'ASC') {
           app.orderDir = 'DESC';
@@ -6062,6 +6153,7 @@ function positionPagination() {
       app.pageCursor = null;
       loadData({ keepScroll: true });
     });
+    th.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); th.click(); } });
   });
   const previous = $('#prevPage');
   const next = $('#nextPage');
@@ -10783,13 +10875,15 @@ async function transfer(type) {
     const profileId = app.connection?.id || null;
     const searchState = { search: app.search, searchColumn: app.searchColumn || null, searchMode: app.searchMode || 'contains' };
     const orderBy = app.orderBy ? { column: app.orderBy, direction: app.orderDir || 'ASC' } : null;
+    const sorts = tableSorts().map(entry => ({ ...entry }));
+    const visibleColumns = window.SqlTableView.visible(app.visibleColumns, app.columns).map(column => column.name);
     const filterTree = app.filterTree || null;
     const searchSummary = [tableSearchSummary(searchState), filterTree ? 'Nhóm AND/OR đang áp dụng' : ''].filter(Boolean).join(' AND ');
     const hasSearch = Boolean(searchSummary);
     modal(`
       <h2>Xuất dữ liệu</h2>
       <p>${esc(database)}.${esc(targetTable)}</p>
-      <p class="hint">Phạm vi: ${hasSearch ? `các dòng khớp bộ lọc “${esc(searchSummary)}” nếu chọn bên dưới, ngược lại toàn bộ bảng` : 'toàn bộ bảng'}${orderBy ? ` · sắp xếp theo ${esc(orderBy.column)} ${esc(orderBy.direction)}` : ''}.</p>
+      <p class="hint">Phạm vi: ${hasSearch ? `các dòng khớp bộ lọc “${esc(searchSummary)}” nếu chọn bên dưới, ngược lại toàn bộ bảng` : 'toàn bộ bảng'}${sorts.length ? ` · sắp xếp theo ${sorts.map(entry => `${esc(entry.column)} ${esc(entry.direction)}`).join(', ')}` : ''}.</p>
       <label>Định dạng</label>
       <select id="exportFormat">
         <option value="csv">CSV — UTF-8, có dòng tiêu đề</option>
@@ -10800,6 +10894,7 @@ async function transfer(type) {
         <input type="checkbox" id="exportFiltered" ${hasSearch ? '' : 'disabled'}>
         Chỉ xuất các dòng khớp bộ lọc hiện tại${hasSearch ? ` (“${esc(searchSummary)}”)` : ''}
       </label>
+      <label class="check-row"><input type="checkbox" id="exportVisibleColumns">Chỉ xuất ${visibleColumns.length} cột đang hiển thị</label>
       <div class="hint">Tác vụ chạy theo luồng, không giới hạn 20.000 dòng và có thể hủy giữa chừng. CSV/TSV dùng <code>\\N</code> cho NULL và <code>0x…</code> cho dữ liệu nhị phân; JSON giữ nguyên <code>null</code>.</div>
       <div class="actions">
         <button data-click="close-modal">Hủy</button>
@@ -10809,6 +10904,7 @@ async function transfer(type) {
     $('#exportGo').addEventListener('click', async () => {
       const format = $('#exportFormat').value;
       const useFilter = $('#exportFiltered')?.checked === true;
+      const onlyVisible = $('#exportVisibleColumns')?.checked === true;
       const taskId = newTransferTaskId('export');
       showTransferProgress('export', `${database}.${targetTable}`, { taskId, profileId });
       try {
@@ -10822,6 +10918,8 @@ async function transfer(type) {
           searchColumn: useFilter ? searchState.searchColumn : null,
           searchMode: useFilter ? searchState.searchMode : 'contains',
           filterTree: useFilter ? filterTree : null,
+          columns: onlyVisible ? visibleColumns : undefined,
+          sorts,
           orderBy
         }));
         activeTransfer = null;

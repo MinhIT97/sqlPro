@@ -1,6 +1,7 @@
 'use strict';
 
 const { buildTableSearch } = require('./table-search.cjs');
+const TableView = require('../table-view.js');
 
 // SQL planning and bounded count cache are independent of IPC and renderer state.
 class TableDataService {
@@ -37,31 +38,29 @@ class TableDataService {
     const page = Math.max(1, Math.min(1000000, Math.trunc(Number(options.page) || 1)));
     const pageSize = Math.max(1, Math.min(500, Math.trunc(Number(options.pageSize) || 100)));
     const primary = plan.columns.filter((column) => column.key === 'PRI');
-    const sorted = plan.columns.find((column) => column.name === options.orderBy);
-    const keys = sorted ? [sorted, ...primary.filter((column) => column !== sorted)] : primary;
-    const direction = sorted && options.orderDir === 'DESC' ? 'DESC' : 'ASC';
-    const signature = JSON.stringify([plan.key, pageSize, keys.map((column) => column.name), direction]);
+    const ordering = TableView.order(options, plan.columns);
+    const keys = ordering.entries.map(entry => plan.columns.find(column => column.name === entry.column));
+    const signature = JSON.stringify([plan.key, pageSize, ordering.entries]);
     const input = options.cursor;
-    const usable = primary.length > 0 && (!sorted || sorted.key === 'PRI') && input
+    const usable = ordering.keyset && input
       && input.signature === signature && input.page === page && ['next', 'previous'].includes(input.direction)
       && Array.isArray(input.values) && input.values.length === keys.length;
     const backwards = usable && input.direction === 'previous';
     const parts = plan.where ? [plan.where] : [];
     const params = [...plan.params];
     if (usable) {
-      const greater = (direction === 'ASC') !== backwards;
       const terms = keys.map((column, index) => {
         const equal = keys.slice(0, index).map((previous, position) => {
           params.push(this.keyParameter(input.values[position], previous));
           return `${this.quoteId(previous.name)} = ?`;
         });
         params.push(this.keyParameter(input.values[index], column));
+        const greater = (ordering.entries[index].direction === 'ASC') !== backwards;
         return `(${[...equal, `${this.quoteId(column.name)} ${greater ? '>' : '<'} ?`].join(' AND ')})`;
       });
       parts.push(`(${terms.join(' OR ')})`);
     }
-    const sqlDirection = backwards ? (direction === 'ASC' ? 'DESC' : 'ASC') : direction;
-    const order = keys.length ? ` ORDER BY ${keys.map((column) => `${this.quoteId(column.name)} ${sqlDirection}`).join(', ')}` : '';
+    const order = keys.length ? ` ORDER BY ${ordering.entries.map(entry => `${this.quoteId(entry.column)} ${backwards ? entry.direction === 'ASC' ? 'DESC' : 'ASC' : entry.direction}`).join(', ')}` : '';
     let sql = `SELECT * FROM ${this.tableRef(options.database, options.table)}${parts.length ? ` WHERE ${parts.join(' AND ')}` : ''}${order} LIMIT ?`;
     params.push(pageSize + 1);
     if (!usable) { sql += ' OFFSET ?'; params.push((page - 1) * pageSize); }
@@ -69,7 +68,7 @@ class TableDataService {
     const extra = result.length > pageSize;
     let rows = result.slice(0, pageSize);
     if (backwards) rows = rows.reverse();
-    const cursor = (row, nextPage, nextDirection) => row && primary.length > 0 && (!sorted || sorted.key === 'PRI') ? {
+    const cursor = (row, nextPage, nextDirection) => row && ordering.keyset ? {
       signature, page: nextPage, direction: nextDirection,
       values: keys.map((column) => Buffer.isBuffer(row[column.name]) ? `0x${row[column.name].toString('hex')}` : row[column.name])
     } : null;

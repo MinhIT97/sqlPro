@@ -1233,6 +1233,22 @@ body.dark-theme #tableFilterEditor .filter-group { border-color: #475569; }
 body.dark-theme #tableFilterEditor input, body.dark-theme #tableFilterEditor select { background: #0f172a; color: #e2e8f0; border-color: #475569; }
 body.dark-theme #tableFilterEditor button:not(.primary) { background: #24344a; color: #e2e8f0; border-color: #475569; }
 body.dark-theme #groupFilterError { color: #fbbf24; }
+#tableViewEditor { max-height: 78vh; display: flex; flex-direction: column; overflow: auto; }
+.view-column-choices { display: flex; flex-wrap: wrap; gap: 6px 18px; overflow: auto; min-height: 60px; max-height: 170px; flex-shrink: 0; padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px; }
+#tableViewEditor .view-column-choices label { display: flex; gap: 8px; align-items: center; margin: 0; max-width: 100%; }
+#tableViewEditor .view-column-choices input { width: auto; flex-shrink: 0; }
+.view-column-choices span { overflow-wrap: anywhere; }
+.table-view-actions, .view-sort-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+#tableViewEditor .view-sort-row select { width: auto; min-width: 0; flex: 1 1 130px; }
+#tableViewEditor p { margin-bottom: 8px; }
+#tableViewEditor h3 { margin: 14px 0 8px; }
+#tableViewEditor .actions { position: sticky; bottom: 0; background: white; padding: 8px 0; margin-top: 10px; flex-wrap: wrap; }
+#viewConfigError { color: #b45309; }
+#viewConfigError:empty { display: none; }
+body.dark-theme dialog:has(#tableViewEditor), body.dark-theme #tableViewEditor .actions { background: #182635; color: #e2e8f0; }
+body.dark-theme #tableViewEditor select { background: #0f172a; color: #e2e8f0; border-color: #475569; }
+body.dark-theme #tableViewEditor button:not(.primary) { background: #24344a; color: #e2e8f0; border-color: #475569; }
+body.dark-theme #viewConfigError { color: #fbbf24; }
 
 /* Schema-aware editors shared by row forms, data grids and SQL result grids. */
 .sql-value-editor {

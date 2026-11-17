@@ -49,6 +49,27 @@ test('quay lại phiên đang mở khôi phục bảng ngay và không hiện đ
   assert.equal(r.evaluate("app.database === 'one' && table === 'items' && app.rows[0].id === 1"), true);
 });
 
+test('quay lại view còn chờ cấu hình phải hoàn tất tải, không vẽ dữ liệu cache của bảng cũ', async () => {
+  const events = [];
+  const r = loadRenderer({ desktop: { db: { connect: async id => ({ ok: true, data: {
+    profileId: id, server: '8.0', databases: ['one'], openProfiles: ['a', 'b'], reused: id === 'a'
+  } }) } } });
+  r.context.events = events;
+  r.evaluate(`
+    app.connections=[{id:'a',name:'A',type:'mysql'},{id:'b',name:'B',type:'mysql'}];
+    app.connection=app.connections[0];app.database='one';app.databases=['one'];
+    app.columns=[{name:'id'}];app.rows=[{id:1}];table='new_table';mode='data';
+    app.tablePreferencePending=true;openConnectionIds.add('a');
+    renderSidebar=()=>{};view=()=>{};updateChrome=()=>{};renderConnectionLoading=()=>{};
+    renderDataView=()=>events.push('stale grid');loadData=async()=>events.push('pending view load');
+    setConnectionState=()=>{};setStatus=()=>{};selectDatabase=async()=>{};persistState=()=>{};
+  `);
+  await r.evaluate("connectTo('b', {silent:true})");
+  events.length = 0;
+  await r.evaluate("connectTo('a', {silent:true})");
+  assert.deepEqual(events, ['pending view load']);
+});
+
 test('kết nối mới hiện loading trong lúc chờ máy chủ', async () => {
   let finishConnect;
   const workspace = { innerHTML: '' };

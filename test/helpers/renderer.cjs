@@ -7,6 +7,7 @@ const SqlAutocomplete = require('../../sql-autocomplete.js');
 const SqlRowValues = require('../../row-values.js');
 const SqlTableFilters = require('../../table-filters.js');
 const SqlTableView = require('../../table-view.js');
+const SqlTablePreferences = require('../../table-preferences.js');
 const SqlExportValues = require('../../export-values.js');
 const SqlQueryResults = require('../../query-results.js');
 const SqlRestoreReview = require('../../restore-review.js');
@@ -18,7 +19,7 @@ function loadRenderer({ desktop, elements = new Map() } = {}) {
   const storage = new Map();
   const context = vm.createContext({
     console,
-    window: { sqlProDesktop: desktop, SqlAutocomplete, SqlRowValues, SqlTableFilters, SqlTableView, SqlExportValues, SqlQueryResults, SqlRestoreReview, addEventListener() {} },
+    window: { sqlProDesktop: desktop, SqlAutocomplete, SqlRowValues, SqlTableFilters, SqlTableView, SqlTablePreferences, SqlExportValues, SqlQueryResults, SqlRestoreReview, addEventListener() {} },
     document: {
       querySelector: (selector) => elements.get(selector) || null,
       querySelectorAll: () => [],

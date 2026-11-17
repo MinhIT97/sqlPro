@@ -1249,6 +1249,13 @@ body.dark-theme dialog:has(#tableViewEditor), body.dark-theme #tableViewEditor .
 body.dark-theme #tableViewEditor select { background: #0f172a; color: #e2e8f0; border-color: #475569; }
 body.dark-theme #tableViewEditor button:not(.primary) { background: #24344a; color: #e2e8f0; border-color: #475569; }
 body.dark-theme #viewConfigError { color: #fbbf24; }
+#tablePreferenceEditor { max-height: 78vh; display: flex; flex-direction: column; overflow: auto; overflow-wrap: anywhere; }
+#tablePreferenceEditor p { margin: 8px 0; }
+#tablePreferenceEditor label { display: flex; gap: 8px; align-items: flex-start; margin: 12px 0; }
+#tablePreferenceEditor input { width: auto; flex-shrink: 0; }
+#tablePreferenceEditor .actions { position: sticky; bottom: 0; background: white; flex-wrap: wrap; padding: 8px 0; margin-top: 12px; }
+body.dark-theme dialog:has(#tablePreferenceEditor), body.dark-theme #tablePreferenceEditor .actions { background: #182635; color: #e2e8f0; }
+body.dark-theme #tablePreferenceEditor button:not(.primary) { background: #24344a; color: #e2e8f0; border-color: #475569; }
 
 /* Schema-aware editors shared by row forms, data grids and SQL result grids. */
 .sql-value-editor {

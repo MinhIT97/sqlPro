@@ -133,6 +133,11 @@ contextBridge.exposeInMainWorld('sqlProDesktop', Object.freeze({
   getMetadata: () => invoke('app:metadata'),
   loadState: () => invoke('state:load'),
   saveState: (state) => invoke('state:save', state),
+  tablePreferences: Object.freeze({
+    read: (scope) => ipcRenderer.invoke('table-preferences:read', scope),
+    save: (scope, value) => ipcRenderer.invoke('table-preferences:save', scope, value),
+    remove: (scope) => ipcRenderer.invoke('table-preferences:remove', scope)
+  }),
   saveTextFile: (payload) => invoke('file:save-text', payload),
   openJsonFile: () => invoke('file:open-json'),
   openTextFile: (payload) => invoke('file:open-text', payload),

@@ -3636,6 +3636,7 @@ async function connectTo(id, options = {}) {
       searchColumn: app.searchColumn, searchMode: app.searchMode,
       filterTree: app.filterTree,
       visibleColumns: app.visibleColumns, sorts: app.sorts,
+      tablePreferencePending: app.tablePreferencePending,
       pageCursor: app.pageCursor, nextCursor: app.nextCursor, previousCursor: app.previousCursor, hasMore: app.hasMore,
       orderBy: app.orderBy, orderDir: app.orderDir,
       indexes: app.indexes, relations: app.relations, table, mode
@@ -3676,7 +3677,8 @@ async function connectTo(id, options = {}) {
         loadOpenObjectGroups();
         updateChrome();
         if (mode === 'data') {
-          if (table && app.columns.length) renderDataView();
+          if (table && app.tablePreferencePending) await loadData();
+          else if (table && app.columns.length) renderDataView();
           else renderEmptyTable();
         } else if (mode === 'backups') renderBackupsView();
         else if (mode === 'query') renderQueryView();
@@ -5163,7 +5165,9 @@ async function onBackupManagerClick(event) {
 }
 
 async function selectTable(name, options = {}) {
+  ++dataRequestId;
   table = name;
+  app.tablePreferencePending = true;
   app.page = 1;
   app.search = '';
   app.searchColumn = null;
@@ -5197,6 +5201,32 @@ async function loadData({ keepScroll = false } = {}) {
   else workspaceLoading();
   updateChrome();
   try {
+    if (app.tablePreferencePending) {
+      const scope = { profileId: connectionId, database, table: targetTable };
+      const current = () => requestId === dataRequestId && database === app.database && targetTable === table && connectionId === app.connection?.id && mode === 'data';
+      try {
+        const saved = await call(desktop.tablePreferences.read(scope));
+        if (!current()) return;
+        if (saved) {
+          const columns = await call(desktop.db.columns(database, targetTable, connectionId));
+          if (!current()) return;
+          const preference = window.SqlTablePreferences.normalize(saved.view, columns);
+          applyTablePreference(preference);
+        }
+        app.tablePreferencePending = false;
+      } catch (error) {
+        if (!current()) return;
+        renderError(error);
+        $('#workspace [data-click="load-data"]')?.remove();
+        const actions = document.createElement('div');
+        actions.className = 'actions';
+        actions.innerHTML = '<button id="retryTablePreference">Thử đọc lại cấu hình</button><button id="skipTablePreference">Mở mặc định lần này</button>';
+        $('#workspace').append(actions);
+        $('#retryTablePreference').addEventListener('click', () => { if (current()) { app.tablePreferencePending = true; void loadData(); } });
+        $('#skipTablePreference').addEventListener('click', () => { if (current()) { app.tablePreferencePending = false; void loadData(); } });
+        return;
+      }
+    }
     const data = await call(desktop.db.tableData({
       profileId: app.connection?.id || null,
       database,
@@ -5801,6 +5831,74 @@ function tableSorts() {
   return app.sorts || (app.orderBy ? [{ column: app.orderBy, direction: app.orderDir || 'ASC' }] : []);
 }
 
+function applyTablePreference(preference) {
+  app.visibleColumns = preference.visibleColumns;
+  app.sorts = preference.sorts;
+  app.orderBy = null; app.orderDir = 'ASC';
+  if (preference.filters) Object.assign(app, preference.filters);
+  app.page = 1; app.pageCursor = null; app.nextCursor = null; app.previousCursor = null;
+  app.hasMore = undefined; app.total = null;
+}
+
+function tablePreferenceDialog() {
+  const Preferences = window.SqlTablePreferences;
+  const scope = { profileId: app.connection?.id, database: app.database, table };
+  const snapshot = { visibleColumns: app.visibleColumns, sorts: tableSorts(), search: app.search, searchColumn: app.searchColumn, searchMode: app.searchMode, filterTree: app.filterTree };
+  const columns = app.columns;
+  if (!columns.length) return;
+  modal(`<div id="tablePreferenceEditor"><h2>Cấu hình bảng đã lưu</h2><p>${esc(scope.database)}.${esc(scope.table)}</p>
+    <p>Lưu cục bộ cho kết nối và bảng này, tự áp dụng khi mở lại. Mỗi bảng giữ một cấu hình; lưu tiếp sẽ thay cấu hình cũ.</p>
+    <p>Mặc định chỉ lưu cột hiển thị và sắp xếp. Chọn bên dưới để lưu cả tìm kiếm nhanh và bộ lọc AND/OR đang áp dụng.</p>
+    <label><input type="checkbox" id="saveTableFilterValues"> Lưu cả bộ lọc và giá trị lọc vào tệp cục bộ (có thể chứa dữ liệu nhạy cảm)</label>
+    <p id="tablePreferenceStatus" role="status" aria-live="polite">Đang đọc cấu hình…</p>
+    <p>Nếu cấu hình không có bộ lọc, áp dụng tại đây giữ bộ lọc hiện tại. Xóa cấu hình đã lưu không thay đổi dữ liệu hoặc bộ lọc đang xem.</p>
+    <div class="actions"><button type="button" id="removeTablePreference" disabled>Xóa cấu hình đã lưu</button><button type="button" data-click="close-modal">Đóng</button><button type="button" id="restoreTablePreference" disabled>Áp dụng bản đã lưu</button><button type="button" class="primary" id="saveTablePreference" disabled>Lưu cấu hình hiện tại</button></div></div>`, true);
+  const editor = $('#tablePreferenceEditor');
+  const current = () => editor.isConnected && $('#tablePreferenceEditor') === editor && mode === 'data'
+    && scope.profileId === app.connection?.id && scope.database === app.database && scope.table === table
+    && snapshot.visibleColumns === app.visibleColumns && snapshot.filterTree === app.filterTree
+    && snapshot.search === app.search && snapshot.searchColumn === app.searchColumn && snapshot.searchMode === app.searchMode
+    && JSON.stringify(snapshot.sorts) === JSON.stringify(tableSorts());
+  let record = null, busy = false;
+  const status = message => { editor.querySelector('#tablePreferenceStatus').textContent = message; };
+  const buttons = enabled => {
+    editor.querySelector('#saveTablePreference').disabled = !enabled;
+    editor.querySelector('#restoreTablePreference').disabled = !enabled || !record;
+    editor.querySelector('#removeTablePreference').disabled = !enabled || !record;
+  };
+  const run = async action => {
+    if (busy) return;
+    if (!current()) { buttons(false); status('Đích hoặc cấu hình đã thay đổi. Hãy đóng và mở lại.'); return; }
+    busy = true; buttons(false);
+    try {
+      await action();
+    } catch (error) { if (editor.isConnected && $('#tablePreferenceEditor') === editor) status(error.message); }
+    finally { busy = false; if (current()) buttons(true); }
+  };
+  editor.querySelector('#saveTablePreference').addEventListener('click', () => void run(async () => {
+    const preference = Preferences.capture(snapshot, columns, editor.querySelector('#saveTableFilterValues').checked);
+    Preferences.normalize(preference, app.columns);
+    const saved = await call(desktop.tablePreferences.save(scope, preference));
+    if (!current()) return;
+    record = saved; status(`Đã lưu ${saved.view.filters ? 'bố cục và bộ lọc' : 'bố cục, không lưu bộ lọc'}.`);
+  }));
+  editor.querySelector('#removeTablePreference').addEventListener('click', () => void run(async () => {
+    await call(desktop.tablePreferences.remove(scope));
+    if (!current()) return;
+    record = null; status('Đã xóa cấu hình đã lưu. Cấu hình đang xem được giữ nguyên.');
+  }));
+  editor.querySelector('#restoreTablePreference').addEventListener('click', () => void run(async () => {
+    const preference = Preferences.normalize(record.view, app.columns);
+    applyTablePreference(preference); closeModal(); await loadData();
+  }));
+  void run(async () => {
+    const saved = await call(desktop.tablePreferences.read(scope));
+    if (!current()) return;
+    record = saved;
+    status(saved ? `Đã có cấu hình: ${saved.view.filters ? 'gồm bộ lọc và giá trị lọc' : 'chỉ bố cục'}. Lần lưu: ${saved.updatedAt}` : 'Chưa có cấu hình đã lưu cho bảng này.');
+  });
+}
+
 function tableViewDialog() {
   const View = window.SqlTableView;
   const target = { profileId: app.connection?.id, database: app.database, table, visible: app.visibleColumns, sorts: app.sorts, orderBy: app.orderBy, orderDir: app.orderDir };
@@ -6002,6 +6100,7 @@ function renderDataView() {
       <button id="clearFilterBtn" type="button" ${canResetSearch ? '' : 'disabled'}>Đặt lại bộ lọc</button>
       <button id="groupFilterBtn" type="button">Bộ lọc AND/OR${app.filterTree ? ' · đang bật' : ''}</button>
       <button id="tableViewBtn" type="button">Cột / Sắp xếp${tableSorts().length > 1 ? ` · ${tableSorts().length}` : ''}</button>
+      <button id="tablePreferenceBtn" type="button">Cấu hình đã lưu</button>
       <button id="addRowBtn" ${readOnly ? 'disabled title="Kết nối chỉ đọc"' : ''}>＋ Thêm bản ghi</button>
       <button class="danger" id="deleteRowsBtn" ${editable ? '' : `disabled title="${readOnly ? 'Kết nối chỉ đọc' : 'Bảng không có khóa chính'}"`}>⌫ Xóa</button>
       <button id="refreshBtn">↻</button>
@@ -6049,6 +6148,7 @@ function renderDataView() {
   });
   $('#groupFilterBtn').addEventListener('click', tableFilterDialog);
   $('#tableViewBtn').addEventListener('click', tableViewDialog);
+  $('#tablePreferenceBtn').addEventListener('click', tablePreferenceDialog);
   $('#addRowBtn').addEventListener('click', () => editRow(null));
   $('#deleteRowsBtn').addEventListener('click', deleteSelectedRows);
   $('#refreshBtn').addEventListener('click', () => loadData());

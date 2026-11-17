@@ -9,6 +9,12 @@ const { serialize, deserialize } = require('node:v8');
 const { pathToFileURL } = require('node:url');
 
 const store = require('./store.cjs');
+const { createTablePreferences } = require('./table-preferences.cjs');
+let tablePreferencesRepository;
+function tablePreferences() {
+  if (!tablePreferencesRepository) tablePreferencesRepository = createTablePreferences(app.getPath('userData'));
+  return tablePreferencesRepository;
+}
 const sync = require('./sync.cjs');
 const { parseNavicatFile } = require('./navicat.cjs');
 const { DatabaseSession, testConnection, previewImportFile, normalizeFileFormat } = require('./database.cjs');
@@ -807,6 +813,9 @@ handle('state:save', (value) => {
   writeJson('renderer-state.json', validateState(value));
   return { saved: true };
 });
+handle('table-preferences:read', (scope) => tablePreferences().read(scope));
+handle('table-preferences:save', (scope, value) => tablePreferences().save(scope, value));
+handle('table-preferences:remove', (scope) => tablePreferences().remove(scope));
 
 handle('file:save-text', async (payload) => {
   if (!payload || typeof payload !== 'object' || typeof payload.contents !== 'string'

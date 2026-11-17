@@ -5,6 +5,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const mysql = require('mysql2/promise');
 const { DatabaseSession } = require('../electron/database.cjs');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const Preferences = require('../table-preferences.js');
+const { createTablePreferences } = require('../electron/table-preferences.cjs');
 
 test('table search matches grid, explicit COUNT and streamed export on a real server', {
   skip: !process.env.SQLPRO_TABLE_SEARCH_PORT, timeout: 30000
@@ -99,6 +104,26 @@ test('table search matches grid, explicit COUNT and streamed export on a real se
         const stale = await session.tableData({ ...options, sorts: [], page: 2, cursor: first.nextCursor });
         assert.equal(stale.pagination, 'offset');
       }
+    });
+    await t.test('disk-restored filters and hidden-column sorts match grid, count and projected export', async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlpro-view-integration-'));
+      try {
+        const metadata = await session.listColumns(database, 'samples');
+        const scope = { profileId: 'fixture', database, table: 'samples' };
+        const view = Preferences.capture({ visibleColumns: ['id', 'label'], sorts: [{ column: 'note', direction: 'DESC' }, { column: 'id', direction: 'DESC' }],
+          search: needle, searchColumn: 'label', searchMode: 'contains', filterTree: group('AND', rule('id', 'gte', '3')) }, metadata, true);
+        createTablePreferences(root).save(scope, view);
+        const restored = Preferences.normalize(createTablePreferences(root).read(scope).view, metadata);
+        const options = { database, table: 'samples', pageSize: 100, sorts: restored.sorts, ...restored.filters };
+        const data = await session.tableData(options);
+        assert.deepEqual(data.rows.map(row => row.id), [4, 3]);
+        assert.equal((await session.countTableRows(options)).total, 2);
+        let output = '';
+        await session.exportTableFile({ ...options, columns: restored.visibleColumns, format: 'json' }, async chunk => { output += chunk; });
+        const rows = JSON.parse(output);
+        assert.deepEqual(rows.map(row => row.id), [4, 3]);
+        assert.deepEqual(Object.keys(rows[0]), ['id', 'label']);
+      } finally { fs.rmSync(root, { recursive: true, force: true }); }
     });
     assert.deepEqual((await session.raw('SELECT @@SESSION.sql_mode AS mode, @@SESSION.autocommit AS autocommit')).rows[0], before);
     assert.equal(session.inTransaction, true);

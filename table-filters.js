@@ -45,7 +45,7 @@
         if (keys.some(key => !(root ? ['version', 'op', 'items'] : ['op', 'items']).includes(key))
             || !Object.hasOwn(node, 'op') || root && (!Object.hasOwn(node, 'version') || node.version !== 1) || !['AND', 'OR'].includes(node.op)
             || !Array.isArray(node.items) || !node.items.length || node.items.length > limits.rules) fail('Nhóm cần AND/OR và ít nhất một điều kiện hợp lệ.');
-        const items = node.items.map(item => visit(item, depth + 1));
+        const items = Array.from(node.items, item => visit(item, depth + 1));
         return { tree: Object.freeze({ ...(root ? { version: 1 } : {}), op: node.op, items: Object.freeze(items.map(item => item.tree)) }), where: `(${items.map(item => item.where).join(` ${node.op} `)})` };
       }
       if (root || ++rules > limits.rules || !Object.hasOwn(node, 'column') || !Object.hasOwn(node, 'operator')
@@ -61,7 +61,7 @@
       let normalized, where;
       if (operator === 'between') {
         if (!Array.isArray(node.value) || node.value.length !== 2) fail('Khoảng lọc cần đúng hai giá trị.');
-        normalized = Object.freeze(node.value.map(raw => value(raw, column)));
+        normalized = Object.freeze(Array.from(node.value, raw => value(raw, column)));
         params.push(...normalized); where = `${reference} BETWEEN ? AND ?`;
       } else if (operator === 'contains' || operator === 'prefix') {
         // LIKE input is a search string, not an ENUM/SET assignment. Keep empty

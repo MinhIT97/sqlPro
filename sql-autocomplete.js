@@ -262,7 +262,81 @@
       }
       return Object.freeze(columns);
     };
-    const readSelectColumns = (tokens, blockEnd) => {
+    const starSourceCache = new WeakMap();
+    const localStarSources = (tokens, group, blockEnd) => {
+      if (starSourceCache.has(tokens)) return starSourceCache.get(tokens);
+      starSourceCache.set(tokens, null);
+      const from = tokens.findIndex((token, index) => keyword(tokens, index, 'FROM'));
+      if (from < 0) return null;
+      const sources = [], owners = new Set();
+      const clause = index => ['WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT', 'WINDOW', 'FOR', 'LOCK'].some(value => keyword(tokens, index, value));
+      const comma = index => tokens[index]?.type === 'symbol' && tokens[index].value === ',';
+      const joinStart = index => ['JOIN', 'INNER', 'LEFT', 'RIGHT', 'CROSS', 'NATURAL', 'FULL', 'OUTER', 'STRAIGHT_JOIN'].some(value => keyword(tokens, index, value));
+      let index = from + 1, gapStart = tokens[from].end, joined = false, needsOn = false;
+      while (index < tokens.length) {
+        if (sources.length >= 64) return null;
+        const source = tokens[index];
+        let owner = '', columns;
+        if (source.type === 'group') { columns = selectColumns(source.group); index++; }
+        else {
+          if (!name(source)) return null;
+          owner = source.value; index++;
+          for (let scope = group; scope; scope = scope.parent) {
+            if (!scope.headerKnown) return null;
+            const local = owner.toLocaleLowerCase();
+            if (!scope.locals.has(local)) continue;
+            // An unsupported/forward local binding still shadows outer names.
+            if (scope.localStarts.get(local) > source.start) return null;
+            columns = scope.localBodies.has(local) ? selectColumns(scope.localBodies.get(local)) : scope.localColumns.get(local);
+            break;
+          }
+        }
+        if (word(tokens[index], 'AS')) {
+          if (!name(tokens[++index])) return null;
+          owner = tokens[index++].value;
+        } else if (name(tokens[index]) && !word(tokens[index], 'OUTER')) owner = tokens[index++].value;
+        if (!owner || !columns || owners.has(owner.toLowerCase())
+            || hasLiteral(gapStart, source.start)
+            || hasLiteral(source.type === 'group' ? source.group.end + 1 : source.start, tokens[index]?.start ?? blockEnd)) return null;
+        owners.add(owner.toLowerCase()); sources.push({ owner, columns });
+        if (word(tokens[index], 'ON')) {
+          if (!joined) return null;
+          const condition = tokens[index++].end, begin = index;
+          // Predicates are opaque. Only direct source boundaries are recognized;
+          // subqueries/commas inside a parenthesized expression stay in its group.
+          while (index < tokens.length && !clause(index) && !comma(index) && !joinStart(index)) {
+            if (keyword(tokens, index, 'USING') || keyword(tokens, index, 'ON')) return null;
+            index++;
+          }
+          if (index === begin && !hasLiteral(condition, tokens[index]?.start ?? blockEnd)) return null;
+        } else if (needsOn) return null;
+        if (index === tokens.length || clause(index)) {
+          starSourceCache.set(tokens, sources);
+          return sources;
+        }
+        gapStart = tokens[index].start;
+        if (comma(index)) { index++; joined = false; needsOn = false; continue; }
+        needsOn = word(tokens[index], 'LEFT') || word(tokens[index], 'RIGHT');
+        if (needsOn) { index++; if (word(tokens[index], 'OUTER')) index++; }
+        else if (word(tokens[index], 'INNER') || word(tokens[index], 'CROSS')) index++;
+        if (!word(tokens[index++], 'JOIN')) return null;
+        joined = true;
+      }
+      return null;
+    };
+    let starReads = 0, starNames = 0;
+    const localStarColumns = (tokens, group, qualifier, blockEnd) => {
+      if (++starReads > 64) return null;
+      const sources = localStarSources(tokens, group, blockEnd);
+      if (!sources || qualifier === null && sources.length !== 1) return null;
+      const columns = (qualifier === null ? sources[0] : sources.find(source => source.owner === qualifier))?.columns;
+      if (!columns) return null;
+      // No physical catalog reads, unqualified multi-source/USING merges or types.
+      starNames += columns.length;
+      if (starNames > 4096) return null;
+      return columns;
+    };
+    const readSelectColumns = (tokens, blockEnd, group) => {
       const head = 0;
       if (!word(tokens[head], 'SELECT')) return null;
       let begin = head + 1, end = tokens.length;
@@ -306,6 +380,20 @@
         if (index !== end && !(tokens[index].type === 'symbol' && tokens[index].value === ',')) continue;
         const itemEnd = tokens[index]?.start ?? blockEnd;
         const item = tokens.slice(begin, index);
+        const star = item.length === 1 && item[0].type === 'symbol' && item[0].value === '*';
+        const qualifiedStar = item.length === 3 && name(item[0]) && item[1].type === 'symbol' && item[1].value === '.'
+          && item[2].type === 'symbol' && item[2].value === '*';
+        if (star || qualifiedStar) {
+          if (hasLiteral(itemStart, itemEnd)) return null;
+          const expanded = localStarColumns(tokens, group, qualifiedStar ? item[0].value : null, blockEnd);
+          if (!expanded) return null;
+          for (const column of expanded) {
+            if (seen.has(column.toLowerCase()) || columns.length >= 256) return null;
+            seen.add(column.toLowerCase()); columns.push(column);
+          }
+          begin = index + 1; itemStart = itemEnd + 1;
+          continue;
+        }
         const aliasIndex = item.findIndex(token => word(token, 'AS'));
         let column;
         if (aliasIndex >= 0) {
@@ -341,7 +429,7 @@
       if (separators.length > 15) return null;
       let begin = head, first = null;
       for (const end of [...separators, tokens.length]) {
-        const columns = readSelectColumns(tokens.slice(begin, end), tokens[end]?.start ?? group.end);
+        const columns = readSelectColumns(tokens.slice(begin, end), tokens[end]?.start ?? group.end, group);
         if (!columns || first && columns.length !== first.length) return null;
         if (!first) first = columns;
         begin = end + 1;
@@ -352,7 +440,7 @@
     };
     for (const group of groups) {
       group.query = group === root || word(group.tokens[0], 'SELECT') || word(group.tokens[0], 'WITH');
-      group.locals = new Set(); group.localColumns = new Map(); group.localBodies = new Map(); group.headerKnown = true;
+      group.locals = new Set(); group.localColumns = new Map(); group.localBodies = new Map(); group.localStarts = new Map(); group.headerKnown = true;
       const withIndex = group.tokens.findIndex((token, index) => keyword(group.tokens, index, 'WITH'));
       const firstCommand = command(group.tokens);
       if (!group.query || withIndex < 0 || firstCommand >= 0 && withIndex > firstCommand) continue;
@@ -360,9 +448,11 @@
       if (word(group.tokens[index], 'RECURSIVE')) index++;
       while (index < group.tokens.length) {
         if (!name(group.tokens[index])) { group.headerKnown = false; break; }
-        const local = group.tokens[index++].value.toLocaleLowerCase();
+        const declaration = group.tokens[index++];
+        const local = declaration.value.toLocaleLowerCase();
         if (group.locals.has(local)) { group.headerKnown = false; break; }
         group.locals.add(local);
+        group.localStarts.set(local, declaration.start);
         let columnNames = null;
         const declared = group.tokens[index]?.type === 'group';
         if (declared) columnNames = declaredColumns(group.tokens[index++].group);

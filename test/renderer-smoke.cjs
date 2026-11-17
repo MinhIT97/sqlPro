@@ -782,6 +782,82 @@ app.whenReady().then(async () => {
     await evaluate("app.tables=setOutputSavedTables;delete window.setOutputSavedTables;invalidateSqlAutocomplete();app.query.sql='SELECT 1';renderQueryView()");
     win.setContentSize(1344, 835); autocompleteColumns = null;
   });
+  await check('local star output stays inside CTE/derived names without metadata and preserves keyboard/undo', async () => {
+    autocompleteColumns = new Map([['source', [{ name: 'wrong_source_key', type: 'int' }]], ['recent', [{ name: 'wrong_recent_key', type: 'int' }]], ['d', [{ name: 'wrong_derived_key', type: 'int' }]]]);
+    await evaluate("invalidateSqlAutocomplete();window.localStarSavedTables=app.tables;app.tables=[...app.tables,{name:'source',type:'table'},{name:'recent',type:'table'},{name:'d',type:'table'}]");
+    const columns = calls.filter(call => call.name === 'db:columns').length;
+    const queries = calls.filter(call => call.name === 'db:query').length;
+    const set = async marked => {
+      const caret = marked.indexOf('|'), sql = marked.replace('|', '');
+      await evaluate(`app.query.sql=${JSON.stringify(sql)};renderQueryView();clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();$('#sql').setSelectionRange(${caret},${caret});refreshSqlSuggestions($('#sql'),true)`);
+    };
+    await set('WITH source(id, `<img src=x onerror=alert(1)>`) AS (SELECT * FROM invoices), recent AS (SELECT s.* FROM source s) SELECT * FROM recent r WHERE r.|');
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['r.id', 'r.<img src=x onerror=alert(1)>']);
+    assert.equal(await evaluate("$('#sqlSuggestions img')===null"), true);
+    await set('SELECT * FROM (SELECT x.* FROM (SELECT id item_id FROM invoices) x) d WHERE d.|');
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['d.item_id']);
+    assert.equal(await evaluate("sqlAutocomplete.items[0].detail==='Derived · d · tên từ SELECT'"), true);
+    for (const marked of [
+      'WITH c AS (SELECT * FROM c) SELECT * FROM c WHERE c.|',
+      'SELECT * FROM (SELECT * FROM invoices) d WHERE d.|',
+      'WITH c(id) AS (SELECT 1) SELECT * FROM (SELECT c.* FROM c JOIN invoices i ON 1=1) d WHERE d.|'
+    ]) { await set(marked); assert.equal(await evaluate('sqlAutocomplete.items.length'), 0); }
+    const marked = 'WITH source(id, `tên cột`) AS (SELECT id,name FROM invoices),\nrecent AS (SELECT s.* FROM source s)\nSELECT * FROM recent r WHERE r.`tê|n cũ`=1';
+    win.setContentSize(900, 650); win.webContents.focus();
+    await until('innerWidth===900 && innerHeight===650');
+    await set(marked);
+    await evaluate("$('#sql').style.height='180px';$('#toast').style.display='none'");
+    await captureReview('autocomplete-local-star-small', () => evaluate("clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();refreshSqlSuggestions($('#sql'),true)"));
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['r.tên cột']);
+    assert.equal(await evaluate("sqlAutocomplete.items[0].detail==='CTE · recent · tên từ SELECT'"), true);
+    assert.equal(await evaluate("$('#sqlSuggestions').getBoundingClientRect().bottom<=innerHeight"), true);
+    for (const type of ['keyDown', 'char', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return' });
+    await until(`$('#sql').value===${JSON.stringify(marked.replace('tê|n cũ', 'tên cột'))}`);
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Z', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Z', modifiers: ['control'] });
+    await until(`$('#sql').value===${JSON.stringify(marked.replace('|', ''))} && $('#sql').selectionStart===${marked.indexOf('|')}`);
+    assert.equal(calls.filter(call => call.name === 'db:columns').length, columns);
+    assert.equal(calls.filter(call => call.name === 'db:query').length, queries);
+    await evaluate("app.tables=localStarSavedTables;delete window.localStarSavedTables;invalidateSqlAutocomplete();app.query.sql='SELECT 1';renderQueryView()");
+    win.setContentSize(1344, 835); autocompleteColumns = null;
+  });
+  await check('qualified local join stars preserve owner and keyboard editing without reading source metadata', async () => {
+    autocompleteColumns = new Map([['source', [{ name: 'wrong_source', type: 'int' }]], ['recent', [{ name: 'wrong_recent', type: 'int' }]]]);
+    await evaluate("invalidateSqlAutocomplete();window.joinStarSavedTables=app.tables;app.tables=[...app.tables,{name:'source',type:'table'},{name:'recent',type:'table'}]");
+    const columns = calls.filter(call => call.name === 'db:columns').length;
+    const queries = calls.filter(call => call.name === 'db:query').length;
+    const set = async marked => {
+      const caret = marked.indexOf('|');
+      await evaluate(`app.query.sql=${JSON.stringify(marked.replace('|', ''))};renderQueryView();clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();$('#sql').setSelectionRange(${caret},${caret});refreshSqlSuggestions($('#sql'),true)`);
+    };
+    await set('WITH source(id) AS (SELECT * FROM invoices), recent AS (SELECT y.* FROM source x LEFT JOIN (SELECT 1 AS `<img src=x onerror=alert(1)>`) y ON x.id=1) SELECT * FROM recent r WHERE r.|');
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['r.<img src=x onerror=alert(1)>']);
+    assert.equal(await evaluate("$('#sqlSuggestions img')===null"), true);
+    await set('WITH source(id) AS (SELECT 1) SELECT * FROM (SELECT b.* FROM source a, (SELECT 2 AS other_id) b) d WHERE d.|');
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['d.other_id']);
+    for (const projection of ['* FROM source a JOIN source b ON 1=1', 'a.* FROM source a JOIN source A ON 1=1', 'a.* FROM source a JOIN source b USING(id)', 'a.* FROM source a LEFT JOIN source b']) {
+      await set(`WITH source(id) AS (SELECT 1), recent AS (SELECT ${projection}) SELECT * FROM recent r WHERE r.|`);
+      assert.equal(await evaluate('sqlAutocomplete.items.length'), 0);
+    }
+    const marked = 'WITH source(id) AS (SELECT id FROM invoices),\nrecent AS (SELECT y.* FROM source x\nLEFT JOIN (SELECT 1 AS `tên cột`) y ON x.id=1)\nSELECT * FROM recent r WHERE r.`tê|n cũ`=1';
+    win.setContentSize(900, 650); win.webContents.focus();
+    await until('innerWidth===900 && innerHeight===650');
+    await set(marked);
+    await evaluate("$('#sql').style.height='180px';$('#toast').style.display='none'");
+    await captureReview('autocomplete-local-join-star-small', () => evaluate("clearTimeout(sqlAutocomplete.blurTimer);$('#sql').focus();refreshSqlSuggestions($('#sql'),true)"));
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['r.tên cột']);
+    assert.equal(await evaluate("sqlAutocomplete.items[0].detail==='CTE · recent · tên từ SELECT'"), true);
+    assert.equal(await evaluate("$('#sqlSuggestions').getBoundingClientRect().bottom<=innerHeight"), true);
+    for (const type of ['keyDown', 'char', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return' });
+    await until(`$('#sql').value===${JSON.stringify(marked.replace('tê|n cũ', 'tên cột'))}`);
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Z', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Z', modifiers: ['control'] });
+    await until(`$('#sql').value===${JSON.stringify(marked.replace('|', ''))} && $('#sql').selectionStart===${marked.indexOf('|')}`);
+    assert.equal(calls.filter(call => call.name === 'db:columns').length, columns);
+    assert.equal(calls.filter(call => call.name === 'db:query').length, queries);
+    await evaluate("app.tables=joinStarSavedTables;delete window.joinStarSavedTables;invalidateSqlAutocomplete();app.query.sql='SELECT 1';renderQueryView()");
+    win.setContentSize(1344, 835); autocompleteColumns = null;
+  });
   await check('autocomplete replaces complete tokens at the caret, supports undo and ignores stale suggestions', async () => {
     autocompleteColumns = new Map([['users', [{ name: 'name', type: 'text' }]]]);
     await evaluate('invalidateSqlAutocomplete()');

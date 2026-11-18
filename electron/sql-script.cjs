@@ -125,7 +125,8 @@ function couldBeDelimiter(text) {
 }
 
 class SqlScriptParser {
-  constructor() {
+  constructor({ rejectDialectComments = false } = {}) {
+    this.rejectDialectComments = rejectDialectComments;
     this.delimiter = ';';
     this.buffer = '';
     this.bufferHasContent = false;
@@ -208,7 +209,7 @@ class SqlScriptParser {
     }
     switch (this.state) {
       case 'lineComment':
-        if (character === '\n') {
+        if (character === '\n' || character === '\r') {
           this.state = 'normal';
           this.append('\n');
         }
@@ -249,13 +250,23 @@ class SqlScriptParser {
         return;
       case 'dash':
         if (character === '-') {
-          this.buffer = this.buffer.slice(0, -1);
-          this.bufferHasContent = this.buffer.trim() !== '';
-          this.state = 'lineComment';
+          this.append(character);
+          this.state = 'doubleDash';
           return;
         }
         this.state = 'normal';
         this.feedCharacter(character, statements);
+        return;
+      case 'doubleDash':
+        if (character <= ' ') {
+          this.buffer = this.buffer.slice(0, -2);
+          this.bufferHasContent = this.buffer.trim() !== '';
+          this.state = 'lineComment';
+          if (character === '\n' || character === '\r') { this.state = 'normal'; this.append('\n'); }
+        } else {
+          this.state = 'normal';
+          this.feedCharacter(character, statements);
+        }
         return;
       case 'slash':
         if (character === '*') {
@@ -266,6 +277,13 @@ class SqlScriptParser {
         this.feedCharacter(character, statements);
         return;
       case 'star':
+        if (this.rejectDialectComments && (character === '!' || character === '+')) {
+          throw Object.assign(new Error('Phục hồi chọn lọc chưa hỗ trợ executable comment hoặc optimizer hint.'), { code: 'RESTORE_CONTEXT_UNSUPPORTED' });
+        }
+        if (this.rejectDialectComments && /[mM]/.test(character)) {
+          this.state = 'mariaCommentPrefix';
+          return;
+        }
         if (character === '!') {
           this.append('*!');
           this.state = 'versionComment';
@@ -277,6 +295,15 @@ class SqlScriptParser {
         }
         this.state = 'blockComment';
         this.blockStar = false;
+        return;
+      case 'mariaCommentPrefix':
+        if (character === '!') {
+          throw Object.assign(new Error('Phục hồi chọn lọc chưa hỗ trợ executable comment MariaDB.'), { code: 'RESTORE_CONTEXT_UNSUPPORTED' });
+        }
+        if (this.buffer.endsWith('/')) this.buffer = this.buffer.slice(0, -1);
+        this.bufferHasContent = this.buffer.trim() !== '';
+        this.state = 'blockComment';
+        this.blockStar = character === '*';
         return;
       default:
         break;
@@ -330,7 +357,11 @@ class SqlScriptParser {
       }
     }
     if (this.state === 'dash' || this.state === 'slash') this.state = 'normal';
-    if (['single', 'double', 'backtick', 'blockComment', 'versionComment'].includes(this.state)) {
+    if (this.state === 'doubleDash') {
+      this.buffer = this.buffer.slice(0, -2);
+      this.state = 'normal';
+    }
+    if (['single', 'double', 'backtick', 'blockComment', 'versionComment', 'mariaCommentPrefix'].includes(this.state)) {
       throw new Error('Tệp SQL không hợp lệ: chuỗi hoặc comment chưa được đóng.');
     }
     const trailing = this.buffer.trim();
@@ -381,26 +412,31 @@ function createTarget(statement) {
     'i'
   ).exec(text);
   if (table) return { type: 'table', name: namedIdentifier(table[1]) };
+
   const view = new RegExp(
     `${createPrefix}(?:(?:OR\\s+REPLACE|ALGORITHM\\s*=\\s*\\w+|SQL\\s+SECURITY\\s+(?:DEFINER|INVOKER)|${definer})\\s+)*VIEW\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${identifier})`,
     'i'
   ).exec(text);
   if (view) return { type: 'view', name: namedIdentifier(view[1]) };
+
   const trigger = new RegExp(
     `${createPrefix}(?:(?:OR\\s+REPLACE|${definer})\\s+)*TRIGGER\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${identifier})`,
     'i'
   ).exec(text);
   if (trigger) return { type: 'trigger', name: namedIdentifier(trigger[1]) };
+
   const procedure = new RegExp(
     `${createPrefix}(?:(?:OR\\s+REPLACE|${definer})\\s+)*PROCEDURE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${identifier})`,
     'i'
   ).exec(text);
   if (procedure) return { type: 'procedure', name: namedIdentifier(procedure[1]) };
+
   const fn = new RegExp(
     `${createPrefix}(?:(?:OR\\s+REPLACE|AGGREGATE|${definer})\\s+)*FUNCTION\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${identifier})`,
     'i'
   ).exec(text);
   if (fn) return { type: 'function', name: namedIdentifier(fn[1]) };
+
   const event = new RegExp(
     `${createPrefix}(?:(?:OR\\s+REPLACE|${definer})\\s+)*EVENT\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${identifier})`,
     'i'
@@ -414,6 +450,313 @@ function skipReason(statement) {
   if (/^USE\b/i.test(sql)) return 'USE';
   if (/^(?:CREATE|DROP)\s+(?:DATABASE|SCHEMA)\b/i.test(sql)) return 'database';
   return '';
+}
+
+function tokenizeSql(sql) {
+  const source = String(sql || '');
+  const tokens = [];
+  let index = 0;
+  const len = source.length;
+  while (index < len) {
+    const c = source[index];
+    if (c <= ' ') { index++; continue; }
+    if (c === '#') {
+      index++;
+      while (index < len && source[index] !== '\n' && source[index] !== '\r') index++;
+      continue;
+    }
+    if (c === '-' && source[index + 1] === '-') {
+      const after = source[index + 2];
+      if (after === undefined || after <= ' ') {
+        index += 2;
+        while (index < len && source[index] !== '\n' && source[index] !== '\r') index++;
+        continue;
+      }
+    }
+    if (c === '/' && source[index + 1] === '*') {
+      if (source[index + 2] === '!') {
+        index += 3;
+        while (index < len && /[0-9]/.test(source[index])) index++;
+        continue;
+      }
+      const end = source.indexOf('*/', index + 2);
+      index = end === -1 ? len : end + 2;
+      continue;
+    }
+    if (c === '*' && source[index + 1] === '/') {
+      index += 2;
+      continue;
+    }
+    if (c === "'") {
+      let val = '';
+      const start = index;
+      index++;
+      while (index < len) {
+        if (source[index] === '\\') {
+          val += source[index + 1] || '';
+          index += 2;
+          continue;
+        }
+        if (source[index] === "'") {
+          if (source[index + 1] === "'") {
+            val += "'";
+            index += 2;
+            continue;
+          }
+          index++;
+          break;
+        }
+        val += source[index];
+        index++;
+      }
+      tokens.push({ type: 'string', value: val, raw: source.slice(start, index) });
+      continue;
+    }
+    if (c === '"') {
+      let val = '';
+      const start = index;
+      index++;
+      while (index < len) {
+        if (source[index] === '\\') {
+          val += source[index + 1] || '';
+          index += 2;
+          continue;
+        }
+        if (source[index] === '"') {
+          if (source[index + 1] === '"') {
+            val += '"';
+            index += 2;
+            continue;
+          }
+          index++;
+          break;
+        }
+        val += source[index];
+        index++;
+      }
+      tokens.push({ type: 'double_string', value: val, raw: source.slice(start, index) });
+      continue;
+    }
+    if (c === '`') {
+      let val = '';
+      const start = index;
+      index++;
+      while (index < len) {
+        if (source[index] === '`') {
+          if (source[index + 1] === '`') {
+            val += '`';
+            index += 2;
+            continue;
+          }
+          index++;
+          break;
+        }
+        val += source[index];
+        index++;
+      }
+      tokens.push({ type: 'identifier', value: val, raw: source.slice(start, index) });
+      continue;
+    }
+    if (c === '@') {
+      const start = index;
+      index++;
+      if (source[index] === '@') index++;
+      while (index < len && (/[A-Za-z0-9_$.]/.test(source[index]) || source[index] === '`')) {
+        if (source[index] === '`') {
+          index++;
+          while (index < len && source[index] !== '`') index++;
+          if (index < len) index++;
+        } else {
+          index++;
+        }
+      }
+      tokens.push({ type: 'variable', value: source.slice(start, index), raw: source.slice(start, index) });
+      continue;
+    }
+    if (/[A-Za-z0-9_$]/.test(c)) {
+      const start = index;
+      while (index < len && /[A-Za-z0-9_$]/.test(source[index])) index++;
+      tokens.push({ type: 'word', value: source.slice(start, index), raw: source.slice(start, index) });
+      continue;
+    }
+    if (c === ':' && source[index + 1] === '=') {
+      tokens.push({ type: 'symbol', value: ':=', raw: ':=' });
+      index += 2;
+      continue;
+    }
+    tokens.push({ type: 'symbol', value: c, raw: c });
+    index++;
+  }
+  return tokens;
+}
+
+function parseIdentifierFromTokens(tokens, idx) {
+  if (idx >= tokens.length) return null;
+  const t = tokens[idx];
+  if (t.type !== 'identifier' && t.type !== 'word' && t.type !== 'double_string') return null;
+  const firstPart = t.value;
+  if (tokens[idx + 1]?.type === 'symbol' && tokens[idx + 1].value === '.') {
+    const nextToken = tokens[idx + 2];
+    if (nextToken && (nextToken.type === 'identifier' || nextToken.type === 'word' || nextToken.type === 'double_string')) {
+      return { id: { schema: firstPart, name: nextToken.value }, nextIdx: idx + 3 };
+    }
+  }
+  return { id: { schema: null, name: firstPart }, nextIdx: idx + 1 };
+}
+
+function parseDropTargets(statement) {
+  const tokens = tokenizeSql(statement);
+  if (!tokens || tokens.length === 0) return null;
+
+  let idx = 0;
+  if (tokens[idx]?.type !== 'word' || tokens[idx].value.toUpperCase() !== 'DROP') return null;
+  idx++;
+
+  if (tokens[idx]?.type === 'word' && tokens[idx].value.toUpperCase() === 'TEMPORARY') {
+    idx++;
+  }
+
+  const typeToken = tokens[idx]?.type === 'word' ? tokens[idx].value.toUpperCase() : '';
+  let type = '';
+  if (typeToken === 'TABLE' || typeToken === 'TABLES') type = 'table';
+  else if (typeToken === 'VIEW') type = 'view';
+  else if (typeToken === 'PROCEDURE') type = 'procedure';
+  else if (typeToken === 'FUNCTION') type = 'function';
+  else if (typeToken === 'TRIGGER') type = 'trigger';
+  else if (typeToken === 'EVENT') type = 'event';
+  else return null;
+  idx++;
+
+  if (tokens[idx]?.type === 'word' && tokens[idx].value.toUpperCase() === 'IF') {
+    idx++;
+    if (tokens[idx]?.type === 'word' && tokens[idx].value.toUpperCase() === 'EXISTS') {
+      idx++;
+    }
+  }
+
+  const targets = [];
+  while (idx < tokens.length) {
+    if (tokens[idx]?.type === 'symbol' && tokens[idx].value === ';') break;
+    if (tokens[idx]?.type === 'symbol' && tokens[idx].value === ',') {
+      idx++;
+      continue;
+    }
+    const wordUpper = tokens[idx]?.type === 'word' ? tokens[idx].value.toUpperCase() : '';
+    if (wordUpper === 'RESTRICT' || wordUpper === 'CASCADE') {
+      idx++;
+      continue;
+    }
+    const target = parseIdentifierFromTokens(tokens, idx);
+    if (!target) break;
+    targets.push(target.id);
+    idx = target.nextIdx;
+  }
+
+  return { type, targets, command: 'DROP' };
+}
+
+function parseQualifiedIdentifier(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return { schema: null, name: '' };
+  const tokens = tokenizeSql(s);
+  const parsed = parseIdentifierFromTokens(tokens, 0);
+  if (parsed && parsed.id) return parsed.id;
+  return { schema: null, name: s.replace(/`/g, '') };
+}
+
+function parseAlterRename(statement) {
+  const tokens = tokenizeSql(statement);
+  if (!tokens || tokens.length === 0) return null;
+
+  let idx = 0;
+  if (tokens[idx]?.type !== 'word' || tokens[idx].value.toUpperCase() !== 'ALTER') return null;
+  idx++;
+  if (tokens[idx]?.type !== 'word' || tokens[idx].value.toUpperCase() !== 'TABLE') return null;
+  idx++;
+
+  if (tokens[idx]?.type === 'word' && tokens[idx].value.toUpperCase() === 'IF') {
+    idx++;
+    if (tokens[idx]?.type === 'word' && tokens[idx].value.toUpperCase() === 'EXISTS') {
+      idx++;
+    }
+  }
+
+  const source = parseIdentifierFromTokens(tokens, idx);
+  if (!source) return null;
+  idx = source.nextIdx;
+
+  const destinations = [];
+  while (idx < tokens.length) {
+    const t = tokens[idx];
+    if (t.type === 'word' && t.value.toUpperCase() === 'RENAME') {
+      const nextToken = tokens[idx + 1];
+      const nextUpper = nextToken?.type === 'word' ? nextToken.value.toUpperCase() : '';
+      if (nextUpper === 'COLUMN' || nextUpper === 'INDEX' || nextUpper === 'KEY' || nextUpper === 'CONSTRAINT') {
+        idx += 2;
+        continue;
+      }
+      if (nextUpper === 'TO' || nextUpper === 'AS') {
+        idx += 2;
+      } else {
+        idx += 1;
+      }
+      const target = parseIdentifierFromTokens(tokens, idx);
+      if (target) {
+        destinations.push(target.id);
+        idx = target.nextIdx;
+        continue;
+      }
+    }
+    idx++;
+  }
+
+  return {
+    type: 'table',
+    source: source.id,
+    destination: destinations[destinations.length - 1] || null,
+    destinations
+  };
+}
+
+function parseRenameTable(statement) {
+  const tokens = tokenizeSql(statement);
+  if (!tokens || tokens.length === 0) return null;
+
+  let idx = 0;
+  if (tokens[idx]?.type !== 'word' || tokens[idx].value.toUpperCase() !== 'RENAME') return null;
+  idx++;
+  if (tokens[idx]?.type !== 'word' || tokens[idx].value.toUpperCase() !== 'TABLE') return null;
+  idx++;
+
+  if (tokens[idx]?.type === 'word' && tokens[idx].value.toUpperCase() === 'IF') {
+    idx++;
+    if (tokens[idx]?.type === 'word' && tokens[idx].value.toUpperCase() === 'EXISTS') {
+      idx++;
+    }
+  }
+
+  const pairs = [];
+  while (idx < tokens.length) {
+    if (tokens[idx]?.type === 'symbol' && tokens[idx].value === ';') break;
+    if (tokens[idx]?.type === 'symbol' && tokens[idx].value === ',') {
+      idx++;
+      continue;
+    }
+    const src = parseIdentifierFromTokens(tokens, idx);
+    if (!src) break;
+    idx = src.nextIdx;
+
+    if (tokens[idx]?.type !== 'word' || tokens[idx].value.toUpperCase() !== 'TO') break;
+    idx++;
+
+    const dst = parseIdentifierFromTokens(tokens, idx);
+    if (!dst) break;
+    idx = dst.nextIdx;
+
+    pairs.push({ source: src.id, destination: dst.id });
+  }
+
+  return { type: 'table', pairs };
 }
 
 const IDENTIFIER = '(?:`(?:[^`]|``)+`|[A-Za-z0-9_$]+)';
@@ -590,35 +933,118 @@ const RESTORE_SESSION_VARIABLES = new Set([
   'CHARACTER_SET_CLIENT', 'CHARACTER_SET_RESULTS', 'CHARACTER_SET_CONNECTION', 'COLLATION_CONNECTION'
 ]);
 
-function assertRestoreSet(sql) {
-  const body = sql.replace(/^SET\s+/i, '').trim();
-  if (/^(?:NAMES|CHARACTER\s+SET)\s+(?:\?|[A-Za-z0-9_]+)(?:\s+COLLATE\s+(?:\?|[A-Za-z0-9_]+))?$/i.test(body)) return;
-  // Strings/comments have already been scrubbed; only top-level commas split assignments.
-  const assignments = [];
-  let start = 0;
-  let depth = 0;
-  let quoted = false;
-  for (let index = 0; index < body.length; index += 1) {
-    const character = body[index];
-    if (character === '`') {
-      if (quoted && body[index + 1] === '`') { index += 1; continue; }
-      quoted = !quoted;
-    } else if (!quoted) {
-      if (character === '(') depth += 1;
-      else if (character === ')') depth -= 1;
-      else if (character === ',' && depth === 0) { assignments.push(body.slice(start, index)); start = index + 1; }
-    }
+function parseSetAssignments(statement) {
+  const tokens = tokenizeSql(statement);
+  if (!tokens || tokens.length === 0) return null;
+  let idx = 0;
+  if (tokens[idx]?.type !== 'word' || tokens[idx].value.toUpperCase() !== 'SET') return null;
+  idx++;
+
+  const firstWord = tokens[idx]?.type === 'word' ? tokens[idx].value.toUpperCase() : '';
+  if (firstWord === 'NAMES' || (firstWord === 'CHARACTER' && tokens[idx + 1]?.value?.toUpperCase() === 'SET')) {
+    return { type: 'charset', assignments: [] };
   }
-  assignments.push(body.slice(start));
-  for (const assignment of assignments) {
-    const equal = assignment.indexOf('=');
-    if (equal < 1) throw scopeError('Chỉ hỗ trợ SET biến session hoặc biến @ của tệp dump trong chế độ phục hồi an toàn.');
-    let name = assignment.slice(0, equal).trim();
-    if (/^@[A-Za-z0-9_$]+$/.test(name)) continue;
-    name = name.replace(/^(?:SESSION|LOCAL)\s+/i, '').replace(/^@@(?:(?:SESSION|LOCAL)\s*\.\s*)?/i, '');
-    if (/^`[A-Za-z0-9_]+`$/.test(name)) name = name.slice(1, -1);
-    if (!RESTORE_SESSION_VARIABLES.has(name.toUpperCase())) {
+
+  const assignments = [];
+  while (idx < tokens.length) {
+    if (tokens[idx]?.type === 'symbol' && tokens[idx].value === ';') break;
+    if (tokens[idx]?.type === 'symbol' && tokens[idx].value === ',') { idx++; continue; }
+
+    let scope = 'session';
+    let varName = '';
+    let isUserVar = false;
+    let t = tokens[idx];
+
+    if (!t) break;
+
+    if (t.type === 'variable') {
+      let raw = t.value;
+      if (raw.startsWith('@@')) {
+        let after = raw.slice(2);
+        if (/^(?:global)\./i.test(after)) {
+          scope = 'global';
+          varName = after.replace(/^global\./i, '');
+        } else if (/^(?:session|local)\./i.test(after)) {
+          scope = 'session';
+          varName = after.replace(/^(?:session|local)\./i, '');
+        } else {
+          scope = 'session';
+          varName = after;
+        }
+      } else if (raw.startsWith('@')) {
+        isUserVar = true;
+        varName = raw.slice(1);
+      }
+      idx++;
+    } else if (t.type === 'word' && (t.value.toUpperCase() === 'SESSION' || t.value.toUpperCase() === 'LOCAL' || t.value.toUpperCase() === 'GLOBAL')) {
+      scope = t.value.toLowerCase();
+      idx++;
+      if (tokens[idx]) {
+        varName = tokens[idx].value;
+        idx++;
+      }
+    } else if (t.type === 'word' || t.type === 'identifier') {
+      varName = t.value;
+      idx++;
+    } else {
+      break;
+    }
+
+    varName = varName.replace(/`/g, '').trim();
+
+    if (tokens[idx]?.type === 'symbol' && (tokens[idx].value === '=' || tokens[idx].value === ':=')) {
+      idx++;
+    }
+
+    const valueTokens = [];
+    let parenDepth = 0;
+    while (idx < tokens.length) {
+      const cur = tokens[idx];
+      if (cur.type === 'symbol' && cur.value === ';') break;
+      if (cur.type === 'symbol' && cur.value === '(') parenDepth++;
+      if (cur.type === 'symbol' && cur.value === ')') parenDepth--;
+      if (cur.type === 'symbol' && cur.value === ',' && parenDepth === 0) break;
+      valueTokens.push(cur);
+      idx++;
+    }
+
+    assignments.push({ name: varName, scope, isUserVar, valueTokens });
+  }
+  return { type: 'set', assignments };
+}
+
+function evaluateAutocommit(valueTokens) {
+  let tokens = [...valueTokens];
+  while (tokens.length >= 2 && tokens[0].value === '(' && tokens[tokens.length - 1].value === ')') {
+    tokens = tokens.slice(1, -1);
+  }
+  if (tokens.length === 1) {
+    const v = tokens[0].value.toUpperCase();
+    if (v === '0' || v === 'OFF' || v === 'FALSE') return false;
+    if (v === '1' || v === 'ON' || v === 'TRUE') return true;
+  }
+  return null;
+}
+
+function assertRestoreSet(sql) {
+  const parsed = parseSetAssignments(sql);
+  if (!parsed) return;
+  if (parsed.type === 'charset') return;
+
+  for (const assignment of parsed.assignments) {
+    if (assignment.isUserVar) continue;
+    if (assignment.scope === 'global') {
       throw scopeError('SET chỉ được thay đổi các biến session cần cho tệp dump; biến global/persist hoặc chưa hỗ trợ bị chặn.');
+    }
+    const nameUpper = assignment.name.toUpperCase();
+    if (!RESTORE_SESSION_VARIABLES.has(nameUpper)) {
+      throw scopeError('SET chỉ được thay đổi các biến session cần cho tệp dump; biến global/persist hoặc chưa hỗ trợ bị chặn.');
+    }
+    if (nameUpper === 'AUTOCOMMIT') {
+      const acVal = evaluateAutocommit(assignment.valueTokens);
+      if (acVal === null) {
+        throw scopeError('Biểu thức gán AUTOCOMMIT không thể xác định tĩnh giá trị: chỉ chấp nhận 0, 1, ON, OFF, TRUE hoặc FALSE.');
+      }
     }
   }
 }
@@ -788,10 +1214,18 @@ module.exports = {
   stripLeadingComments,
   createTarget,
   skipReason,
+  parseDropTargets,
   namedIdentifier,
   scrubSql,
   targetReferences,
   assertStatementScope,
+  assertRestoreSet,
   countInsertRows,
-  routineWriteReferences
+  routineWriteReferences,
+  parseQualifiedIdentifier,
+  parseAlterRename,
+  parseRenameTable,
+  tokenizeSql,
+  parseSetAssignments,
+  evaluateAutocommit
 };

@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const crypto = require('node:crypto');
 const { DatabaseSession } = require('../electron/database.cjs');
 
 // Execute main.cjs itself, with the real registry/collector/service and a fake SQL driver.
@@ -20,7 +21,8 @@ function fixture() {
       queries.push({ sql, params, timeoutMs, profileId: this.profile.id });
       if (controls.onRaw) await controls.onRaw(sql, this);
       if (sql.includes("COLUMN_NAME IN ('EXPRESSION'")) return { result: [] };
-      if (sql.includes('information_schema.TABLES')) return { result: [{ name: 'users', type: 'BASE TABLE', engine: 'InnoDB' }] };
+      if (sql.includes('foreign_key_checks')) return { result: [{ fkChecks: 1, foreignKeys: 1, sqlMode: '', autocommit: 1 }] };
+      if (sql.includes('information_schema.TABLES')) return { result: controls.tables || [{ name: 'users', type: 'BASE TABLE', engine: 'InnoDB' }] };
       if (sql.includes('information_schema.COLUMNS')) return { result: [{ name: 'id', type: 'int', nullable: 'NO', position: 1 }] };
       return { result: [] };
     }
@@ -140,4 +142,175 @@ test('snapshot IPC validates database, protects Editor transactions and invalida
   assert.equal(r.evaluate('schemaMigrationApproval.pending.size'), 0);
   assert.equal(r.evaluate('schemaMigrationJobManager.jobs.size'), 0);
   assert.equal(r.evaluate('schemaMigrationJobManager.activeJobsByTarget.size'), 0);
+  assert.equal(r.evaluate('schemaMigrationOrchestrator.runningPromises.size'), 0);
+});
+
+test('read-only migration job status and cancel IPCs enforce schema and reject invalid payloads', async () => {
+  const r = fixture();
+  for (const bad of [null, undefined, '', {}, { jobId: 123 }, { jobId: 'job_invalid' }]) {
+    const statusRes = await r.call('db:migration-job-status', bad);
+    assert.equal(statusRes.ok, false);
+    const cancelRes = await r.call('db:migration-job-cancel', bad);
+    assert.equal(cancelRes.ok, false);
+  }
+
+  const validUnknownId = `job_${crypto.randomBytes(16).toString('hex')}`;
+  const statusOk = await r.call('db:migration-job-status', { jobId: validUnknownId });
+  assert.equal(statusOk.ok, true);
+  assert.equal(statusOk.data, null);
+
+  const cancelOk = await r.call('db:migration-job-cancel', { jobId: validUnknownId });
+  assert.equal(cancelOk.ok, true);
+  assert.equal(cancelOk.data.canceled, false);
+});
+
+test('full main integration proves only worker executes DDL, Editor session never receives COMMIT/ROLLBACK/SET, and fresh metadata reads detect drift', async () => {
+  const r = fixture();
+  r.profiles.src = { readOnly: true, environment: 'local' };
+  r.profiles.tgt = { readOnly: false, environment: 'local' };
+
+  // 1. Capture snapshots via named IPC
+  const snapSrc = await r.call('db:schema-snapshot', { profileId: 'src', database: 'src_db' });
+  const snapTgt = await r.call('db:schema-snapshot', { profileId: 'tgt', database: 'tgt_db' });
+  assert.equal(snapSrc.ok, true);
+  assert.equal(snapTgt.ok, true);
+
+  // 2. Create preview plan via named IPC: preview remains disabled
+  const planRes = await r.call('db:create-migration-plan', {
+    sourceSnapshotId: snapSrc.data.snapshotId,
+    targetSnapshotId: snapTgt.data.snapshotId
+  });
+  assert.equal(planRes.ok, true);
+  assert.equal(planRes.data.applySupported, false);
+
+  // Apply IPC continues to reject preview or forged apply
+  const applyRes = await r.call('db:apply-migration-plan', { planId: planRes.data.planId });
+  assert.equal(applyRes.ok, false);
+  assert.equal(applyRes.error.code, 'MIGRATION_APPLY_NOT_READY');
+
+  // 3. Construct ready candidate inside fixture
+  const candidate = {
+    planId: `plan_${crypto.randomBytes(16).toString('hex')}`,
+    planToken: crypto.randomBytes(32).toString('hex'),
+    status: 'ready',
+    applySupported: true,
+    expiresAt: Date.now() + 60000,
+    sourceSnapshotId: snapSrc.data.snapshotId,
+    targetSnapshotId: snapTgt.data.snapshotId,
+    sourceScope: { ...snapSrc.data.scope, snapshotIdentity: snapSrc.data.snapshotIdentity, database: 'src_db', engine: 'MySQL' },
+    targetScope: { ...snapTgt.data.scope, snapshotIdentity: snapTgt.data.snapshotIdentity, database: 'tgt_db', engine: 'MySQL' },
+    options: { statementTimeoutMs: 15000, wrapForeignKeys: false },
+    statements: [
+      { id: 'stmt_1', sql: 'CREATE TABLE orders (id INT PRIMARY KEY);', status: 'executable', enabled: true }
+    ]
+  };
+
+  const initialEditorQueryCount = r.queries.length;
+
+  // Admit candidate into orchestrator
+  const admitted = r.evaluate('schemaMigrationOrchestrator').admitPlan(candidate);
+  assert.equal(admitted.status, 'ready');
+
+  const result = await r.evaluate('schemaMigrationOrchestrator').executeMigrationJob({
+    planToken: admitted.planToken
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.equal(result.executedCount, 1);
+  assert.equal(result.totalCount, 1);
+
+  // Editor session assertions:
+  // Session 0 (src) and Session 1 (tgt) are editor sessions created during db:schema-snapshot
+  const editorSessions = [r.sessions[0], r.sessions[1]];
+  for (const es of editorSessions) {
+    assert.equal(es.inTransaction, false);
+    assert.equal(es.autocommit, true);
+  }
+
+  // All queries executed after snapshot capture must NOT contain COMMIT, ROLLBACK, or SET on editor sessions
+  const migrationQueries = r.queries.slice(initialEditorQueryCount);
+  const ddlQuery = migrationQueries.find(q => q.sql.includes('CREATE TABLE orders'));
+  assert.ok(ddlQuery, 'DDL query must be executed');
+  assert.equal(ddlQuery.profileId, 'tgt');
+
+  // Assert editor sessions never received COMMIT, ROLLBACK, or SET
+  const editorQueries = migrationQueries.filter(q => q.profileId === 'src' && editorSessions[0].connection || q.profileId === 'tgt' && editorSessions[1].connection);
+  assert.ok(!editorQueries.some(q => /^(COMMIT|ROLLBACK|SET)/i.test(q.sql)));
+
+  // Leases cleaned up
+  assert.equal(r.evaluate('sessionRegistry.leases.size'), 0);
+
+  // 4. Test source schema drift: change source metadata tables
+  r.controls.tables = [
+    { name: 'users', type: 'BASE TABLE', engine: 'InnoDB' },
+    { name: 'new_drift_table', type: 'BASE TABLE', engine: 'InnoDB' }
+  ];
+
+  const candDrift = {
+    ...candidate,
+    planId: `plan_${crypto.randomBytes(16).toString('hex')}`,
+    planToken: crypto.randomBytes(32).toString('hex'),
+    expiresAt: Date.now() + 60000
+  };
+
+  const admittedDrift = r.evaluate('schemaMigrationOrchestrator').admitPlan(candDrift);
+  await assert.rejects(
+    r.evaluate('schemaMigrationOrchestrator').executeMigrationJob({ planToken: admittedDrift.planToken }),
+    { code: 'SOURCE_SCHEMA_DRIFT' }
+  );
+
+  // Leases cleaned up after drift rejection
+  assert.equal(r.evaluate('sessionRegistry.leases.size'), 0);
+});
+
+test('main lifecycle cancel during worker execution cleans up leases and keeps Editor session functional', async () => {
+  const r = fixture();
+  r.profiles.src = { readOnly: true, environment: 'local' };
+  r.profiles.tgt = { readOnly: false, environment: 'local' };
+
+  const snapSrc = await r.call('db:schema-snapshot', { profileId: 'src', database: 'src_db' });
+  const snapTgt = await r.call('db:schema-snapshot', { profileId: 'tgt', database: 'tgt_db' });
+
+  let unblock;
+  let entered = false;
+  let activeJobId = null;
+
+  r.controls.onRaw = async (sql) => {
+    if (sql.includes('CREATE TABLE long_running') && !entered) {
+      entered = true;
+      activeJobId = [...r.evaluate('schemaMigrationJobManager.jobs.keys()')][0];
+      // Trigger cancel via IPC while DDL is awaiting
+      await r.call('db:migration-job-cancel', { jobId: activeJobId, reason: 'Canceled via IPC' });
+    }
+  };
+
+  const candidate = {
+    planId: `plan_${crypto.randomBytes(16).toString('hex')}`,
+    planToken: crypto.randomBytes(32).toString('hex'),
+    status: 'ready',
+    applySupported: true,
+    expiresAt: Date.now() + 60000,
+    sourceSnapshotId: snapSrc.data.snapshotId,
+    targetSnapshotId: snapTgt.data.snapshotId,
+    sourceScope: { ...snapSrc.data.scope, snapshotIdentity: snapSrc.data.snapshotIdentity, database: 'src_db', engine: 'MySQL' },
+    targetScope: { ...snapTgt.data.scope, snapshotIdentity: snapTgt.data.snapshotIdentity, database: 'tgt_db', engine: 'MySQL' },
+    options: { statementTimeoutMs: 15000, wrapForeignKeys: false },
+    statements: [
+      { id: 'stmt_1', sql: 'CREATE TABLE long_running (id INT PRIMARY KEY);', status: 'executable', enabled: true }
+    ]
+  };
+
+  const admitted = r.evaluate('schemaMigrationOrchestrator').admitPlan(candidate);
+
+  await assert.rejects(
+    r.evaluate('schemaMigrationOrchestrator').executeMigrationJob({ planToken: admitted.planToken }),
+    { code: 'QUERY_CANCELED' }
+  );
+
+  // Leases must be completely freed
+  assert.equal(r.evaluate('sessionRegistry.leases.size'), 0);
+
+  // Editor session remains functional
+  const editorSnap = await r.call('db:schema-snapshot', { profileId: 'tgt', database: 'tgt_db' });
+  assert.equal(editorSnap.ok, true);
 });

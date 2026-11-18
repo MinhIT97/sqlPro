@@ -870,6 +870,23 @@ app.whenReady().then(async () => {
     await evaluate("app.tables=joinStarSavedTables;delete window.joinStarSavedTables;invalidateSqlAutocomplete();app.query.sql='SELECT 1';renderQueryView()");
     win.setContentSize(1344, 835); autocompleteColumns = null;
   });
+  await check('autocomplete ignores retired editor events and survives queued scroll/refocus, but closes on real scrolling', async () => {
+    const marked = '\n'.repeat(20) + 'WITH recent(`tên cột`) AS (SELECT 1) SELECT * FROM recent r WHERE r.|';
+    await evaluate("window.retiredSqlEditor=$('#sql')");
+    await evaluate(`app.query.sql=${JSON.stringify(marked.replace('|', ''))};renderQueryView();$('#sql').style.height='75px';$('#sql').focus();$('#sql').setSelectionRange(${marked.indexOf('|')},${marked.indexOf('|')});refreshSqlSuggestions($('#sql'),true)`);
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['r.tên cột']);
+    await evaluate("retiredSqlEditor.dispatchEvent(new Event('scroll'));retiredSqlEditor.dispatchEvent(new Event('blur'))");
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['r.tên cột']);
+    await evaluate("$('#sql').dispatchEvent(new Event('scroll'))");
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['r.tên cột']);
+    await evaluate("$('#runQueryBtn').focus();$('#sql').focus();refreshSqlSuggestions($('#sql'),true)");
+    // Exercise the real blur deadline; a stale timer must not close the refocused popup.
+    await evaluate('new Promise(resolve=>setTimeout(resolve,160))');
+    assert.deepEqual(await evaluate('sqlAutocomplete.items.map(item=>item.label)'), ['r.tên cột']);
+    await evaluate("$('#sql').scrollTop=0;$('#sql').dispatchEvent(new Event('scroll'))");
+    assert.equal(await evaluate('sqlAutocomplete.items.length'), 0);
+    await evaluate("delete window.retiredSqlEditor;app.query.sql='SELECT 1';renderQueryView()");
+  });
   await check('autocomplete replaces complete tokens at the caret, supports undo and ignores stale suggestions', async () => {
     autocompleteColumns = new Map([['users', [{ name: 'name', type: 'text' }]]]);
     await evaluate('invalidateSqlAutocomplete()');

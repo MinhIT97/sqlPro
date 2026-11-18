@@ -1,0 +1,66 @@
+{
+  "multiDrop": {
+    "planStatus": "blocked",
+    "code": "RESTORE_PLAN_BLOCKED",
+    "queries": []
+  },
+  "caseDatabase": {
+    "planStatus": "blocked",
+    "code": "RESTORE_PLAN_BLOCKED",
+    "queries": []
+  },
+  "sessionAutocommit": {
+    "planStatus": "ready",
+    "code": "RESTORE_UNCOMMITTED_TRANSACTION",
+    "partialCommit": true,
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "SET AUTOCOMMIT=0",
+      "INSERT INTO `users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "lateFileSwap": {
+    "planStatus": "ready",
+    "code": "RESTORE_FILE_CHANGED",
+    "partialCommit": false,
+    "queries": [
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "profileDrift": {
+    "code": "CONNECTION_READ_ONLY",
+    "profileReadOnly": true,
+    "queries": [
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "replicaOverwrite": {
+    "verified": true,
+    "destinationContent": "EXISTING BACKUP"
+  },
+  "cancelTransfer": {
+    "canceled": true,
+    "afterCancel": true,
+    "afterReset": true
+  },
+  "approval": {
+    "receiptDespiteCancel": false,
+    "authorized": null
+  },
+  "syncShallowFreeze": {
+    "frozen": true,
+    "operationFrozen": true,
+    "targetDatabase": "sample",
+    "digestMatches": true
+  },
+  "asyncProgress": {
+    "success": true,
+    "unhandledRejection": null
+  }
+}

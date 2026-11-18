@@ -819,6 +819,8 @@ function positionSqlSuggestions(editor, host) {
 function renderSqlSuggestions(editor, context, items) {
   const host = $('#sqlSuggestions');
   if (!host) return;
+  context.scrollTop = editor.scrollTop;
+  context.scrollLeft = editor.scrollLeft;
   if (!items.length) {
     sqlAutocomplete.items = [];
     sqlAutocomplete.context = context;
@@ -3642,10 +3644,7 @@ async function showSchemaDiffModal() {
               <input type="checkbox" id="diffSelectAllStmts" checked>
               <span>Chọn tất cả (${migrationStatements.length} lệnh)</span>
             </label>
-            <label style="display:flex; align-items:center; gap:5px;">
-              <input type="checkbox" id="diffWrapFkChecks" ${wrapForeignKeys ? 'checked' : ''}>
-              <span>Tắt kiểm tra khóa ngoại khi chạy (Safe execution)</span>
-            </label>
+            <span style="font-size:0.85em; color:#64748b;">🔒 Ràng buộc khóa ngoại luôn được bảo vệ</span>
           </div>
           <div style="display:flex; gap:6px;">
             <button type="button" class="secondary" id="diffCopySqlBtn">📋 Sao chép</button>
@@ -3657,23 +3656,15 @@ async function showSchemaDiffModal() {
         <textarea class="diff-sql-script-area" id="diffSqlScriptArea" readonly>${esc(getFormattedScript())}</textarea>
 
         <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
-          <span style="font-size:0.82em; color:${targetIsReadOnly ? '#dc2626' : '#64748b'};">
-            ${targetIsReadOnly
-              ? '🔒 CSDL Đích thuộc kết nối chỉ đọc. Thao tác áp dụng trực tiếp bị khóa để bảo vệ an toàn.'
-              : '⚠️ Luôn sao lưu CSDL đích trước khi thực thi script migration DDL.'}
+          <span style="font-size:0.82em; color:#64748b;">
+            🔒 Luồng áp dụng trực tiếp đang khóa an toàn. Vui lòng bấm “▷ Mở trong Editor” để xem xét và thực thi từng lệnh DDL có kiểm soát.
           </span>
-          <button type="button" class="primary" id="diffApplyTargetBtn" style="background:${targetIsReadOnly ? '#64748b' : '#b91c1c'}; border-color:${targetIsReadOnly ? '#475569' : '#991b1b'}; cursor:${targetIsReadOnly ? 'not-allowed' : 'pointer'};" ${targetIsReadOnly ? 'disabled title="Kết nối đích đang ở chế độ chỉ đọc"' : ''}>
-            ${targetIsReadOnly ? '🔒 CSDL Đích Chỉ Đọc' : `⚡ Áp dụng trực tiếp vào CSDL Đích (${esc(targetDb)})`}
+          <button type="button" class="secondary" id="diffApplyTargetBtn" disabled style="cursor:not-allowed; opacity:0.6;">
+            🔒 Áp dụng trực tiếp đang khóa an toàn
           </button>
         </div>
       </div>
     `;
-
-    $('#diffWrapFkChecks')?.addEventListener('change', (e) => {
-      wrapForeignKeys = e.target.checked;
-      const scriptArea = $('#diffSqlScriptArea');
-      if (scriptArea) scriptArea.value = getFormattedScript();
-    });
 
     $('#diffCopySqlBtn')?.addEventListener('click', async () => {
       try {
@@ -3707,50 +3698,8 @@ async function showSchemaDiffModal() {
       toast(`Đã mở mã Migration vào SQL Editor cho ${targetDb}`, 'info');
     });
 
-    $('#diffApplyTargetBtn')?.addEventListener('click', async () => {
-      if (connectionIsReadOnly(targetProfileId)) {
-        toast('Kết nối đích đang ở chế độ chỉ đọc. Không thể thực thi thay đổi schema.', 'error');
-        return;
-      }
-      const activeStatements = migrationStatements.filter((s) => s.enabled);
-      if (!activeStatements.length) {
-        toast('Không có câu lệnh nào được chọn để áp dụng.', 'error');
-        return;
-      }
-
-      const hasDestructive = activeStatements.some((s) => s.severity === 'destructive');
-      const confirmMsg = `Bạn có chắc chắn muốn thực thi ${activeStatements.length} câu lệnh DDL vào CSDL "${targetDb}" không?${hasDestructive ? '\n\n⚠️ CẢNH BÁO: Script có chứa câu lệnh xóa dữ liệu (DROP)! Thao tác này không thể hoàn tác!' : ''}`;
-
-      confirmAction(confirmMsg, async () => {
-        closeModal();
-        setStatus(`Đang thực thi migration vào ${targetDb}...`);
-
-        let executedCount = 0;
-        try {
-          if (wrapForeignKeys) {
-            await call(desktop.db.query({ profileId: targetProfileId, database: targetDb, sql: 'SET FOREIGN_KEY_CHECKS = 0;' }));
-          }
-
-          for (const stmt of activeStatements) {
-            await call(desktop.db.query({ profileId: targetProfileId, database: targetDb, sql: stmt.sql, confirmed: true }));
-            executedCount++;
-          }
-
-          if (wrapForeignKeys) {
-            await call(desktop.db.query({ profileId: targetProfileId, database: targetDb, sql: 'SET FOREIGN_KEY_CHECKS = 1;' }));
-          }
-
-          toast(`Đã áp dụng thành công ${executedCount} câu lệnh migration vào ${targetDb}!`, 'success');
-          setStatus(`Migration hoàn tất: ${executedCount} câu lệnh`);
-          if (app.database === targetDb) {
-            app.tables = await call(desktop.db.tables(targetDb, targetProfileId));
-            renderSidebar();
-          }
-        } catch (err) {
-          toast(`Lỗi khi áp dụng migration (đã chạy ${executedCount}/${activeStatements.length}): ${err.message}`, 'error');
-          setStatus(`Migration thất bại tại câu lệnh ${executedCount + 1}`);
-        }
-      }, { separate: true });
+    $('#diffApplyTargetBtn')?.addEventListener('click', () => {
+      toast('Thao tác áp dụng tự động đang tạm khóa để thẩm định an toàn DDL. Vui lòng bấm "▷ Mở trong Editor" để xem xét từng câu lệnh.', 'warning');
     });
   }
 
@@ -9602,7 +9551,14 @@ function renderQueryView() {
     }
   });
   editor.addEventListener('click', () => void refreshSqlSuggestions(editor));
-  editor.addEventListener('scroll', closeSqlSuggestions);
+  editor.addEventListener('scroll', () => {
+    if (editor !== $('#sql') || !editor.isConnected) return;
+    const context = sqlAutocomplete.context;
+    // Native scroll notifications may arrive after a new popup used the same viewport.
+    if (context && editor.scrollTop === context.scrollTop && editor.scrollLeft === context.scrollLeft) return;
+    closeSqlSuggestions();
+  });
+  editor.addEventListener('focus', () => clearTimeout(sqlAutocomplete.blurTimer));
   editor.addEventListener('compositionstart', () => {
     sqlAutocomplete.composing = true;
     closeSqlSuggestions();
@@ -9612,8 +9568,11 @@ function renderQueryView() {
     void refreshSqlSuggestions(editor);
   });
   editor.addEventListener('blur', () => {
+    if (editor !== $('#sql') || !editor.isConnected) return;
     clearTimeout(sqlAutocomplete.blurTimer);
-    sqlAutocomplete.blurTimer = setTimeout(closeSqlSuggestions, 120);
+    sqlAutocomplete.blurTimer = setTimeout(() => {
+      if (editor === $('#sql') && editor.isConnected && document.activeElement !== editor) closeSqlSuggestions();
+    }, 120);
   });
   const suggestions = $('#sqlSuggestions');
   suggestions.addEventListener('mousedown', (event) => {

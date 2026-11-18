@@ -1,0 +1,83 @@
+{
+  "modeParser": {
+    "sql": "ALTER TABLE `users` COMMENT='x\\', RENAME TO `other_db`.`victim` -- '\n;",
+    "parse": {
+      "type": "table",
+      "source": {
+        "schema": null,
+        "name": "users"
+      },
+      "destination": null,
+      "destinations": []
+    },
+    "planStatus": "blocked",
+    "code": "RESTORE_PLAN_BLOCKED",
+    "queries": []
+  },
+  "userVariableAutocommit": {
+    "planStatus": "ready",
+    "code": "RESTORE_UNCOMMITTED_TRANSACTION",
+    "partialCommit": true,
+    "targetChanged": true,
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode, IF(@@SESSION.autocommit,1,0) AS autocommit",
+      "SET NAMES utf8mb4",
+      "SET SESSION completion_type=0",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "SET AUTOCOMMIT=0",
+      "SET @autocommit=1",
+      "INSERT INTO `users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "defaultAutocommit": {
+    "staticValue": null,
+    "planStatus": "blocked",
+    "code": "RESTORE_PLAN_BLOCKED",
+    "queries": []
+  },
+  "commitLostAck": {
+    "planStatus": "ready",
+    "code": "ECONNRESET",
+    "partialCommit": true,
+    "targetChanged": true,
+    "executionUncertain": true,
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode, IF(@@SESSION.autocommit,1,0) AS autocommit",
+      "SET NAMES utf8mb4",
+      "SET SESSION completion_type=0",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "START TRANSACTION",
+      "INSERT INTO `users` VALUES (1)",
+      "COMMIT",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "lateConnectAfterTimeout": {
+    "beforeRelease": {
+      "planStatus": "ready",
+      "code": "STATEMENT_TIMEOUT",
+      "partialCommit": false,
+      "targetChanged": false,
+      "queries": []
+    },
+    "closeCountBeforeRelease": 1,
+    "closeCountAfterRelease": 2,
+    "connectionOpenAfterLateCompletion": false
+  },
+  "mainSqlMode": {
+    "planStatus": "blocked",
+    "response": {
+      "ok": false,
+      "error": {
+        "message": "Kế hoạch phục hồi chưa sẵn sàng hoặc bị chặn.",
+        "code": "RESTORE_PLAN_BLOCKED",
+        "sqlState": ""
+      }
+    },
+    "queries": []
+  }
+}

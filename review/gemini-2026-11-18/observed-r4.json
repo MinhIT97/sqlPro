@@ -1,0 +1,164 @@
+{
+  "renameInsideString": {
+    "parser": {
+      "type": "table",
+      "source": {
+        "schema": null,
+        "name": "users"
+      },
+      "destination": {
+        "schema": null,
+        "name": "users"
+      }
+    },
+    "planStatus": "ready",
+    "result": {
+      "success": true,
+      "executedCount": 2,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": false
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "ALTER TABLE `users` COMMENT='RENAME TO users ignored', RENAME TO `other_db`.`victim`",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "quotedAutocommit": {
+    "planStatus": "ready",
+    "result": {
+      "success": true,
+      "executedCount": 2,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": false
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "SET `AUTOCOMMIT`=0",
+      "INSERT INTO `users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "expressionAutocommit": {
+    "planStatus": "ready",
+    "result": {
+      "success": true,
+      "executedCount": 2,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": false
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "SET AUTOCOMMIT=(0)",
+      "INSERT INTO `users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "dropThenContextDrift": {
+    "planStatus": "ready",
+    "code": "CONNECTION_READ_ONLY",
+    "executedCount": 0,
+    "partialCommit": false,
+    "targetChanged": false,
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "DROP TABLE IF EXISTS `users`",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "firstDmlLostAck": {
+    "planStatus": "ready",
+    "code": "ECONNRESET",
+    "executedCount": 0,
+    "partialCommit": false,
+    "targetChanged": false,
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "INSERT INTO `users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "cancelHungConnect": {
+    "settledBeforeRelease": false,
+    "response": {
+      "planStatus": "ready",
+      "code": "QUERY_CANCELED",
+      "executedCount": 0,
+      "partialCommit": false,
+      "targetChanged": false,
+      "queries": [
+        "SET FOREIGN_KEY_CHECKS=1",
+        "SET SESSION sql_mode=?"
+      ]
+    }
+  },
+  "rawDeadline": {
+    "settledAfterDeadline": false,
+    "response": {
+      "planStatus": "ready",
+      "result": {
+        "success": true,
+        "executedCount": 1,
+        "skippedCount": 0,
+        "targetChanged": true,
+        "partialCommit": false
+      },
+      "queries": [
+        "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+        "SET FOREIGN_KEY_CHECKS=0",
+        "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+        "SET FOREIGN_KEY_CHECKS=1",
+        "SET SESSION sql_mode=?"
+      ]
+    }
+  },
+  "mainParserBypass": {
+    "response": {
+      "ok": true,
+      "data": {
+        "success": true,
+        "executedCount": 2,
+        "skippedCount": 0,
+        "targetChanged": true,
+        "partialCommit": false
+      }
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "ALTER TABLE `users` COMMENT='RENAME TO users ignored', RENAME TO `other_db`.`victim`",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "mainLostAckProjection": {
+    "ok": false,
+    "error": {
+      "message": "Kết nối bị đóng bởi máy chủ.",
+      "code": "ECONNRESET",
+      "sqlState": ""
+    }
+  },
+  "replicaPublication": {
+    "originalContent": "CONCURRENT BACKUP",
+    "newReplicaContent": "NEW BACKUP",
+    "usesDifferentPath": true
+  }
+}

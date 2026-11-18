@@ -1,0 +1,24 @@
+npm notice run sqlpro-desktop@0.3.12 test:renderer
+npm notice run node test/run-renderer-smoke.cjs
+PASS formatter button is bound after rendering
+PASS SQL editor undo and redo survive formatting and tab switches
+PASS Electron delivers Ctrl+Z to the focused SQL editor
+PASS autocomplete keeps case-sensitive sources and self-join aliases, caches bounded metadata and accepts columns with keyboard/undo
+PASS autocomplete isolates nested SELECT blocks and never fetches CTE/derived names as physical tables
+PASS explicit CTE column suggestions stay local, escape names and support keyboard insertion and undo
+PASS SELECT output names for CTE and derived sources need no metadata reads and support keyboard/undo
+PASS implicit SELECT aliases stay local, escape names and preserve keyboard insertion/undo
+PASS set output suggestions use first-arm names with no metadata reads and preserve keyboard/undo
+PASS local star output stays inside CTE/derived names without metadata and preserves keyboard/undo
+PASS qualified local join stars preserve owner and keyboard editing without reading source metadata
+AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
++ actual - expected
+
++ []
+- [
+-   'r.tên cột'
+- ]
+
+    at /var/www/project/SqlPro/test/renderer-smoke.cjs:879:12
+    at async check (/var/www/project/SqlPro/test/renderer-smoke.cjs:452:9)
+    at async /var/www/project/SqlPro/test/renderer-smoke.cjs:873:3

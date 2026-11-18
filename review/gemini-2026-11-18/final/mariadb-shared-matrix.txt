@@ -1,0 +1,743 @@
+TAP version 13
+# Subtest: data diff observes exact typed rows without treating a LIMIT sample as synchronization authority
+    # Subtest: real driver retains decimal, JSON numeric lexemes and temporal microseconds
+    ok 1 - real driver retains decimal, JSON numeric lexemes and temporal microseconds
+      ---
+      duration_ms: 4.618033
+      type: 'test'
+      ...
+    # Subtest: different LIMIT samples never authorize DELETE or other generated writes
+    ok 2 - different LIMIT samples never authorize DELETE or other generated writes
+      ---
+      duration_ms: 0.361114
+      type: 'test'
+      ...
+    1..2
+ok 1 - data diff observes exact typed rows without treating a LIMIT sample as synchronization authority
+  ---
+  duration_ms: 85.646754
+  type: 'test'
+  ...
+# Subtest: Data Diff service on a disposable engine: cloneable status, numeric keys, snapshot proof and blocked text keys
+ok 2 - Data Diff service on a disposable engine: cloneable status, numeric keys, snapshot proof and blocked text keys
+  ---
+  duration_ms: 88.198826
+  type: 'test'
+  ...
+# Subtest: EXPLAIN formats on an isolated engine retain settings/data and expose capability by server outcome
+    # Subtest: default EXPLAIN remains traditional on fixture defaults
+    ok 1 - default EXPLAIN remains traditional on fixture defaults
+      ---
+      duration_ms: 4.6737
+      type: 'test'
+      ...
+    # Subtest: JSON is viewable on both MySQL/MariaDB without rewriting native fields
+    ok 2 - JSON is viewable on both MySQL/MariaDB without rewriting native fields
+      ---
+      duration_ms: 3.723978
+      type: 'test'
+      ...
+    # Subtest: TREE succeeds only when server supports it, unsupported result is a surfaced error
+    ok 3 - TREE succeeds only when server supports it, unsupported result is a surfaced error
+      ---
+      duration_ms: 1.747451
+      type: 'test'
+      ...
+    # Subtest: read-only policy rejects ANALYZE and values/settings/connection stay unchanged
+    ok 4 - read-only policy rejects ANALYZE and values/settings/connection stay unchanged
+      ---
+      duration_ms: 1.846377
+      type: 'test'
+      ...
+    # Subtest: separate ANALYZE action returns native actual statistics without changing fixture data or session settings
+    ok 5 - separate ANALYZE action returns native actual statistics without changing fixture data or session settings
+      ---
+      duration_ms: 5.826534
+      type: 'test'
+      ...
+    # Subtest: ANALYZE refuses Editor transaction/autocommit-off and read-only profile without committing or resetting them
+    ok 6 - ANALYZE refuses Editor transaction/autocommit-off and read-only profile without committing or resetting them
+      ---
+      duration_ms: 4.320415
+      type: 'test'
+      ...
+    # Subtest: same SQL plans compare unchanged, adding a covering index changes observed plan
+    ok 7 - same SQL plans compare unchanged, adding a covering index changes observed plan
+      ---
+      duration_ms: 4.556779
+      type: 'test'
+      ...
+    # Subtest: unchanged plan does not prove schema unchanged, while data and session settings stay intact
+    ok 8 - unchanged plan does not prove schema unchanged, while data and session settings stay intact
+      ---
+      duration_ms: 3.903124
+      type: 'test'
+      ...
+    # Subtest: opt-in settings observations compare actual server settings and preserve data/session/transaction
+    ok 9 - opt-in settings observations compare actual server settings and preserve data/session/transaction
+      ---
+      duration_ms: 21.965161
+      type: 'test'
+      ...
+    # Subtest: single-table SHOW CREATE observations detect definition drift, temporary shadows and unsupported sources without changing fixture data
+    ok 10 - single-table SHOW CREATE observations detect definition drift, temporary shadows and unsupported sources without changing fixture data
+      ---
+      duration_ms: 24.800775
+      type: 'test'
+      ...
+    1..10
+ok 3 - EXPLAIN formats on an isolated engine retain settings/data and expose capability by server outcome
+  ---
+  duration_ms: 109.380238
+  type: 'test'
+  ...
+# Subtest: index visibility integration: capability, drift and conservative observation on an isolated database
+    # Subtest: reads supported flag metadata and leaves the editor transaction and fixture untouched
+    ok 1 - reads supported flag metadata and leaves the editor transaction and fixture untouched
+      ---
+      duration_ms: 42.781561
+      type: 'test'
+      ...
+    # Subtest: hidden/ignored flags change the digest and require review; uniqueness remains enforced
+    ok 2 - hidden/ignored flags change the digest and require review; uniqueness remains enforced
+      ---
+      duration_ms: 69.491702
+      type: 'test'
+      ...
+    # Subtest: denied or missing capabilities retain unknown observations while basic metadata is still readable
+    ok 3 - denied or missing capabilities retain unknown observations while basic metadata is still readable
+      ---
+      duration_ms: 58.296559
+      type: 'test'
+      ...
+    1..3
+ok 4 - index visibility integration: capability, drift and conservative observation on an isolated database
+  ---
+  duration_ms: 218.446542
+  type: 'test'
+  ...
+# Subtest: restore safety on real MySQL: context, selection markers and commit outcomes
+    # Subtest: unsafe dump mode and initial worker mode cannot drop existing data
+    ok 1 - unsafe dump mode and initial worker mode cannot drop existing data
+      ---
+      duration_ms: 55.398407
+      type: 'test'
+      ...
+    # Subtest: a user variable cannot disguise a rolled-back uncommitted insert
+    ok 2 - a user variable cannot disguise a rolled-back uncommitted insert
+      ---
+      duration_ms: 44.420093
+      type: 'test'
+      ...
+    # Subtest: native dump save/restore context and selective data commit work
+    ok 3 - native dump save/restore context and selective data commit work
+      ---
+      duration_ms: 20.859137
+      type: 'test'
+      ...
+    # Subtest: lost explicit/implicit commit ACK reports uncertainty for actually persisted data
+    ok 4 - lost explicit/implicit commit ACK reports uncertainty for actually persisted data
+      ---
+      duration_ms: 27.621765
+      type: 'test'
+      ...
+    # Subtest: inherited completion_type=CHAIN cannot silently open an untracked transaction
+    ok 5 - inherited completion_type=CHAIN cannot silently open an untracked transaction
+      ---
+      duration_ms: 22.903362
+      type: 'test'
+      ...
+    1..5
+ok 5 - restore safety on real MySQL: context, selection markers and commit outcomes
+  ---
+  duration_ms: 202.840607
+  type: 'test'
+  ...
+# Subtest: CHECK metadata integration: observed constraints are never a proof that restored data satisfies them
+    # Subtest: real CHECK rejects an in-range integer even when basic value bounds pass; preview writes no rows
+    ok 1 - real CHECK rejects an in-range integer even when basic value bounds pass; preview writes no rows
+      ---
+      duration_ms: 38.25345
+      type: 'test'
+      ...
+    # Subtest: changing the expression with the same CHECK name changes snapshot and plan identity
+    ok 2 - changing the expression with the same CHECK name changes snapshot and plan identity
+      ---
+      duration_ms: 46.260841
+      type: 'test'
+      ...
+    # Subtest: declared enforcement is capability-based and never certifies restored values or session behavior
+    ok 3 - declared enforcement is capability-based and never certifies restored values or session behavior
+      ---
+      duration_ms: 21.165654
+      type: 'test'
+      ...
+    # Subtest: unknown capability and denied queries keep the CHECK gate and redact errors
+    ok 4 - unknown capability and denied queries keep the CHECK gate and redact errors
+      ---
+      duration_ms: 29.832949
+      type: 'test'
+      ...
+    # Subtest: CHECK session state is observed when available, or explicitly unknown without a version guess
+    ok 5 - CHECK session state is observed when available, or explicitly unknown without a version guess
+      ---
+      duration_ms: 68.406883
+      type: 'test'
+      ...
+    # Subtest: denied or malformed CHECK session results stay unknown without exposing errors or trusting ENFORCED
+    ok 6 - denied or malformed CHECK session results stay unknown without exposing errors or trusting ENFORCED
+      ---
+      duration_ms: 38.912368
+      type: 'test'
+      ...
+    # Subtest: preview uses only SELECT and preserves Reader/Editor settings and the Editor transaction
+    ok 7 - preview uses only SELECT and preserves Reader/Editor settings and the Editor transaction
+      ---
+      duration_ms: 2.274114
+      type: 'test'
+      ...
+    1..7
+ok 6 - CHECK metadata integration: observed constraints are never a proof that restored data satisfies them
+  ---
+  duration_ms: 285.169154
+  type: 'test'
+  ...
+# Subtest: target engine integration: observations never authorize writes or guarantee rollback of indirect effects
+    # Subtest: InnoDB is observed through the existing SELECT, without removing execution or indirect-write gates
+    ok 1 - InnoDB is observed through the existing SELECT, without removing execution or indirect-write gates
+      ---
+      duration_ms: 35.487239
+      type: 'test'
+      ...
+    # Subtest: two fresh observations ignore read time and row writes remain outside metadata comparison
+    ok 2 - two fresh observations ignore read time and row writes remain outside metadata comparison
+      ---
+      duration_ms: 63.94064
+      type: 'test'
+      ...
+    # Subtest: changing the existing target to MyISAM changes snapshot/plan and blocks the data-only INSERT
+    ok 3 - changing the existing target to MyISAM changes snapshot/plan and blocks the data-only INSERT
+      ---
+      duration_ms: 71.169202
+      type: 'test'
+      ...
+    # Subtest: an InnoDB table with a trigger writing MyISAM keeps the indirect-effects gate
+    ok 4 - an InnoDB table with a trigger writing MyISAM keeps the indirect-effects gate
+      ---
+      duration_ms: 28.553298
+      type: 'test'
+      ...
+    # Subtest: trigger body and creation context changes with the same name are bound without exposing definitions or accounts
+    ok 5 - trigger body and creation context changes with the same name are bound without exposing definitions or accounts
+      ---
+      duration_ms: 106.953288
+      type: 'test'
+      ...
+    # Subtest: denied or incomplete trigger definitions retain unknown and all side-effect gates
+    ok 6 - denied or incomplete trigger definitions retain unknown and all side-effect gates
+      ---
+      duration_ms: 43.508651
+      type: 'test'
+      ...
+    # Subtest: missing/malformed/denied table metadata stays unknown without an engine fallback
+    ok 7 - missing/malformed/denied table metadata stays unknown without an engine fallback
+      ---
+      duration_ms: 97.022694
+      type: 'test'
+      ...
+    # Subtest: all preview queries are SELECT and Reader/Editor settings, connection and transaction are preserved
+    ok 8 - all preview queries are SELECT and Reader/Editor settings, connection and transaction are preserved
+      ---
+      duration_ms: 1.810855
+      type: 'test'
+      ...
+    1..8
+ok 7 - target engine integration: observations never authorize writes or guarantee rollback of indirect effects
+  ---
+  duration_ms: 489.852936
+  type: 'test'
+  ...
+# Subtest: omitted values integration: metadata-only preview observes defaults and special columns without writing
+    # Subtest: required omission fails under strict mode and DEFAULT drift changes the snapshot/draft
+    ok 1 - required omission fails under strict mode and DEFAULT drift changes the snapshot/draft
+      ---
+      duration_ms: 73.892116
+      type: 'test'
+      ...
+    # Subtest: nullable NULL and literal DEFAULT are not confused or exposed
+    ok 2 - nullable NULL and literal DEFAULT are not confused or exposed
+      ---
+      duration_ms: 25.076229
+      type: 'test'
+      ...
+    # Subtest: changing one non-null DEFAULT to another changes metadata/snapshot/plan without exposing either value
+    ok 3 - changing one non-null DEFAULT to another changes metadata/snapshot/plan without exposing either value
+      ---
+      duration_ms: 56.709589
+      type: 'test'
+      ...
+    # Subtest: same-name generated expression changes are observed but never evaluated by preview
+    ok 4 - same-name generated expression changes are observed but never evaluated by preview
+      ---
+      duration_ms: 48.897923
+      type: 'test'
+      ...
+    # Subtest: missing or malformed expression evidence remains unknown without changing column/omission semantics
+    ok 5 - missing or malformed expression evidence remains unknown without changing column/omission semantics
+      ---
+      duration_ms: 23.293333
+      type: 'test'
+      ...
+    # Subtest: positional INSERT leaves Invisible columns to their unreviewed defaults
+    ok 6 - positional INSERT leaves Invisible columns to their unreviewed defaults
+      ---
+      duration_ms: 36.091455
+      type: 'test'
+      ...
+    # Subtest: auto-increment, TIMESTAMP expression and generated columns remain unreviewed
+    ok 7 - auto-increment, TIMESTAMP expression and generated columns remain unreviewed
+      ---
+      duration_ms: 29.056868
+      type: 'test'
+      ...
+    # Subtest: preview uses only SELECT and leaves the editor transaction/session intact
+    ok 8 - preview uses only SELECT and leaves the editor transaction/session intact
+      ---
+      duration_ms: 1.880506
+      type: 'test'
+      ...
+    1..8
+ok 8 - omitted values integration: metadata-only preview observes defaults and special columns without writing
+  ---
+  duration_ms: 333.94367
+  type: 'test'
+  ...
+# Subtest: session policy integration: read-only proposal and isolated strict/FK/zero-mode semantics
+    # Subtest: fresh settings bind preview without executing native SET or touching editor transaction
+    ok 1 - fresh settings bind preview without executing native SET or touching editor transaction
+      ---
+      duration_ms: 21.944238
+      type: 'test'
+      ...
+    # Subtest: proposed flags preserve explicit zero and reject truncation/orphans in test session only
+    ok 2 - proposed flags preserve explicit zero and reject truncation/orphans in test session only
+      ---
+      duration_ms: 29.165303
+      type: 'test'
+      ...
+    # Subtest: session drift changes snapshot and plan, disabled checks stay blocked, settings restore independently
+    ok 3 - session drift changes snapshot and plan, disabled checks stay blocked, settings restore independently
+      ---
+      duration_ms: 68.57805
+      type: 'test'
+      ...
+    # Subtest: unique_checks drift binds snapshots and plans; read-only preview never reenables it or validates duplicates
+    ok 4 - unique_checks drift binds snapshots and plans; read-only preview never reenables it or validates duplicates
+      ---
+      duration_ms: 64.836405
+      type: 'test'
+      ...
+    # Subtest: enabled unique checks still require data validation; secondary unique duplicates are rejected in the isolated fixture
+    ok 5 - enabled unique checks still require data validation; secondary unique duplicates are rejected in the isolated fixture
+      ---
+      duration_ms: 24.563252
+      type: 'test'
+      ...
+    1..5
+ok 9 - session policy integration: read-only proposal and isolated strict/FK/zero-mode semantics
+  ---
+  duration_ms: 279.538691
+  type: 'test'
+  ...
+# Subtest: temporal preview integration: calendar and precision review without date conversion or writes
+    # Subtest: DATE endpoints and Gregorian leap days agree with strict storage; preview writes no rows
+    ok 1 - DATE endpoints and Gregorian leap days agree with strict storage; preview writes no rows
+      ---
+      duration_ms: 51.44153
+      type: 'test'
+      ...
+    # Subtest: zero and invalid dates remain policy issues even when a relaxed fixture accepts them
+    ok 2 - zero and invalid dates remain policy issues even when a relaxed fixture accepts them
+      ---
+      duration_ms: 49.489227
+      type: 'test'
+      ...
+    # Subtest: DATETIME precision loss is blocked; trailing-zero fractions remain exact and ALTER changes binding
+    ok 3 - DATETIME precision loss is blocked; trailing-zero fractions remain exact and ALTER changes binding
+      ---
+      duration_ms: 65.281757
+      type: 'test'
+      ...
+    # Subtest: TIME durations preserve negative values, hours above 23 and exact endpoints without preview writes
+    ok 4 - TIME durations preserve negative values, hours above 23 and exact endpoints without preview writes
+      ---
+      duration_ms: 23.809219
+      type: 'test'
+      ...
+    # Subtest: out-of-range TIME is rejected under strict mode and remains an issue when a relaxed server clips it
+    ok 5 - out-of-range TIME is rejected under strict mode and remains an issue when a relaxed server clips it
+      ---
+      duration_ms: 79.762799
+      type: 'test'
+      ...
+    # Subtest: TIME precision loss and ALTER precision bind the report, while abbreviated/boundary formats stay unknown
+    ok 6 - TIME precision loss and ALTER precision bind the report, while abbreviated/boundary formats stay unknown
+      ---
+      duration_ms: 62.866978
+      type: 'test'
+      ...
+    # Subtest: YEAR exact endpoints and numeric zero agree with storage, with no writes during preview
+    ok 7 - YEAR exact endpoints and numeric zero agree with storage, with no writes during preview
+      ---
+      duration_ms: 23.618228
+      type: 'test'
+      ...
+    # Subtest: YEAR rejects four-digit out-of-range values under strict mode and never certifies relaxed zero substitution
+    ok 8 - YEAR rejects four-digit out-of-range values under strict mode and never certifies relaxed zero substitution
+      ---
+      duration_ms: 44.426125
+      type: 'test'
+      ...
+    # Subtest: short years and quoted zero remain unreviewed even when the server maps them to a century
+    ok 9 - short years and quoted zero remain unreviewed even when the server maps them to a century
+      ---
+      duration_ms: 23.797208
+      type: 'test'
+      ...
+    # Subtest: TIMESTAMP flags calendar/zero/clock risks while valid local values still require zone and range proof
+    ok 10 - TIMESTAMP flags calendar/zero/clock risks while valid local values still require zone and range proof
+      ---
+      duration_ms: 23.371494
+      type: 'test'
+      ...
+    # Subtest: TIMESTAMP precision drift changes the snapshot and plan without clearing the timezone gate
+    ok 11 - TIMESTAMP precision drift changes the snapshot and plan without clearing the timezone gate
+      ---
+      duration_ms: 41.673845
+      type: 'test'
+      ...
+    # Subtest: the same TIMESTAMP text stores different instants across zones; preview never infers that instant or server range
+    ok 12 - the same TIMESTAMP text stores different instants across zones; preview never infers that instant or server range
+      ---
+      duration_ms: 25.583933
+      type: 'test'
+      ...
+    # Subtest: native TIMESTAMP backup keeps microsecond evidence but cannot certify the timezone or range
+    ok 13 - native TIMESTAMP backup keeps microsecond evidence but cannot certify the timezone or range
+      ---
+      duration_ms: 193.252161
+      type: 'test'
+      ...
+    # Subtest: native backup and scan preserve DATE, TIME, YEAR and microseconds without exposing values in the draft
+    ok 14 - native backup and scan preserve DATE, TIME, YEAR and microseconds without exposing values in the draft
+      ---
+      duration_ms: 180.307588
+      type: 'test'
+      ...
+    # Subtest: preview uses only SELECT and keeps reader/editor settings and editor transaction unchanged
+    ok 15 - preview uses only SELECT and keeps reader/editor settings and editor transaction unchanged
+      ---
+      duration_ms: 1.392688
+      type: 'test'
+      ...
+    1..15
+ok 10 - temporal preview integration: calendar and precision review without date conversion or writes
+  ---
+  duration_ms: 928.546142
+  type: 'test'
+  ...
+# Subtest: text preview integration: Unicode length, encoded bytes, charset and native backup
+    # Subtest: VARCHAR character endpoints and TINYTEXT byte endpoints match real storage without preview writes
+    ok 1 - VARCHAR character endpoints and TINYTEXT byte endpoints match real storage without preview writes
+      ---
+      duration_ms: 78.612932
+      type: 'test'
+      ...
+    # Subtest: charset loss and ALTER drift change the report while visible fixture data stays intact
+    ok 2 - charset loss and ALTER drift change the report while visible fixture data stays intact
+      ---
+      duration_ms: 96.072819
+      type: 'test'
+      ...
+    # Subtest: CHAR trailing-space behavior remains flagged separately from VARCHAR/TEXT length checks
+    ok 3 - CHAR trailing-space behavior remains flagged separately from VARCHAR/TEXT length checks
+      ---
+      duration_ms: 22.5777
+      type: 'test'
+      ...
+    # Subtest: native text backup/worker retains only statistics and preview leaves rows and Editor session unchanged
+    ok 4 - native text backup/worker retains only statistics and preview leaves rows and Editor session unchanged
+      ---
+      duration_ms: 199.026541
+      type: 'test'
+      ...
+    1..4
+ok 11 - text preview integration: Unicode length, encoded bytes, charset and native backup
+  ---
+  duration_ms: 427.988038
+  type: 'test'
+  ...
+# Subtest: value bounds integration: read-only preview agrees with strict integer ranges on real server
+    # Subtest: source-wide integers and NULL report narrower target issues without writes or editor changes
+    ok 1 - source-wide integers and NULL report narrower target issues without writes or editor changes
+      ---
+      duration_ms: 46.923189
+      type: 'test'
+      ...
+    # Subtest: each signed/unsigned width accepts endpoints and rejects adjacent values, matching preview
+    ok 2 - each signed/unsigned width accepts endpoints and rejects adjacent values, matching preview
+      ---
+      duration_ms: 258.263536
+      type: 'test'
+      ...
+    # Subtest: target drift updates bounds and plan identity while strings and auto-generated NULL remain unreviewed
+    ok 3 - target drift updates bounds and plan identity while strings and auto-generated NULL remain unreviewed
+      ---
+      duration_ms: 41.556989
+      type: 'test'
+      ...
+    # Subtest: DECIMAL exact endpoints retain all digits and trailing zeros do not imply value loss
+    ok 4 - DECIMAL exact endpoints retain all digits and trailing zeros do not imply value loss
+      ---
+      duration_ms: 266.169395
+      type: 'test'
+      ...
+    # Subtest: DECIMAL scale loss is blocked before silent rounding and target drift updates the proposal
+    ok 5 - DECIMAL scale loss is blocked before silent rounding and target drift updates the proposal
+      ---
+      duration_ms: 45.780361
+      type: 'test'
+      ...
+    # Subtest: strict numeric strings preserve native BIGINT/DECIMAL backups and leave other conversion forms unknown
+    ok 6 - strict numeric strings preserve native BIGINT/DECIMAL backups and leave other conversion forms unknown
+      ---
+      duration_ms: 175.685455
+      type: 'test'
+      ...
+    1..6
+ok 12 - value bounds integration: read-only preview agrees with strict integer ranges on real server
+  ---
+  duration_ms: 866.203344
+  type: 'test'
+  ...
+# Subtest: table search matches grid, explicit COUNT and streamed export on a real server
+    # Subtest: contains all literal characters
+    ok 1 - contains all literal characters
+      ---
+      duration_ms: 12.563922
+      type: 'test'
+      ...
+    # Subtest: prefix preserves text collation
+    ok 2 - prefix preserves text collation
+      ---
+      duration_ms: 3.703036
+      type: 'test'
+      ...
+    # Subtest: all-column prefix
+    ok 3 - all-column prefix
+      ---
+      duration_ms: 3.151099
+      type: 'test'
+      ...
+    # Subtest: exact text
+    ok 4 - exact text
+      ---
+      duration_ms: 3.683252
+      type: 'test'
+      ...
+    # Subtest: literal percent
+    ok 5 - literal percent
+      ---
+      duration_ms: 1.940759
+      type: 'test'
+      ...
+    # Subtest: literal underscore
+    ok 6 - literal underscore
+      ---
+      duration_ms: 1.829513
+      type: 'test'
+      ...
+    # Subtest: literal escape
+    ok 7 - literal escape
+      ---
+      duration_ms: 1.917688
+      type: 'test'
+      ...
+    # Subtest: literal backslash
+    ok 8 - literal backslash
+      ---
+      duration_ms: 2.026666
+      type: 'test'
+      ...
+    # Subtest: NULL differs from empty and NULL text
+    ok 9 - NULL differs from empty and NULL text
+      ---
+      duration_ms: 3.534756
+      type: 'test'
+      ...
+    # Subtest: not NULL includes empty and NULL text
+    ok 10 - not NULL includes empty and NULL text
+      ---
+      duration_ms: 3.832046
+      type: 'test'
+      ...
+    # Subtest: NULL source column
+    ok 11 - NULL source column
+      ---
+      duration_ms: 2.442721
+      type: 'test'
+      ...
+    # Subtest: exact DECIMAL retains digits
+    ok 12 - exact DECIMAL retains digits
+      ---
+      duration_ms: 3.02348
+      type: 'test'
+      ...
+    # Subtest: nested OR inside AND
+    ok 13 - nested OR inside AND
+      ---
+      duration_ms: 7.460185
+      type: 'test'
+      ...
+    # Subtest: OR preserves grouping with quick search AND
+    ok 14 - OR preserves grouping with quick search AND
+      ---
+      duration_ms: 3.133178
+      type: 'test'
+      ...
+    # Subtest: NULL compared separately from empty text
+    ok 15 - NULL compared separately from empty text
+      ---
+      duration_ms: 2.46248
+      type: 'test'
+      ...
+    # Subtest: integer range and decimal comparison
+    ok 16 - integer range and decimal comparison
+      ---
+      duration_ms: 2.753216
+      type: 'test'
+      ...
+    # Subtest: DATE range retains SQL calendar values
+    ok 17 - DATE range retains SQL calendar values
+      ---
+      duration_ms: 2.855661
+      type: 'test'
+      ...
+    # Subtest: generated columns are readable predicates
+    ok 18 - generated columns are readable predicates
+      ---
+      duration_ms: 2.0532
+      type: 'test'
+      ...
+    # Subtest: advanced prefix escapes wildcards
+    ok 19 - advanced prefix escapes wildcards
+      ---
+      duration_ms: 1.393596
+      type: 'test'
+      ...
+    # Subtest: IN text uses exact members and native collation
+    ok 20 - IN text uses exact members and native collation
+      ---
+      duration_ms: 2.264862
+      type: 'test'
+      ...
+    # Subtest: NOT IN excludes NULL but retains empty text
+    ok 21 - NOT IN excludes NULL but retains empty text
+      ---
+      duration_ms: 2.830893
+      type: 'test'
+      ...
+    # Subtest: NULL text and empty values are separate list members
+    ok 22 - NULL text and empty values are separate list members
+      ---
+      duration_ms: 2.568084
+      type: 'test'
+      ...
+    # Subtest: OR adds NULL explicitly to NOT IN
+    ok 23 - OR adds NULL explicitly to NOT IN
+      ---
+      duration_ms: 2.739775
+      type: 'test'
+      ...
+    # Subtest: typed integer and generated column lists
+    ok 24 - typed integer and generated column lists
+      ---
+      duration_ms: 3.047168
+      type: 'test'
+      ...
+    # Subtest: typed decimal list retains long digits
+    ok 25 - typed decimal list retains long digits
+      ---
+      duration_ms: 3.203205
+      type: 'test'
+      ...
+    # Subtest: typed date list combines with quick search
+    ok 26 - typed date list combines with quick search
+      ---
+      duration_ms: 3.685942
+      type: 'test'
+      ...
+    # Subtest: non-key mixed sorts use OFFSET and export the same order with hidden PK retained in grid
+    ok 27 - non-key mixed sorts use OFFSET and export the same order with hidden PK retained in grid
+      ---
+      duration_ms: 4.360392
+      type: 'test'
+      ...
+    # Subtest: mixed-direction composite key pages forward/backward without duplicates and match export
+    ok 28 - mixed-direction composite key pages forward/backward without duplicates and match export
+      ---
+      duration_ms: 10.088148
+      type: 'test'
+      ...
+    # Subtest: disk-restored filters and hidden-column sorts match grid, count and projected export
+    ok 29 - disk-restored filters and hidden-column sorts match grid, count and projected export
+      ---
+      duration_ms: 5.427075
+      type: 'test'
+      ...
+    # Subtest: lists preserve native collations and timestamp timezone conversion across SQL mode variants
+    ok 30 - lists preserve native collations and timestamp timezone conversion across SQL mode variants
+      ---
+      duration_ms: 19.780258
+      type: 'test'
+      ...
+    1..30
+ok 13 - table search matches grid, explicit COUNT and streamed export on a real server
+  ---
+  duration_ms: 170.976841
+  type: 'test'
+  ...
+# Subtest: target FK integration: ordered composite pairs, rules, external dependencies and drift
+    # Subtest: qualified joins preserve two same-name composite constraints with distinct actions/scopes
+    ok 1 - qualified joins preserve two same-name composite constraints with distinct actions/scopes
+      ---
+      duration_ms: 36.669108
+      type: 'test'
+      ...
+    # Subtest: changing FK rules changes snapshot/plan identity while fixture rows and editor transaction remain intact
+    ok 2 - changing FK rules changes snapshot/plan identity while fixture rows and editor transaction remain intact
+      ---
+      duration_ms: 28.279166
+      type: 'test'
+      ...
+    # Subtest: missing rules and denied metadata cannot become a complete FK report or enable restore
+    ok 3 - missing rules and denied metadata cannot become a complete FK report or enable restore
+      ---
+      duration_ms: 32.320826
+      type: 'test'
+      ...
+    1..3
+ok 14 - target FK integration: ordered composite pairs, rules, external dependencies and drift
+  ---
+  duration_ms: 136.009718
+  type: 'test'
+  ...
+1..14
+# tests 120
+# suites 0
+# pass 120
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 6833.830508

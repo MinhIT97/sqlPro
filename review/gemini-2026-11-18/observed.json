@@ -1,0 +1,135 @@
+{
+  "mainForgedDiff": {
+    "planAccepted": true,
+    "applyResponse": {
+      "ok": false,
+      "error": {
+        "message": "sendToRenderer is not defined",
+        "code": "SYNC_EXECUTION_FAILED",
+        "sqlState": ""
+      }
+    },
+    "queries": [
+      {
+        "sql": "START TRANSACTION"
+      },
+      {
+        "sql": "DELETE FROM `sample`.`users` WHERE `id` = ?",
+        "params": [
+          1
+        ]
+      },
+      {
+        "sql": "COMMIT"
+      },
+      {
+        "sql": "ROLLBACK"
+      }
+    ],
+    "sendToRendererType": "undefined"
+  },
+  "syncDigestOmitsTable": {
+    "digestUnchanged": true,
+    "frozen": false
+  },
+  "diffQuota": {
+    "coverage": {
+      "version": 1,
+      "kind": "bounded-observation",
+      "complete": true,
+      "consistent": false,
+      "isolation": "read-committed",
+      "canSynchronize": false
+    },
+    "summary": {
+      "totalSource": 1,
+      "totalTarget": 1,
+      "identicalCount": 1,
+      "onlyInSourceCount": 0,
+      "differentCount": 0,
+      "onlyInTargetCount": 0
+    }
+  },
+  "generatorFulltext": {
+    "status": "ready",
+    "sql": [
+      "ALTER TABLE `users` ADD KEY `ft_body` (`body`);"
+    ]
+  },
+  "syncCommitFailure": {
+    "code": "ECONNRESET",
+    "partialCommit": false,
+    "committedCount": 0,
+    "queries": [
+      {
+        "sql": "START TRANSACTION"
+      },
+      {
+        "sql": "DELETE FROM `sample`.`users` WHERE `id` = ?",
+        "params": [
+          1
+        ]
+      },
+      {
+        "sql": "COMMIT"
+      },
+      {
+        "sql": "ROLLBACK"
+      }
+    ]
+  },
+  "cryptoHeader": {
+    "magicBytes": 14,
+    "headerSize": 61
+  },
+  "decryptFailure": {
+    "code": "BACKUP_DECRYPTION_FAILED",
+    "message": "Mật khẩu giải mã không chính xác hoặc dữ liệu backup đã bị can thiệp/hỏng.",
+    "destinationExists": false
+  },
+  "replicaFailure": {
+    "code": "REPLICA_CREATION_FAILED",
+    "originalSourceExists": false
+  },
+  "restoreTamper": {
+    "planStatus": "ready",
+    "result": {
+      "success": true,
+      "executedCount": 2,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": false
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "INSERT INTO `users` VALUES (9)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "restoreGlobalSet": {
+    "planStatus": "ready",
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "INSERT INTO `users` VALUES (1)",
+      "SET GLOBAL max_connections=999",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "restoreCrossDb": {
+    "planStatus": "ready",
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "INSERT INTO `other_db`.`users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  }
+}

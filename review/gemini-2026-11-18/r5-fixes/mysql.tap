@@ -1,0 +1,47 @@
+TAP version 13
+# Subtest: restore safety on real MySQL: context, selection markers and commit outcomes
+    # Subtest: unsafe dump mode and initial worker mode cannot drop existing data
+    ok 1 - unsafe dump mode and initial worker mode cannot drop existing data
+      ---
+      duration_ms: 42.385215
+      type: 'test'
+      ...
+    # Subtest: a user variable cannot disguise a rolled-back uncommitted insert
+    ok 2 - a user variable cannot disguise a rolled-back uncommitted insert
+      ---
+      duration_ms: 30.127762
+      type: 'test'
+      ...
+    # Subtest: native dump save/restore context and selective data commit work
+    ok 3 - native dump save/restore context and selective data commit work
+      ---
+      duration_ms: 22.197919
+      type: 'test'
+      ...
+    # Subtest: lost explicit/implicit commit ACK reports uncertainty for actually persisted data
+    ok 4 - lost explicit/implicit commit ACK reports uncertainty for actually persisted data
+      ---
+      duration_ms: 29.527557
+      type: 'test'
+      ...
+    # Subtest: inherited completion_type=CHAIN cannot silently open an untracked transaction
+    ok 5 - inherited completion_type=CHAIN cannot silently open an untracked transaction
+      ---
+      duration_ms: 30.855426
+      type: 'test'
+      ...
+    1..5
+ok 1 - restore safety on real MySQL: context, selection markers and commit outcomes
+  ---
+  duration_ms: 260.389153
+  type: 'test'
+  ...
+1..1
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 270.380407

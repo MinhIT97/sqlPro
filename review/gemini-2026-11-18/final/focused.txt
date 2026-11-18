@@ -1,0 +1,208 @@
+TAP version 13
+# Subtest: Large Data Benchmark: CSV streaming processes 50,000 rows with bounded memory
+ok 1 - Large Data Benchmark: CSV streaming processes 50,000 rows with bounded memory
+  ---
+  duration_ms: 103.540947
+  type: 'test'
+  ...
+# Subtest: Large Data Benchmark: JSON array streaming processes 30,000 objects with bounded memory
+ok 2 - Large Data Benchmark: JSON array streaming processes 30,000 objects with bounded memory
+  ---
+  duration_ms: 72.514105
+  type: 'test'
+  ...
+# Subtest: Large Data Benchmark: Keyset Reader chunking enforces strict row and byte limits
+ok 3 - Large Data Benchmark: Keyset Reader chunking enforces strict row and byte limits
+  ---
+  duration_ms: 2.454841
+  type: 'test'
+  ...
+# Subtest: encryption and successful decryption never overwrite an existing destination
+ok 4 - encryption and successful decryption never overwrite an existing destination
+  ---
+  duration_ms: 161.635483
+  type: 'test'
+  ...
+# Subtest: publication collision at the final instant preserves the concurrent destination
+ok 5 - publication collision at the final instant preserves the concurrent destination
+  ---
+  duration_ms: 38.484091
+  type: 'test'
+  ...
+# Subtest: new encrypted container authenticates header flags; unknown versions/ciphers and truncation fail closed
+ok 6 - new encrypted container authenticates header flags; unknown versions/ciphers and truncation fail closed
+  ---
+  duration_ms: 74.638469
+  type: 'test'
+  ...
+# Subtest: legacy V1 containers remain readable without changing their bytes
+ok 7 - legacy V1 containers remain readable without changing their bytes
+  ---
+  duration_ms: 70.311215
+  type: 'test'
+  ...
+# Subtest: empty backups round-trip with and without compression
+ok 8 - empty backups round-trip with and without compression
+  ---
+  duration_ms: 150.290763
+  type: 'test'
+  ...
+# Subtest: cron rejects partial numbers and malformed ranges instead of scheduling a different time
+ok 9 - cron rejects partial numbers and malformed ranges instead of scheduling a different time
+  ---
+  duration_ms: 0.929384
+  type: 'test'
+  ...
+# Subtest: cron day fields use OR when both restricted; Sunday 7 and DST transitions are supported
+ok 10 - cron day fields use OR when both restricted; Sunday 7 and DST transitions are supported
+  ---
+  duration_ms: 105.869004
+  type: 'test'
+  ...
+# Subtest: Data Diff never exposes raw error messages even when the code is allowed
+ok 11 - Data Diff never exposes raw error messages even when the code is allowed
+  ---
+  duration_ms: 0.181213
+  type: 'test'
+  ...
+# Subtest: completed Data Diff status crosses structured-clone IPC and callers cannot mutate its stored report
+ok 12 - completed Data Diff status crosses structured-clone IPC and callers cannot mutate its stored report
+  ---
+  duration_ms: 5.830331
+  type: 'test'
+  ...
+# Subtest: Data Diff exposes no completed report while closing, and a failed close never becomes success
+ok 13 - Data Diff exposes no completed report while closing, and a failed close never becomes success
+  ---
+  duration_ms: 2.829357
+  type: 'test'
+  ...
+# Subtest: Data Diff reset invalidates immediately and closes a connect that completes late
+ok 14 - Data Diff reset invalidates immediately and closes a connect that completes late
+  ---
+  duration_ms: 2.678804
+  type: 'test'
+  ...
+# Subtest: Data Diff deadlines and target drift prevent further database reads
+ok 15 - Data Diff deadlines and target drift prevent further database reads
+  ---
+  duration_ms: 21.312369
+  type: 'test'
+  ...
+# Subtest: missing engine proof never becomes InnoDB and collation-dependent primary keys are blocked
+ok 16 - missing engine proof never becomes InnoDB and collation-dependent primary keys are blocked
+  ---
+  duration_ms: 0.653476
+  type: 'test'
+  ...
+# Subtest: executor rejects caller plans, missing Main hooks, preview/disabled statements and FK override before creating workers
+ok 17 - executor rejects caller plans, missing Main hooks, preview/disabled statements and FK override before creating workers
+  ---
+  duration_ms: 4.527277
+  type: 'test'
+  ...
+# Subtest: unknown DDL driver errors are uncertain, while a failed precondition read has not dispatched DDL
+ok 18 - unknown DDL driver errors are uncertain, while a failed precondition read has not dispatched DDL
+  ---
+  duration_ms: 4.419167
+  type: 'test'
+  ...
+# Subtest: profile drift during a precondition blocks the DDL and a hung observer cannot retain the worker
+ok 19 - profile drift during a precondition blocks the DDL and a hung observer cannot retain the worker
+  ---
+  duration_ms: 4.07503
+  type: 'test'
+  ...
+# Subtest: token is reserved before admission awaits and cannot replay even after failure
+ok 20 - token is reserved before admission awaits and cannot replay even after failure
+  ---
+  duration_ms: 0.510175
+  type: 'test'
+  ...
+# Subtest: admitted plan is detached and progress observers cannot mutate ledger or cause a false failed DDL
+ok 21 - admitted plan is detached and progress observers cannot mutate ledger or cause a false failed DDL
+  ---
+  duration_ms: 1.613332
+  type: 'test'
+  ...
+# Subtest: a worker rejecting with no error object never becomes a successful DDL
+ok 22 - a worker rejecting with no error object never becomes a successful DDL
+  ---
+  duration_ms: 1.166089
+  type: 'test'
+  ...
+# Subtest: async progress failures are contained; cancellation during the final notification retains executed DDL
+ok 23 - async progress failures are contained; cancellation during the final notification retains executed DDL
+  ---
+  duration_ms: 4.131573
+  type: 'test'
+  ...
+# Subtest: pre-aborted jobs perform no admission or database work
+ok 24 - pre-aborted jobs perform no admission or database work
+  ---
+  duration_ms: 0.469218
+  type: 'test'
+  ...
+# Subtest: authoritative profile drift, unverified context and read-only changes across await stop writes
+ok 25 - authoritative profile drift, unverified context and read-only changes across await stop writes
+  ---
+  duration_ms: 0.887904
+  type: 'test'
+  ...
+# Subtest: Production approval must be a Main-issued receipt bound to exact plan, target and expiry
+ok 26 - Production approval must be a Main-issued receipt bound to exact plan, target and expiry
+  ---
+  duration_ms: 2.824699
+  type: 'test'
+  ...
+# Subtest: fresh source/target proof and safe worker settings are required, including a second source check before DDL
+ok 27 - fresh source/target proof and safe worker settings are required, including a second source check before DDL
+  ---
+  duration_ms: 7.534115
+  type: 'test'
+  ...
+# Subtest: SQL errors stop remaining statements; timeout on the first DDL is reported uncertain, not rolled back
+ok 28 - SQL errors stop remaining statements; timeout on the first DDL is reported uncertain, not rolled back
+  ---
+  duration_ms: 2.145008
+  type: 'test'
+  ...
+# Subtest: cancelling a hung DDL destroys/closes its worker, marks uncertainty and prevents later statements
+ok 29 - cancelling a hung DDL destroys/closes its worker, marks uncertainty and prevents later statements
+  ---
+  duration_ms: 1.167902
+  type: 'test'
+  ...
+# Subtest: profile changes after a successful DDL retain executed ledger and stop subsequent DDL
+ok 30 - profile changes after a successful DDL retain executed ledger and stop subsequent DDL
+  ---
+  duration_ms: 0.98452
+  type: 'test'
+  ...
+# Subtest: worker close failure is reported and plan digest binds SQL as well as target
+ok 31 - worker close failure is reported and plan digest binds SQL as well as target
+  ---
+  duration_ms: 1.141909
+  type: 'test'
+  ...
+# Subtest: cancel during target connect or collector stops promptly and closes worker; source verifier receives signal
+ok 32 - cancel during target connect or collector stops promptly and closes worker; source verifier receives signal
+  ---
+  duration_ms: 14.687836
+  type: 'test'
+  ...
+# Subtest: worker deadline interrupts a hung DDL and reports uncertain execution without retry
+ok 33 - worker deadline interrupts a hung DDL and reports uncertain execution without retry
+  ---
+  duration_ms: 15.887043
+  type: 'test'
+  ...
+1..33
+# tests 33
+# suites 0
+# pass 33
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 799.871047

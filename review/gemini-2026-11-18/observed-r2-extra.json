@@ -1,0 +1,121 @@
+{
+  "multiDrop": {
+    "planStatus": "ready",
+    "result": {
+      "success": true,
+      "executedCount": 2,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": false
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "DROP TABLE IF EXISTS `users`",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "DROP TABLE `users`, `other_db`.`victim`",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "caseDatabase": {
+    "planStatus": "ready",
+    "result": {
+      "success": true,
+      "executedCount": 2,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": false
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "INSERT INTO `SAMPLE`.`users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "sessionAutocommit": {
+    "planStatus": "ready",
+    "result": {
+      "success": true,
+      "executedCount": 2,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": false
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "SET AUTOCOMMIT=0",
+      "INSERT INTO `users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "lateFileSwap": {
+    "planStatus": "ready",
+    "result": {
+      "success": true,
+      "executedCount": 2,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": false
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "INSERT INTO `users` VALUES (9)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "profileDrift": {
+    "result": {
+      "success": true,
+      "executedCount": 2,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": false
+    },
+    "profileReadOnly": true,
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "INSERT INTO `users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "replicaOverwrite": {
+    "verified": true,
+    "destinationContent": "NEW BACKUP"
+  },
+  "cancelTransfer": {
+    "canceled": true,
+    "afterCancel": false,
+    "afterReset": false
+  },
+  "approval": {
+    "receiptDespiteCancel": true,
+    "authorized": {
+      "planToken": "x",
+      "planDigest": "claimed",
+      "authorizedAt": 1794976230347
+    }
+  },
+  "syncShallowFreeze": {
+    "frozen": true,
+    "operationFrozen": false,
+    "targetDatabase": "changed_after_plan",
+    "digestMatches": false
+  },
+  "asyncProgress": {
+    "success": true,
+    "unhandledRejection": "fixture observer rejection"
+  }
+}

@@ -12,7 +12,7 @@
 
 const crypto = require('node:crypto');
 const { RestoreDependencyGraph } = require('./restore-dependency-graph.cjs');
-const { createTarget, scrubSql, stripLeadingComments } = require('./sql-script.cjs');
+const { createTarget, scrubSql, stripLeadingComments, parseDropTargets, parseAlterRename, parseRenameTable, parseQualifiedIdentifier } = require('./sql-script.cjs');
 const { analyzeTableColumns } = require('./restore-selection-columns.cjs');
 
 const MAX_OBJECTS_PER_TYPE = 5000;
@@ -20,6 +20,11 @@ const MAX_FINDINGS = 100;
 
 const IDENTIFIER_PATTERN = '(?:`(?:[^`]|``)+`|[\\p{L}\\p{N}_$]+)';
 const REFERENCE_PATTERN = `${IDENTIFIER_PATTERN}(?:\\s*\\.\\s*${IDENTIFIER_PATTERN})?`;
+
+const CREATE_TARGET_PATTERN = new RegExp(
+  `^(?:CREATE\\s+(?:OR\\s+REPLACE\\s+)?(?:TEMPORARY\\s+)?(?:(?:ALGORITHM\\s*=\\s*\\w+|SQL\\s+SECURITY\\s+(?:DEFINER|INVOKER)|DEFINER\\s*=\\s*(?:\`[^\`]+\`|'[^']+'|"[^"]+"|[A-Za-z0-9_@$]+))\\s+)*(TABLE|VIEW|TRIGGER|PROCEDURE|FUNCTION|EVENT)\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?)(?:(\`[^\`]+\`|\\w+)\\s*\\.\\s*)?(\`[^\`]+\`|\\w+)`,
+  'i'
+);
 
 function unquote(val) {
   const s = String(val || '').trim();
@@ -181,20 +186,73 @@ class RestoreObjectInventory {
 
     const target = createTarget(text);
     const command = (/^([A-Za-z]+)/.exec(scrubSql(text)) || [])[1]?.toUpperCase() || '';
+    const dropInfo = command === 'DROP' ? parseDropTargets(text) : null;
 
     const entry = {
       number: statementNumber,
       command,
-      type: target?.type || 'unknown',
-      name: target?.name || null,
+      type: target?.type || dropInfo?.type || 'unknown',
+      name: target?.name || dropInfo?.targets?.[0]?.name || null,
       sql: text
     };
     this.statements.push(entry);
 
-    if (command === 'CREATE' && target) {
-      this.recordCreate(text, target, statementNumber, entry);
+    if (dropInfo) {
+      for (const t of dropInfo.targets) {
+        if (t.schema && this.database && t.schema !== this.database) {
+          this.finding('RESTORE_CROSS_DATABASE_BLOCKED', statementNumber, t.name, `Lệnh DROP trỏ tới database khác (${t.schema}), không khớp database đích (${this.database}).`);
+        }
+        this.recordDrop(text, { type: dropInfo.type, name: t.name }, statementNumber, entry);
+      }
+      return entry;
+    }
+
+    if (command === 'CREATE') {
+      const createMatch = CREATE_TARGET_PATTERN.exec(text);
+      if (createMatch) {
+        const schema = createMatch[2] ? unquote(createMatch[2]) : null;
+        if (schema && this.database && schema !== this.database) {
+          this.finding('RESTORE_CROSS_DATABASE_BLOCKED', statementNumber, unquote(createMatch[3]), `Lệnh CREATE trỏ tới database khác (${schema}), không khớp database đích (${this.database}).`);
+        }
+      }
+      if (target) {
+        this.recordCreate(text, target, statementNumber, entry);
+      }
     } else if (command === 'DROP' && target) {
+      if (target.schema && this.database && target.schema !== this.database) {
+        this.finding('RESTORE_CROSS_DATABASE_BLOCKED', statementNumber, target.name, `Lệnh DROP trỏ tới database khác (${target.schema}), không khớp database đích (${this.database}).`);
+      }
       this.recordDrop(text, target, statementNumber, entry);
+    } else if (command === 'ALTER') {
+      const alterRename = parseAlterRename(text);
+      if (alterRename) {
+        if (alterRename.source?.schema && this.database && alterRename.source.schema !== this.database) {
+          this.finding('RESTORE_CROSS_DATABASE_BLOCKED', statementNumber, alterRename.source.name, `Lệnh ALTER TABLE trỏ tới database khác (${alterRename.source.schema}), không khớp database đích (${this.database}).`);
+        }
+        const allDests = alterRename.destinations && alterRename.destinations.length > 0
+          ? alterRename.destinations
+          : (alterRename.destination ? [alterRename.destination] : []);
+        for (const dst of allDests) {
+          if (dst?.schema && this.database && dst.schema !== this.database) {
+            this.finding('RESTORE_CROSS_DATABASE_BLOCKED', statementNumber, dst.name, `Lệnh ALTER TABLE RENAME trỏ tới database khác (${dst.schema}), không khớp database đích (${this.database}).`);
+          }
+        }
+        entry.name = alterRename.source?.name || null;
+        entry.destinationName = alterRename.destination?.name || null;
+        entry.destinations = allDests;
+      }
+    } else if (command === 'RENAME') {
+      const renameTable = parseRenameTable(text);
+      if (renameTable) {
+        for (const pair of renameTable.pairs) {
+          if (pair.source?.schema && this.database && pair.source.schema !== this.database) {
+            this.finding('RESTORE_CROSS_DATABASE_BLOCKED', statementNumber, pair.source.name, `Lệnh RENAME TABLE trỏ tới database khác (${pair.source.schema}), không khớp database đích (${this.database}).`);
+          }
+          if (pair.destination?.schema && this.database && pair.destination.schema !== this.database) {
+            this.finding('RESTORE_CROSS_DATABASE_BLOCKED', statementNumber, pair.destination.name, `Lệnh RENAME TABLE trỏ tới database đích khác (${pair.destination.schema}), không khớp database đích (${this.database}).`);
+          }
+        }
+      }
     } else if (command === 'INSERT' || command === 'REPLACE') {
       this.recordData(text, statementNumber, entry);
     } else if (command === 'SET') {
@@ -211,7 +269,7 @@ class RestoreObjectInventory {
   recordCreate(sql, target, statementNumber, entry) {
     const type = target.type;
     const name = target.name;
-    const key = name.toLowerCase();
+    const key = name;
 
     if (type === 'table') {
       let t = this.tables.get(key);
@@ -339,7 +397,7 @@ class RestoreObjectInventory {
 
   recordDrop(sql, target, statementNumber, entry) {
     const type = target.type;
-    const key = target.name.toLowerCase();
+    const key = target.name;
 
     const collection = type === 'table' ? this.tables
       : type === 'view' ? this.views
@@ -351,7 +409,15 @@ class RestoreObjectInventory {
     if (collection) {
       let item = collection.get(key);
       if (!item) {
-        item = { name: target.name, type, createStatements: 0, dropStatements: 0 };
+        item = {
+          name: target.name,
+          type,
+          createStatements: 0,
+          dropStatements: 0,
+          dependencies: [],
+          referencedTables: [],
+          calledRoutines: []
+        };
         collection.set(key, item);
       }
       item.dropStatements++;
@@ -363,8 +429,11 @@ class RestoreObjectInventory {
     const match = /\b(?:INSERT|REPLACE)\s+(?:INTO\s+)?([`\w$]+(?:\s*\.\s*[`\w$]+)?)/i.exec(scrubbed);
     if (match) {
       const parsed = parseReference(match[1]);
+      if (parsed.schema && this.database && parsed.schema !== this.database) {
+        this.finding('RESTORE_CROSS_DATABASE_BLOCKED', statementNumber, parsed.table, `Lệnh INSERT/REPLACE trỏ tới database khác (${parsed.schema}), không khớp database đích (${this.database}).`);
+      }
       if (parsed.table) {
-        const key = parsed.table.toLowerCase();
+        const key = parsed.table;
         let t = this.tables.get(key);
         if (!t) {
           t = { name: parsed.table, type: 'table', createStatements: 0, dataStatements: 0, dropStatements: 0, dependencies: [] };
@@ -554,30 +623,30 @@ class RestoreObjectInventory {
     let dropCount = 0;
 
     for (const name of selectedTables) {
-      const t = this.tables.get(name.toLowerCase());
+      const t = this.tables.get(name);
       if (t) {
         if (includeStructure) { createCount += t.createStatements; dropCount += t.dropStatements; }
         if (includeData) { dataCount += t.dataStatements; }
       }
     }
     for (const name of selectedViews) {
-      const v = this.views.get(name.toLowerCase());
+      const v = this.views.get(name);
       if (v && includeStructure) { createCount += v.createStatements; dropCount += v.dropStatements; }
     }
     for (const name of selectedFunctions) {
-      const f = this.functions.get(name.toLowerCase());
+      const f = this.functions.get(name);
       if (f && includeStructure) { createCount += f.createStatements; dropCount += f.dropStatements; }
     }
     for (const name of selectedProcedures) {
-      const p = this.procedures.get(name.toLowerCase());
+      const p = this.procedures.get(name);
       if (p && includeStructure) { createCount += p.createStatements; dropCount += p.dropStatements; }
     }
     for (const name of selectedTriggers) {
-      const tr = this.triggers.get(name.toLowerCase());
+      const tr = this.triggers.get(name);
       if (tr && includeStructure) { createCount += tr.createStatements; dropCount += tr.dropStatements; }
     }
     for (const name of selectedEvents) {
-      const ev = this.events.get(name.toLowerCase());
+      const ev = this.events.get(name);
       if (ev && includeStructure) { createCount += ev.createStatements; dropCount += ev.dropStatements; }
     }
 
@@ -640,33 +709,90 @@ class RestoreObjectInventory {
     const warnings = [];
 
     for (const finding of preview.findings) {
-      if (finding.code === 'MISSING_DEPENDENCY' || finding.code === 'CIRCULAR_DEPENDENCY') {
+      if (finding.code === 'MISSING_DEPENDENCY' || finding.code === 'CIRCULAR_DEPENDENCY' || finding.code === 'RESTORE_CROSS_DATABASE_BLOCKED' || finding.code === 'RESTORE_MIXED_SELECTION_BLOCKED') {
         blockers.push(finding);
       } else {
         warnings.push(finding);
       }
     }
 
+    // Check statements for multi-object DROP statements, ALTER RENAME, and RENAME TABLE with mixed selection
+    for (const s of this.statements) {
+      const dropTargets = parseDropTargets(s.sql);
+      if (dropTargets && dropTargets.targets.length > 1) {
+        const selectedCount = dropTargets.targets.filter(t => preview.selection.tables.includes(t.name)).length;
+        if (selectedCount > 0 && selectedCount < dropTargets.targets.length) {
+          blockers.push({
+            code: 'RESTORE_MIXED_SELECTION_BLOCKED',
+            statementNumber: s.number,
+            details: `Câu lệnh DROP đa đối tượng (${dropTargets.targets.map(t => t.name).join(', ')}) chứa đối tượng ngoài danh sách lựa chọn.`
+          });
+        }
+      }
+      const alterRename = parseAlterRename(s.sql);
+      if (alterRename) {
+        if (alterRename.source?.schema && this.database && alterRename.source.schema !== this.database) {
+          blockers.push({
+            code: 'RESTORE_CROSS_DATABASE_BLOCKED',
+            statementNumber: s.number,
+            details: `Lệnh ALTER TABLE trỏ tới database khác (${alterRename.source.schema}), không khớp database đích (${this.database}).`
+          });
+        }
+        const allDests = alterRename.destinations && alterRename.destinations.length > 0
+          ? alterRename.destinations
+          : (alterRename.destination ? [alterRename.destination] : []);
+        for (const dst of allDests) {
+          if (dst?.schema && this.database && dst.schema !== this.database) {
+            blockers.push({
+              code: 'RESTORE_CROSS_DATABASE_BLOCKED',
+              statementNumber: s.number,
+              details: `Lệnh ALTER TABLE RENAME trỏ tới database khác (${dst.schema}), không khớp database đích (${this.database}).`
+            });
+          }
+          const srcSel = preview.selection.tables.includes(alterRename.source.name);
+          const dstSel = preview.selection.tables.includes(dst.name);
+          if (srcSel !== dstSel) {
+            blockers.push({
+              code: 'RESTORE_MIXED_SELECTION_BLOCKED',
+              statementNumber: s.number,
+              details: `Lệnh ALTER TABLE RENAME chứa bảng ngoài danh sách lựa chọn: ${srcSel ? dst.name : alterRename.source.name}.`
+            });
+          }
+        }
+      }
+      const renameTable = parseRenameTable(s.sql);
+      if (renameTable && renameTable.pairs.length > 0) {
+        const allSel = renameTable.pairs.every(p => preview.selection.tables.includes(p.source.name) && preview.selection.tables.includes(p.destination.name));
+        const noneSel = renameTable.pairs.every(p => !preview.selection.tables.includes(p.source.name) && !preview.selection.tables.includes(p.destination.name));
+        if (!allSel && !noneSel) {
+          blockers.push({
+            code: 'RESTORE_MIXED_SELECTION_BLOCKED',
+            statementNumber: s.number,
+            details: 'Lệnh RENAME TABLE chứa bảng ngoài danh sách lựa chọn phục hồi.'
+          });
+        }
+      }
+    }
+
     const steps = [];
     let stepNumber = 1;
 
-    // Filter statements that belong to the selection
-    const selectedTableNames = new Set(preview.selection.tables.map(s => s.toLowerCase()));
-    const selectedViewNames = new Set(preview.selection.views.map(s => s.toLowerCase()));
-    const selectedFnNames = new Set(preview.selection.functions.map(s => s.toLowerCase()));
-    const selectedProcNames = new Set(preview.selection.procedures.map(s => s.toLowerCase()));
-    const selectedTriggerNames = new Set(preview.selection.triggers.map(s => s.toLowerCase()));
-    const selectedEventNames = new Set(preview.selection.events.map(s => s.toLowerCase()));
+    // Filter statements that belong to the selection with exact-case identity
+    const selectedTableNames = new Set(preview.selection.tables);
+    const selectedViewNames = new Set(preview.selection.views);
+    const selectedFnNames = new Set(preview.selection.functions);
+    const selectedProcNames = new Set(preview.selection.procedures);
+    const selectedTriggerNames = new Set(preview.selection.triggers);
+    const selectedEventNames = new Set(preview.selection.events);
 
     const isObjectSelected = (type, name) => {
       if (!name) return false;
-      const clean = name.toLowerCase();
-      if (type === 'table') return selectedTableNames.has(clean);
-      if (type === 'view') return selectedViewNames.has(clean);
-      if (type === 'function') return selectedFnNames.has(clean);
-      if (type === 'procedure') return selectedProcNames.has(clean);
-      if (type === 'trigger') return selectedTriggerNames.has(clean);
-      if (type === 'event') return selectedEventNames.has(clean);
+      if (type === 'table') return selectedTableNames.has(name);
+      if (type === 'view') return selectedViewNames.has(name);
+      if (type === 'function') return selectedFnNames.has(name);
+      if (type === 'procedure') return selectedProcNames.has(name);
+      if (type === 'trigger') return selectedTriggerNames.has(name);
+      if (type === 'event') return selectedEventNames.has(name);
       return false;
     };
 

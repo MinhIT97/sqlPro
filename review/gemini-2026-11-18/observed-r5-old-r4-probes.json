@@ -1,0 +1,143 @@
+{
+  "renameInsideString": {
+    "parser": {
+      "type": "table",
+      "source": {
+        "schema": null,
+        "name": "users"
+      },
+      "destination": {
+        "schema": "other_db",
+        "name": "victim"
+      },
+      "destinations": [
+        {
+          "schema": "other_db",
+          "name": "victim"
+        }
+      ]
+    },
+    "planStatus": "blocked",
+    "code": "RESTORE_PLAN_BLOCKED",
+    "queries": []
+  },
+  "quotedAutocommit": {
+    "planStatus": "ready",
+    "code": "RESTORE_UNCOMMITTED_TRANSACTION",
+    "executedCount": 2,
+    "partialCommit": true,
+    "targetChanged": true,
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "SET `AUTOCOMMIT`=0",
+      "INSERT INTO `users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "expressionAutocommit": {
+    "planStatus": "ready",
+    "code": "RESTORE_UNCOMMITTED_TRANSACTION",
+    "executedCount": 2,
+    "partialCommit": true,
+    "targetChanged": true,
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "SET AUTOCOMMIT=(0)",
+      "INSERT INTO `users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "dropThenContextDrift": {
+    "planStatus": "ready",
+    "code": "CONNECTION_READ_ONLY",
+    "executedCount": 1,
+    "partialCommit": true,
+    "targetChanged": true,
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "DROP TABLE IF EXISTS `users`",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "firstDmlLostAck": {
+    "planStatus": "ready",
+    "code": "ECONNRESET",
+    "executedCount": 0,
+    "partialCommit": true,
+    "targetChanged": true,
+    "executionUncertain": true,
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "INSERT INTO `users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "cancelHungConnect": {
+    "settledBeforeRelease": true,
+    "response": {
+      "planStatus": "ready",
+      "code": "QUERY_CANCELED",
+      "executedCount": 0,
+      "partialCommit": false,
+      "targetChanged": false,
+      "queries": []
+    }
+  },
+  "rawDeadline": {
+    "settledAfterDeadline": true,
+    "response": {
+      "planStatus": "ready",
+      "code": "STATEMENT_TIMEOUT",
+      "executedCount": 0,
+      "partialCommit": true,
+      "targetChanged": true,
+      "executionUncertain": true,
+      "queries": [
+        "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+        "SET FOREIGN_KEY_CHECKS=0",
+        "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+        "SET FOREIGN_KEY_CHECKS=1",
+        "SET SESSION sql_mode=?"
+      ]
+    }
+  },
+  "mainParserBypass": {
+    "response": {
+      "ok": false,
+      "error": {
+        "message": "Kế hoạch phục hồi chưa sẵn sàng hoặc bị chặn.",
+        "code": "RESTORE_PLAN_BLOCKED",
+        "sqlState": ""
+      }
+    },
+    "queries": []
+  },
+  "mainLostAckProjection": {
+    "ok": false,
+    "error": {
+      "message": "Kết nối bị đóng bởi máy chủ.",
+      "code": "ECONNRESET",
+      "sqlState": "",
+      "executedCount": 0,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": true,
+      "executionUncertain": true
+    }
+  },
+  "replicaPublication": {
+    "originalContent": "CONCURRENT BACKUP",
+    "newReplicaContent": "NEW BACKUP",
+    "usesDifferentPath": true
+  }
+}

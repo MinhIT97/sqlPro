@@ -1,0 +1,135 @@
+{
+  "alterRenameOutside": {
+    "planStatus": "ready",
+    "result": {
+      "success": true,
+      "executedCount": 2,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": false
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "ALTER TABLE `users` RENAME TO `other_db`.`victim`",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "caseTable": {
+    "planStatus": "ready",
+    "result": {
+      "success": true,
+      "executedCount": 2,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": false
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "INSERT INTO `Users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "autocommitFalse": {
+    "planStatus": "ready",
+    "result": {
+      "success": true,
+      "executedCount": 2,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": false
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "SET AUTOCOMMIT=FALSE",
+      "INSERT INTO `users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "commitChain": {
+    "planStatus": "ready",
+    "result": {
+      "success": true,
+      "executedCount": 4,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": false
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "START TRANSACTION",
+      "INSERT INTO `users` VALUES (1)",
+      "COMMIT AND CHAIN",
+      "INSERT INTO `users` VALUES (2)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "firstDdlTimeout": {
+    "planStatus": "ready",
+    "code": "ECONNRESET",
+    "partialCommit": false,
+    "targetChanged": false,
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "productionWithoutApproval": {
+    "planStatus": "ready",
+    "response": {
+      "ok": true,
+      "data": {
+        "success": true,
+        "executedCount": 2,
+        "skippedCount": 0,
+        "targetChanged": true,
+        "partialCommit": false
+      }
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "INSERT INTO `users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "cancelHungDdl": {
+    "cancelResult": true,
+    "settledBeforeRelease": false,
+    "response": {
+      "ok": false,
+      "error": {
+        "message": "Đã hủy truy vấn.",
+        "code": "QUERY_CANCELED",
+        "sqlState": ""
+      }
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "replicaRace": {
+    "verified": true,
+    "destinationContent": "NEW BACKUP"
+  }
+}

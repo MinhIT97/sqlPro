@@ -1,0 +1,120 @@
+{
+  "modeParser": {
+    "sql": "ALTER TABLE `users` COMMENT='x\\', RENAME TO `other_db`.`victim` -- '\n;",
+    "parse": {
+      "type": "table",
+      "source": {
+        "schema": null,
+        "name": "users"
+      },
+      "destination": null,
+      "destinations": []
+    },
+    "planStatus": "ready",
+    "result": {
+      "success": true,
+      "executedCount": 2,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": false
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "SET SQL_MODE='NO_BACKSLASH_ESCAPES'",
+      "ALTER TABLE `users` COMMENT='x\\', RENAME TO `other_db`.`victim` -- '",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "userVariableAutocommit": {
+    "planStatus": "ready",
+    "result": {
+      "success": true,
+      "executedCount": 2,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": false
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "SET AUTOCOMMIT=0",
+      "SET @autocommit=1",
+      "INSERT INTO `users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "defaultAutocommit": {
+    "staticValue": true,
+    "planStatus": "ready",
+    "result": {
+      "success": true,
+      "executedCount": 2,
+      "skippedCount": 0,
+      "targetChanged": true,
+      "partialCommit": false
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "SET AUTOCOMMIT=DEFAULT",
+      "INSERT INTO `users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "commitLostAck": {
+    "planStatus": "ready",
+    "code": "ECONNRESET",
+    "partialCommit": false,
+    "targetChanged": true,
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "START TRANSACTION",
+      "INSERT INTO `users` VALUES (1)",
+      "COMMIT",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "lateConnectAfterTimeout": {
+    "beforeRelease": {
+      "planStatus": "ready",
+      "code": "STATEMENT_TIMEOUT",
+      "partialCommit": false,
+      "targetChanged": false,
+      "queries": []
+    },
+    "closeCountBeforeRelease": 2,
+    "closeCountAfterRelease": 2,
+    "connectionOpenAfterLateCompletion": true
+  },
+  "mainSqlMode": {
+    "planStatus": "ready",
+    "response": {
+      "ok": true,
+      "data": {
+        "success": true,
+        "executedCount": 2,
+        "skippedCount": 0,
+        "targetChanged": true,
+        "partialCommit": false
+      }
+    },
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "SET SQL_MODE='NO_BACKSLASH_ESCAPES'",
+      "ALTER TABLE `users` COMMENT='x\\', RENAME TO `other_db`.`victim` -- '",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  }
+}

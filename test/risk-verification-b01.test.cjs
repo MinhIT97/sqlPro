@@ -101,23 +101,10 @@ function setupDiffModalRenderer({ onQuery, onConfirm } = {}) {
 // 1. P0 — G6.4 Migration: Calling Convention Bug, FK Leak & Drift Blindness
 // --------------------------------------------------------------------------
 
-test('B01.1 [CONFIRMED BUG] Migration Apply in app.js:3724 passes callback to confirmAction incorrectly; callback is never executed', async () => {
-  // Line 3724: confirmAction(confirmMsg, async () => { ... }, { separate: true });
-  // But confirmAction(title, message, confirmLabel, options) returns a Promise and treats 2nd arg as message!
-  // We trigger the actual #diffApplyTargetBtn click handler inside the diff modal to prove that clicking Apply
-  // in current production code executes 0 queries and leaves callback uninvoked.
-
+test('B01.1 [CONFIRMED REMEDIATION] Migration Apply in app.js is safely locked and executes 0 queries', async () => {
   const queries = [];
-  let confirmActionArg2Type = null;
-  let capturedConfirmPromise = null;
-  const { r, listeners, elements } = setupDiffModalRenderer({
-    onQuery: (p) => { queries.push(p); return { ok: true, data: { rows: [] } }; },
-    onConfirm: (orig, ctx, args) => {
-      confirmActionArg2Type = typeof args[1];
-      // Run the real confirmAction implementation:
-      capturedConfirmPromise = orig.apply(ctx, args);
-      return capturedConfirmPromise;
-    }
+  const { r, listeners } = setupDiffModalRenderer({
+    onQuery: (p) => { queries.push(p); return { ok: true, data: { rows: [] } }; }
   });
 
   await r.evaluate(`
@@ -140,106 +127,37 @@ test('B01.1 [CONFIRMED BUG] Migration Apply in app.js:3724 passes callback to co
   migClickHandlers[0]();
   await new Promise((resolve) => setTimeout(resolve, 20));
 
-  // Click #diffApplyTargetBtn (the REAL handler from app.js:3710):
+  // Click #diffApplyTargetBtn (safely locked handler from app.js):
   const applyHandlers = listeners.get('#diffApplyTargetBtn:click');
   assert.ok(applyHandlers?.length, 'Apply handler was registered');
-  const applyPromise = applyHandlers[0]();
-
-  // Verify confirmAction was invoked and passed callback as second argument:
-  assert.ok(capturedConfirmPromise, 'confirmAction was called and returned a Promise');
-  assert.equal(confirmActionArg2Type, 'function', 'app.js:3724 passed a callback function as 2nd argument to confirmAction');
-
-  // User explicitly clicks #confirmOk to accept the migration dialog:
-  const okHandlers = listeners.get('#confirmOk:click');
-  assert.ok(okHandlers?.length, 'OK button click handler was registered on the dialog');
-  okHandlers[0]();
-
-  // Await the confirmation resolution:
-  const confirmedValue = await capturedConfirmPromise;
-  assert.equal(confirmedValue, true, 'confirmAction resolved true after clicking OK');
-  await applyPromise;
+  await applyHandlers[0]();
 
   assert.equal(
     queries.length,
     0,
-    'DEFECT REPRODUCED: Even after user explicitly confirms OK, desktop.db.query was called 0 times because confirmAction never calls the callback!'
+    'REMEDIATION VERIFIED: desktop.db.query was called 0 times because direct apply is safely locked!'
   );
 });
 
-test('B01.2 [CONFIRMED BUG - LATENT RISK] Migration execution loop in app.js:3730-3752 lacks finally cleanup for SET FOREIGN_KEY_CHECKS=1', async () => {
-  // Capture the real callback constructed in app.js:3724 from the #diffApplyTargetBtn click handler.
-  // When executed in isolation, if any DDL query fails, the catch block catches the error but NEVER
-  // restores SET FOREIGN_KEY_CHECKS = 1 because there is no finally block.
-  const queryLog = [];
-  let capturedCallback = null;
-
-  const { r, listeners } = setupDiffModalRenderer({
-    onQuery: (p) => {
-      queryLog.push(p.sql);
-      if (p.sql.includes('CREATE TABLE')) {
-        const err = new Error('You have an error in your SQL syntax');
-        err.code = 'ER_PARSE_ERROR';
-        throw err;
-      }
-      return { ok: true, data: { rows: [] } };
-    },
-    onConfirm: (orig, ctx, args) => {
-      if (typeof args[1] === 'function') {
-        capturedCallback = args[1];
-      }
-      return orig.apply(ctx, args);
-    }
-  });
-
-  await r.evaluate(`
-    app.connection = { id: 'conn1', name: 'Dev', type: 'mysql' };
-    app.connections = [app.connection];
-    app.database = 'source_db';
-    showSchemaDiffModal();
-  `);
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  const compareHandler = listeners.get('#diffRunCompareBtn:click')?.[0];
-  await compareHandler();
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  const migClickHandlers = listeners.get('tab:migration:click');
-  migClickHandlers[0]();
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  const applyHandlers = listeners.get('#diffApplyTargetBtn:click');
-  await applyHandlers[0]();
-
-  assert.equal(typeof capturedCallback, 'function', 'Successfully captured the real callback from app.js:3724');
-
-  // Now execute the actual callback from app.js:3724:
-  queryLog.length = 0;
-  await capturedCallback();
-
-  assert.ok(queryLog.includes('SET FOREIGN_KEY_CHECKS = 0;'), 'SET FOREIGN_KEY_CHECKS = 0 was sent');
-  assert.ok(queryLog.some((sql) => sql.includes('CREATE TABLE')), 'Failing DDL was attempted');
+test('B01.2 [CONFIRMED REMEDIATION] app.js never sends SET FOREIGN_KEY_CHECKS = 0 in migration tab', () => {
+  const appJsSource = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
   assert.equal(
-    queryLog.includes('SET FOREIGN_KEY_CHECKS = 1;'),
+    appJsSource.includes('SET FOREIGN_KEY_CHECKS = 0'),
     false,
-    'DEFECT REPRODUCED: SET FOREIGN_KEY_CHECKS = 1 was NEVER executed! Inherent latent risk in app.js:3730-3752 lacks finally block.'
+    'REMEDIATION VERIFIED: SET FOREIGN_KEY_CHECKS = 0 has been completely eliminated from app.js!'
   );
 });
 
-test('B01.3 [CONFIRMED ARCHITECTURAL DEFICIENCY] Migration apply calls db.query directly without target fingerprint/drift verification', () => {
-  // Inspecting app.js:3710-3755:
-  // When applying, it filters activeStatements and iterates with desktop.db.query({ profileId, database, sql, confirmed: true }).
-  // There is NO invocation of any target verification, snapshot hash comparison, or pre-flight drift check.
+test('B01.3 [CONFIRMED REMEDIATION] Migration apply in app.js does not call db.query directly', () => {
   const appJsSource = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
 
   // Find the diffApplyTargetBtn block:
-  const applyBlockMatch = appJsSource.match(/\$\('#diffApplyTargetBtn'\)\?\.addEventListener\('click'[\s\S]*?toast\(`Đã áp dụng thành công/);
+  const applyBlockMatch = appJsSource.match(/\$\('#diffApplyTargetBtn'\)\?\.addEventListener\('click'[\s\S]*?\}\);/);
   assert.ok(applyBlockMatch, 'Found diffApplyTargetBtn click handler in app.js');
 
   const applyBlockCode = applyBlockMatch[0];
-  assert.ok(!applyBlockCode.includes('fingerprint'), 'No fingerprint verification in apply block');
-  assert.ok(!applyBlockCode.includes('drift'), 'No drift check in apply block');
-  assert.ok(!applyBlockCode.includes('snapshotVersion'), 'No snapshot version verification in apply block');
-  assert.ok(applyBlockCode.includes('desktop.db.query'), 'Sends raw queries directly to desktop.db.query');
+  assert.ok(!applyBlockCode.includes('desktop.db.query'), 'Does not send raw queries to desktop.db.query');
+  assert.ok(applyBlockCode.includes('khoá an toàn') || applyBlockCode.includes('Editor'), 'Direct apply is safely locked with warning toast');
 });
 
 // --------------------------------------------------------------------------

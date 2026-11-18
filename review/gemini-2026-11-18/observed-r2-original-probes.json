@@ -1,0 +1,108 @@
+{
+  "mainForgedDiff": {
+    "planAccepted": true,
+    "applyResponse": {
+      "ok": false,
+      "error": {
+        "message": "Chức năng áp dụng đồng bộ dữ liệu (Data Sync Apply) đang khóa an toàn để hoàn thiện kiểm chứng.",
+        "code": "SYNC_APPLY_NOT_READY",
+        "sqlState": ""
+      }
+    },
+    "queries": [],
+    "sendToRendererType": "undefined"
+  },
+  "syncDigestOmitsTable": {
+    "digestUnchanged": false,
+    "frozen": true
+  },
+  "diffQuota": {
+    "coverage": {
+      "version": 1,
+      "kind": "bounded-observation",
+      "complete": false,
+      "consistent": false,
+      "isolation": "read-committed",
+      "canSynchronize": false
+    },
+    "summary": {
+      "totalSource": 1,
+      "totalTarget": 1,
+      "identicalCount": 1,
+      "onlyInSourceCount": 0,
+      "differentCount": 0,
+      "onlyInTargetCount": 0
+    }
+  },
+  "generatorFulltext": {
+    "status": "ready",
+    "sql": [
+      "ALTER TABLE `users` ADD FULLTEXT KEY `ft_body` (`body`);"
+    ]
+  },
+  "syncCommitFailure": {
+    "code": "ECONNRESET",
+    "partialCommit": true,
+    "committedCount": 0,
+    "queries": [
+      {
+        "sql": "START TRANSACTION"
+      },
+      {
+        "sql": "DELETE FROM `sample`.`users` WHERE `id` = ? AND `value` = ?",
+        "params": [
+          1,
+          "old"
+        ]
+      },
+      {
+        "sql": "COMMIT"
+      },
+      {
+        "sql": "ROLLBACK"
+      }
+    ]
+  },
+  "cryptoHeader": {
+    "magicBytes": 14,
+    "headerSize": 61
+  },
+  "decryptFailure": {
+    "code": "BACKUP_DECRYPTION_FAILED",
+    "message": "Mật khẩu giải mã không chính xác hoặc dữ liệu backup đã bị can thiệp/hỏng.",
+    "destinationExists": true
+  },
+  "replicaFailure": {
+    "code": "REPLICA_TARGET_CONFLICT",
+    "originalSourceExists": true
+  },
+  "restoreTamper": {
+    "planStatus": "ready",
+    "error": "RESTORE_FILE_CHANGED",
+    "message": "Nội dung tệp sao lưu đã bị thay đổi (mã băm không khớp). Chưa có dữ liệu nào được ghi.",
+    "queries": []
+  },
+  "restoreGlobalSet": {
+    "planStatus": "ready",
+    "error": "RESTORE_DANGEROUS_STATEMENT",
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "INSERT INTO `users` VALUES (1)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  },
+  "restoreCrossDb": {
+    "planStatus": "ready",
+    "error": "RESTORE_CROSS_DATABASE_BLOCKED",
+    "queries": [
+      "SELECT @@SESSION.foreign_key_checks AS foreignKeys, @@SESSION.sql_mode AS sqlMode",
+      "SET FOREIGN_KEY_CHECKS=0",
+      "CREATE TABLE `users` (`id` int PRIMARY KEY)",
+      "SET FOREIGN_KEY_CHECKS=1",
+      "SET SESSION sql_mode=?"
+    ]
+  }
+}

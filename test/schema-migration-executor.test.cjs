@@ -62,6 +62,32 @@ test('executor rejects caller plans, missing Main hooks, preview/disabled statem
   }
 });
 
+test('unknown DDL driver errors are uncertain, while a failed precondition read has not dispatched DDL', async () => {
+  for (const precondition of [false, true]) {
+    const r = fixture(), raw = r.worker.raw;
+    if (precondition) r.plan.statements[0].preCondition = { checkSql: 'SELECT precondition_marker', expectedCount: 0 };
+    r.worker.raw = sql => {
+      if (sql.includes('precondition_marker') || !sql.startsWith('SELECT')) throw Object.assign(new Error('unknown driver result'), { code: 'DRIVER_CUSTOM_ERROR' });
+      return raw(sql);
+    };
+    await assert.rejects(r.run(), err => err.code === 'DRIVER_CUSTOM_ERROR' && err.executionUncertain === !precondition && err.partialCommit === !precondition && err.executedCount === 0);
+  }
+});
+
+test('profile drift during a precondition blocks the DDL and a hung observer cannot retain the worker', async () => {
+  const r = fixture(), raw = r.worker.raw;
+  r.plan.statements[0].preCondition = { checkSql: 'SELECT precondition_marker', expectedCount: 0 };
+  r.worker.raw = async sql => {
+    if (sql.includes('precondition_marker')) { r.profiles.target.host = 'changed'; return { result: [] }; }
+    return raw(sql);
+  };
+  await assert.rejects(r.run(), { code: 'MIGRATION_CONTEXT_CHANGED' });
+  assert.equal(r.queries.some(sql => /^CREATE|^ALTER/.test(sql)), false);
+  const observer = fixture();
+  assert.equal((await observer.run({ onProgress: () => new Promise(() => {}) })).success, true);
+  assert.equal(observer.counts().closed, 1);
+});
+
 test('token is reserved before admission awaits and cannot replay even after failure', async () => {
   let resolve;
   const r = fixture({ consumePlan: () => new Promise(done => { resolve = done; }) });

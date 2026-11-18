@@ -2,7 +2,7 @@
 
 const crypto = require('node:crypto');
 const { assertWritable } = require('./connection-policy.cjs');
-const { DatabaseSession, isTimeoutOrConnectionError } = require('./database.cjs');
+const { DatabaseSession } = require('./database.cjs');
 const { SchemaSnapshotCollector, computeSchemaFingerprint } = require('./schema-snapshot.cjs');
 const { createWorkerGuard } = require('./schema-migration-worker.cjs');
 const error = (code, message) => Object.assign(new Error(message), { code });
@@ -139,10 +139,18 @@ class SchemaMigrationExecutor {
     };
     await verifySource();
 
-    const ledger = plan.statements.map((s, index) => ({ id: s.id || `stmt_${index + 1}`, sql: s.sql, status: 'pending', durationMs: null, error: null }));
+    const ledger = plan.statements.map((s, index) => ({
+      id: s.id || `stmt_${index + 1}`,
+      sql: s.sql,
+      preCondition: s.preCondition || null,
+      postCondition: s.postCondition || null,
+      status: 'pending',
+      durationMs: null,
+      error: null
+    }));
     let worker, workerGuard, executedCount = 0, executionUncertain = false, failure = null, cleanupError = null;
     const observerWarnings = [];
-    const query = sql => workerGuard.run(() => worker.raw(sql, [], timeoutMs), timeoutMs);
+    const query = (sql, params = []) => workerGuard.run(() => worker.raw(sql, params, timeoutMs), timeoutMs);
     try {
       current = await guard();
       checkApproval(current.target);
@@ -176,19 +184,48 @@ class SchemaMigrationExecutor {
         checkApproval(current.target);
         entry.status = 'executing';
         const started = Date.now();
+        let ddlState = 'not_sent';
         try {
+          if (entry.preCondition && typeof entry.preCondition.checkSql === 'string') {
+            const preResult = await query(entry.preCondition.checkSql, entry.preCondition.params || []);
+            const rows = preResult?.rows || preResult?.result || [];
+            const count = Array.isArray(rows) ? rows.length : (rows && typeof rows === 'object' ? 1 : 0);
+            const expected = entry.preCondition.expectedCount ?? 0;
+            if (count !== expected) {
+              throw error('MIGRATION_PRECONDITION_FAILED', `Tiền điều kiện migration không khớp cho statement ${entry.id} (kỳ vọng: ${expected}, thực tế: ${count}).`);
+            }
+            current = await guard();
+            checkApproval(current.target);
+          }
+          ddlState = 'in_flight';
           await query(entry.sql);
-          entry.status = 'executed';
+          ddlState = 'acknowledged';
           executedCount++;
+          if (entry.postCondition && typeof entry.postCondition.checkSql === 'string') {
+            const postResult = await query(entry.postCondition.checkSql, entry.postCondition.params || []);
+            const rows = postResult?.rows || postResult?.result || [];
+            const count = Array.isArray(rows) ? rows.length : (rows && typeof rows === 'object' ? 1 : 0);
+            const expected = entry.postCondition.expectedCount ?? 1;
+            if (count !== expected) {
+              throw error('MIGRATION_POSTCONDITION_FAILED', `Hậu điều kiện migration không đạt cho statement ${entry.id} (kỳ vọng: ${expected}, thực tế: ${count}).`);
+            }
+          }
+          entry.status = 'executed';
         } catch (err) {
-          executionUncertain = isTimeoutOrConnectionError(err) || !String(err.code || '').startsWith('ER_');
+          const actualErr = err || error('MIGRATION_EXECUTION_FAILED', 'Thực thi migration thất bại.');
+          const deterministic = ['MIGRATION_PRECONDITION_FAILED', 'MIGRATION_POSTCONDITION_FAILED'].includes(actualErr.code)
+            || (typeof actualErr.code === 'string' && actualErr.code.startsWith('ER_'));
+          executionUncertain = ddlState === 'in_flight' && !deterministic;
           entry.status = executionUncertain ? 'uncertain' : 'failed';
-          entry.error = String(err.code || 'MIGRATION_EXECUTION_FAILED');
-          throw err;
+          entry.error = String(actualErr.code || 'MIGRATION_EXECUTION_FAILED');
+          throw actualErr;
         } finally { entry.durationMs = Date.now() - started; }
         await guard();
         if (typeof onProgress === 'function') {
-          try { await onProgress(structuredClone({ executedCount, totalCount: ledger.length, currentStatement: entry })); }
+          try {
+            const pending = onProgress(structuredClone({ executedCount, totalCount: ledger.length, currentStatement: entry }));
+            if (pending && typeof pending.catch === 'function') pending.catch(() => observerWarnings.push('PROGRESS_CALLBACK_FAILED'));
+          }
           catch { observerWarnings.push('PROGRESS_CALLBACK_FAILED'); }
           await guard();
         }

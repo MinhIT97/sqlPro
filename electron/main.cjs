@@ -60,6 +60,7 @@ const {
   createSourceVerifier
 } = require('./schema-migration-admission.cjs');
 const { SchemaMigrationJobManager } = require('./schema-migration-jobs.cjs');
+const { SchemaMigrationOrchestrator } = require('./schema-migration-orchestrator.cjs');
 const schemaMigrationService = new SchemaMigrationService();
 const schemaMigrationAdmission = new SchemaMigrationAdmission();
 const schemaMigrationApproval = new SchemaMigrationApproval();
@@ -82,9 +83,16 @@ function stopBackupSchedules() {
   schemaMigrationAdmission.clear();
   schemaMigrationApproval.clear();
   schemaMigrationJobManager.clear();
+  schemaMigrationOrchestrator?.clear();
+  dataDiffService?.clear();
+  dataSyncPlanService?.clear();
+  restorePlanService?.clear();
+  operationApprovalManager?.clear();
   backupInspection.invalidate?.();
   scheduleServices?.scheduler.stop();
-  if (activeDatabaseTransfer?.scheduleId || ['backup-retention', 'backup-selection-preview'].includes(activeDatabaseTransfer?.operation)) cancelDatabaseTransfer(activeDatabaseTransfer);
+  if (activeDatabaseTransfer?.scheduleId || ['backup-retention', 'backup-selection-preview', 'selective-restore', 'restore-selective', 'data-sync'].includes(activeDatabaseTransfer?.operation)) {
+    cancelDatabaseTransfer(activeDatabaseTransfer);
+  }
 }
 
 async function runScheduledBackup(schedule, taskId) {
@@ -109,6 +117,175 @@ const backupInspection = new BackupInspection({
   stat:(filePath)=>fs.promises.stat(filePath),
   scan:(options)=>new DatabaseSession({}).scanRestoreInventoryInWorker({...options,dropExisting:false,selectionPreview:true})
 });
+
+const { RestorePlanService } = require('./restore-plan-service.cjs');
+const { RestoreSelectionExecutor } = require('./restore-selection-executor.cjs');
+
+class OperationApprovalManager {
+  constructor(options = {}) {
+    this.pending = new Map();
+    this.now = options.now || (() => Date.now());
+  }
+
+  clear() {
+    this.pending.clear();
+  }
+
+  prune() {
+    const now = this.now();
+    for (const [token, item] of this.pending) {
+      if (now >= item.expiresAt) this.pending.delete(token);
+    }
+  }
+
+  async requestApproval({ planType, plan, targetProfile, showConfirmDialog }) {
+    if (!plan || !targetProfile) throw new Error('Dữ liệu yêu cầu phê duyệt không hợp lệ.');
+    if (targetProfile.environment !== 'production') {
+      throw new Error('Chỉ yêu cầu phê duyệt khi thao tác trên môi trường Production.');
+    }
+    assertWritable(targetProfile);
+    if (!plan.planToken || !plan.planDigest) {
+      throw new Error('Kế hoạch thiếu planToken hoặc planDigest hợp lệ.');
+    }
+    let confirmed = false;
+    if (typeof showConfirmDialog === 'function') {
+      const res = await showConfirmDialog({
+        type: 'warning',
+        title: `Xác nhận thao tác Production [${planType}]`,
+        message: `Bạn có chắc chắn muốn thực thi thao tác [${planType}] trên CSDL Production "${targetProfile.name || targetProfile.id}" không?`,
+        buttons: ['Hủy bỏ', 'Xác nhận thực thi'],
+        defaultId: 0,
+        cancelId: 0
+      });
+      if (typeof res === 'boolean') {
+        confirmed = res;
+      } else if (res && typeof res === 'object') {
+        confirmed = res.response === 1;
+      }
+    }
+    if (!confirmed) {
+      return { approvalToken: null, canceled: true };
+    }
+
+    const hashPlanPayload = (p) => {
+      if (!p) return '';
+      const obj = {
+        planToken: p.planToken,
+        planDigest: p.planDigest,
+        targetScope: p.targetScope,
+        operations: p.operations,
+        steps: p.steps,
+        selection: p.selection
+      };
+      return crypto.createHash('sha256').update(JSON.stringify(obj)).digest('hex');
+    };
+
+    this.prune();
+    const approvalToken = crypto.randomBytes(24).toString('hex');
+    const expiresAt = Math.min(plan.expiresAt || (this.now() + 120000), this.now() + 120000);
+    this.pending.set(approvalToken, {
+      approvalToken,
+      planType,
+      planToken: plan.planToken,
+      planDigest: plan.planDigest,
+      planPayloadHash: hashPlanPayload(plan),
+      targetProfileId: targetProfile.id,
+      targetProfileFingerprint: plan.targetScope?.profileFingerprint,
+      expiresAt
+    });
+    return { approvalToken, expiresAt, canceled: false };
+  }
+
+  authorizeProduction({ planType, plan, approvalToken }) {
+    if (!approvalToken || typeof approvalToken !== 'string') {
+      return null;
+    }
+    this.prune();
+    const entry = this.pending.get(approvalToken);
+    this.pending.delete(approvalToken);
+    if (!entry || entry.expiresAt <= this.now()) {
+      return null;
+    }
+    const hashPlanPayload = (p) => {
+      if (!p) return '';
+      const obj = {
+        planToken: p.planToken,
+        planDigest: p.planDigest,
+        targetScope: p.targetScope,
+        operations: p.operations,
+        steps: p.steps,
+        selection: p.selection
+      };
+      return crypto.createHash('sha256').update(JSON.stringify(obj)).digest('hex');
+    };
+    if (entry.planType !== planType || entry.planToken !== plan.planToken || entry.planDigest !== plan.planDigest
+        || entry.targetProfileId !== plan.targetScope?.profileId
+        || entry.targetProfileFingerprint !== plan.targetScope?.profileFingerprint
+        || entry.planPayloadHash !== hashPlanPayload(plan)) {
+      return null;
+    }
+    return Object.freeze({
+      planToken: plan.planToken,
+      planDigest: plan.planDigest,
+      authorizedAt: this.now(),
+      expiresAt: entry.expiresAt
+    });
+  }
+}
+
+const operationApprovalManager = new OperationApprovalManager();
+
+const restorePlanService = new RestorePlanService({
+  store,
+  createSession: (profile) => new DatabaseSession(profile),
+  fingerprintProfile: (p) => productionProfileFingerprint(p)
+});
+
+const restoreSelectionExecutor = new RestoreSelectionExecutor({
+  consumePlan: (token) => restorePlanService.consumePlan(token),
+  getProfileWithSecrets: (id) => store.getWithSecrets(id),
+  fingerprintProfile: (p) => productionProfileFingerprint(p),
+  authorizeProduction: async ({ plan, approvalToken }) => {
+    const receipt = operationApprovalManager.authorizeProduction({ planType: 'selective-restore', plan, approvalToken });
+    if (!receipt) {
+      const err = new Error('Thiếu token phê duyệt Production gắn với kế hoạch.');
+      err.code = 'PRODUCTION_APPROVAL_REQUIRED';
+      throw err;
+    }
+    return receipt;
+  },
+  createSession: (profile) => new DatabaseSession(profile)
+});
+
+const { DataDiffService } = require('./data-diff-service.cjs');
+const dataDiffService = new DataDiffService({
+  store,
+  createSession: (profile) => new DatabaseSession(profile)
+});
+
+const { DataSyncPlanService } = require('./data-sync-plan-service.cjs');
+const { DataSyncExecutor } = require('./data-sync-executor.cjs');
+
+const dataSyncPlanService = new DataSyncPlanService({ store });
+const dataSyncExecutor = new DataSyncExecutor({
+  consumePlan: (token) => dataSyncPlanService.consumePlan(token),
+  getProfileWithSecrets: (id) => store.getWithSecrets(id),
+  fingerprintProfile: (p) => productionProfileFingerprint(p),
+  authorizeProduction: async ({ plan, approvalToken }) => {
+    const receipt = operationApprovalManager.authorizeProduction({ planType: 'data-sync', plan, approvalToken });
+    if (!receipt) {
+      const err = new Error('Thiếu token phê duyệt Production gắn với kế hoạch.');
+      err.code = 'PRODUCTION_APPROVAL_REQUIRED';
+      throw err;
+    }
+    return receipt;
+  },
+  createSession: (profile) => new DatabaseSession(profile)
+});
+
+const { BackupReplicaManager } = require('./backup-replica-manager.cjs');
+const { inspectBackupContainer, encryptBackupFile, decryptBackupFile } = require('./backup-crypto.cjs');
+const backupReplicaManager = new BackupReplicaManager();
 const { backupDirectory, backupName, listBackups, resolveBackup, copyBackup, verifyBackup, renameBackup, updateBackupAnnotations, deleteBackup } = require('./backup-catalog.cjs');
 
 const MAX_RENDERER_STATE_BYTES = 2 * 1024 * 1024;
@@ -226,7 +403,8 @@ function transferLabel(operation) {
 
 function claimDatabaseTransfer(details) {
   if (activeDatabaseTransfer) throw new Error('Một tác vụ database đang chạy. Hãy đợi tác vụ hoàn tất.');
-  const transfer = { canceled: false, pending: false, ...details };
+  const controller = new AbortController();
+  const transfer = { canceled: false, pending: false, controller, cancelController: controller, ...details };
   activeDatabaseTransfer = transfer;
   return transfer;
 }
@@ -266,7 +444,6 @@ function assertSessionProfile(current) {
   if (sessionProfileFingerprint(store.getWithSecrets(current.profileId)) !== current.profileFingerprint) throw profileTargetChanged();
 }
 
-const schemaMigrationSourceVerifier = createSourceVerifier();
 const schemaMigrationContextHooks = createMainContextHooks({
   store,
   openSessions,
@@ -277,10 +454,60 @@ const schemaMigrationContextHooks = createMainContextHooks({
   assertProfile: assertSessionProfile,
   ownsLease: (jobId, plan, entry) => schemaMigrationJobManager.ownsLease(jobId, plan, entry)
 });
+const schemaMigrationSourceVerifier = createSourceVerifier({
+  store,
+  createSession: (profile) => new DatabaseSession(profile),
+  createCollector: (session, context) => new SchemaSnapshotCollector(session, context),
+  fingerprintProfile: productionProfileFingerprint,
+  checkContext: (sourceScope) => {
+    const currentGeneration = typeof backupContextGeneration === 'number' ? backupContextGeneration : 0;
+    if (sourceScope.generation !== currentGeneration) return false;
+    const profile = store.getWithSecrets(sourceScope.profileId);
+    if (!profile || profile.id !== sourceScope.profileId) return false;
+    if (productionProfileFingerprint(profile) !== sourceScope.profileFingerprint) return false;
+    const entry = openSessions.get(sourceScope.profileId);
+    if (!entry || entry.sessionId !== sourceScope.sessionId || entry.session?.dead) return false;
+    try { assertSessionProfile(entry); } catch { return false; }
+    if (entry.session?.inTransaction || entry.session?.autocommit === false || entry.session?.activeTask || entry.exclusiveOperation || entry.productionWriteInProgress) return false;
+    return true;
+  }
+});
 schemaMigrationApproval.getProfileWithSecrets = (id) => store.getWithSecrets(id);
 schemaMigrationApproval.fingerprintProfile = productionProfileFingerprint;
 schemaMigrationApproval.checkContext = (plan) => schemaMigrationContextHooks.checkContext(plan);
 schemaMigrationApproval.getGeneration = () => backupContextGeneration;
+schemaMigrationApproval.showConfirmDialog = async (dialogOptions) => {
+  return dialog.showMessageBox(mainWindow, {
+    ...dialogOptions,
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  });
+};
+
+const schemaMigrationOrchestrator = new SchemaMigrationOrchestrator({
+  store,
+  sessionRegistry,
+  openSessions,
+  getGeneration: () => backupContextGeneration,
+  productionProfileFingerprint,
+  sessionProfileFingerprint,
+  assertSessionProfile,
+  createSession: (profile) => new DatabaseSession(profile),
+  createCollector: (session, context) => new SchemaSnapshotCollector(session, context),
+  showConfirmDialog: async (dialogOptions) => {
+    return dialog.showMessageBox(mainWindow, {
+      ...dialogOptions,
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true
+    });
+  },
+  sendProgress: sendDbProgress,
+  admission: schemaMigrationAdmission,
+  approval: schemaMigrationApproval,
+  jobManager: schemaMigrationJobManager
+});
 
 async function confirmProductionTransfer(profileId, database, filePath, operation, details) {
   const profile = store.getWithSecrets(profileId);
@@ -404,14 +631,28 @@ function confirmActiveTransactions(action = 'ngắt kết nối') {
 }
 
 function cancelDatabaseTransfer(transfer) {
+  if (!transfer) return false;
   if (transfer.operation === 'backup-selection-preview') {
     transfer.canceled = true;
-    transfer.controller.abort();
+    transfer.controller?.abort();
     void transfer.session?.close().catch(() => {});
     return true;
   }
-  if (transfer.operation === 'backup-retention') { transfer.canceled = true; transfer.controller?.abort(); return true; }
-  if(transfer.trialControl){transfer.canceled=true;return transfer.trialControl.cancel();}
+  if (['backup-retention', 'selective-restore', 'restore-selective', 'data-sync'].includes(transfer.operation)) {
+    transfer.canceled = true;
+    transfer.controller?.abort();
+    if (transfer.cancelController && transfer.cancelController !== transfer.controller) {
+      transfer.cancelController.abort();
+    }
+    if (transfer.session) {
+      void transfer.session.close().catch(() => {});
+    }
+    return true;
+  }
+  if (transfer.trialControl) {
+    transfer.canceled = true;
+    return transfer.trialControl.cancel();
+  }
   const session = transfer.session || openSessions.get(transfer.profileId)?.session;
   const canceled = session?.cancelTask(transfer.taskId) || transfer.pending;
   if (canceled) transfer.canceled = true;
@@ -647,6 +888,11 @@ function handle(channel, handler) {
           message: friendlyError(error),
           code: error && error.code ? String(error.code) : '',
           sqlState: error && error.sqlState ? String(error.sqlState) : '',
+          ...(error && typeof error.executedCount === 'number' ? { executedCount: error.executedCount } : {}),
+          ...(error && typeof error.skippedCount === 'number' ? { skippedCount: error.skippedCount } : {}),
+          ...(error && typeof error.targetChanged === 'boolean' ? { targetChanged: error.targetChanged } : {}),
+          ...(error && typeof error.partialCommit === 'boolean' ? { partialCommit: error.partialCommit } : {}),
+          ...(error && typeof error.executionUncertain === 'boolean' ? { executionUncertain: error.executionUncertain } : {}),
           ...(error && error.fingerprint ? { fingerprint: String(error.fingerprint) } : {}),
           ...(error && error.expectedFingerprint ? { expectedFingerprint: String(error.expectedFingerprint) } : {}),
           ...(error && error.partial ? { partial: error.partial } : {}),
@@ -1277,6 +1523,22 @@ handle('db:create-migration-plan', (payload) => {
 
 // Fail closed at the IPC boundary too: confirmed/production flags cannot enable DDL.
 handle('db:apply-migration-plan', () => schemaMigrationService.applyPlan());
+
+handle('db:migration-job-status', (payload) => {
+  if (!payload || typeof payload !== 'object' || typeof payload.jobId !== 'string' || !/^job_[a-f0-9]{32}$/.test(payload.jobId)) {
+    throw new Error('Tham số jobId không hợp lệ.');
+  }
+  return schemaMigrationOrchestrator.getJob(payload.jobId);
+});
+
+handle('db:migration-job-cancel', (payload) => {
+  if (!payload || typeof payload !== 'object' || typeof payload.jobId !== 'string' || !/^job_[a-f0-9]{32}$/.test(payload.jobId)) {
+    throw new Error('Tham số jobId không hợp lệ.');
+  }
+  const reason = typeof payload.reason === 'string' && payload.reason ? payload.reason.slice(0, 200) : 'Migration đã bị hủy bởi người dùng.';
+  const job = schemaMigrationOrchestrator.cancelJob(payload.jobId, reason);
+  return { canceled: Boolean(job), job };
+});
 
 handle('db:table-data', (payload) => {
   if (!payload || typeof payload !== 'object') throw new Error('Tham số không hợp lệ.');
@@ -2162,6 +2424,111 @@ handle('db:preview-object-restore-plan', async payload => {
   });
 
   return { plan, checksum };
+});
+
+handle('db:create-selective-restore-plan', async (payload) => {
+  const contextGeneration = backupContextGeneration;
+  if (activeDatabaseTransfer?.operation === 'backup-retention') throw new Error('Đang dọn backup. Hãy đợi hoàn tất.');
+  const { profileId, database, id, selection, dropExisting } = payload || {};
+  if (!profileId || !database || !id) throw new Error('Thiếu thông tin yêu cầu tạo kế hoạch phục hồi chọn lọc.');
+  const filePath = await resolveBackup(app.getPath('userData'), profileId, database, id);
+  if (contextGeneration !== backupContextGeneration) throw Object.assign(new Error('Context phục hồi đã thay đổi.'), { code: 'RESTORE_CONTEXT_CHANGED' });
+  return restorePlanService.createSelectiveRestorePlan({
+    filePath,
+    targetProfileId: profileId,
+    targetDatabase: database,
+    selection,
+    dropExisting
+  });
+});
+
+handle('db:apply-selective-restore-plan', async (payload) => {
+  if (!payload || typeof payload.planToken !== 'string') throw new Error('Thiếu planToken để thực thi phục hồi chọn lọc.');
+  const transfer = claimDatabaseTransfer({
+    taskId: payload.taskId,
+    profileId: payload.profileId,
+    operation: 'selective-restore',
+    pending: true
+  });
+  try {
+    return await restoreSelectionExecutor.executePlan({
+      planToken: payload.planToken,
+      approvalToken: payload.approvalToken,
+      signal: transfer.cancelController?.signal,
+      onSession: (session) => {
+        transfer.session = session;
+      },
+      onProgress: (progress) => {
+        sendDbProgress({ operation: 'selective-restore', taskId: payload.taskId, ...progress });
+      }
+    });
+  } finally {
+    if (activeDatabaseTransfer === transfer) activeDatabaseTransfer = null;
+  }
+});
+
+handle('db:start-data-diff', async (payload) => {
+  return dataDiffService.startDiff(payload);
+});
+
+handle('db:data-diff-status', async (payload) => {
+  if (!payload || !payload.jobId) throw new Error('Thiếu jobId tác vụ so sánh.');
+  return dataDiffService.getDiffStatus(payload.jobId);
+});
+
+handle('db:cancel-data-diff', async (payload) => {
+  if (!payload || !payload.jobId) throw new Error('Thiếu jobId tác vụ so sánh.');
+  return dataDiffService.cancelDiff(payload.jobId);
+});
+
+handle('db:create-data-sync-plan', async (payload) => {
+  return dataSyncPlanService.createSyncPlan(payload);
+});
+
+handle('db:apply-data-sync-plan', async () => {
+  throw Object.assign(new Error('Chức năng áp dụng đồng bộ dữ liệu (Data Sync Apply) đang khóa an toàn để hoàn thiện kiểm chứng.'), {
+    code: 'SYNC_APPLY_NOT_READY'
+  });
+});
+
+handle('db:inspect-backup-container', async (payload) => {
+  const filePath = await resolveBackup(app.getPath('userData'), payload.profileId, payload.database, payload.id);
+  return inspectBackupContainer(filePath);
+});
+
+handle('db:encrypt-backup', async (payload) => {
+  const filePath = await resolveBackup(app.getPath('userData'), payload.profileId, payload.database, payload.id);
+  const outPath = `${filePath}.enc`;
+  const result = await encryptBackupFile(filePath, outPath, {
+    passphrase: payload.passphrase,
+    compress: payload.compress !== false
+  });
+  return { ...result, outPath };
+});
+
+handle('db:decrypt-backup', async (payload) => {
+  const filePath = await resolveBackup(app.getPath('userData'), payload.profileId, payload.database, payload.id);
+  const outPath = filePath.endsWith('.enc') ? filePath.slice(0, -4) : `${filePath}.dec.sql`;
+  const result = await decryptBackupFile(filePath, outPath, {
+    passphrase: payload.passphrase
+  });
+  return { ...result, outPath };
+});
+
+handle('db:create-backup-replica', async (payload) => {
+  const filePath = await resolveBackup(app.getPath('userData'), payload.profileId, payload.database, payload.id);
+  return backupReplicaManager.createReplica({
+    sourceFilePath: filePath,
+    destinationDir: payload.destinationDir,
+    expectedFileChecksum: payload.expectedFileChecksum
+  });
+});
+
+handle('db:verify-backup-replica', async (payload) => {
+  return backupReplicaManager.verifyReplica({
+    replicaPath: payload.replicaPath,
+    expectedFileChecksum: payload.expectedFileChecksum
+  });
 });
 
 function trialJournal() {

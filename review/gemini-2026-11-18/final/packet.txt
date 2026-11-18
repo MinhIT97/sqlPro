@@ -1,0 +1,47 @@
+TAP version 13
+# Subtest: packet preview integration: observed SQL bytes agree with a disposable low-packet server
+    # Subtest: preview reads the session limit, counts UTF8 rather than code units and performs no writes
+    ok 1 - preview reads the session limit, counts UTF8 rather than code units and performs no writes
+      ---
+      duration_ms: 47.180409
+      type: 'test'
+      ...
+    # Subtest: a separate disposable writer accepts the small statement and rejects the oversized one
+    ok 2 - a separate disposable writer accepts the small statement and rejects the oversized one
+      ---
+      duration_ms: 6.462454
+      type: 'test'
+      ...
+    # Subtest: denied settings remain unknown and raw errors never enter the report
+    ok 3 - denied settings remain unknown and raw errors never enter the report
+      ---
+      duration_ms: 16.46451
+      type: 'test'
+      ...
+    # Subtest: published source file and worker retain byte evidence without SQL or row contents in the draft
+    ok 4 - published source file and worker retain byte evidence without SQL or row contents in the draft
+      ---
+      duration_ms: 166.67035
+      type: 'test'
+      ...
+    # Subtest: preview uses only SELECT and leaves reader/editor settings and the editor transaction intact
+    ok 5 - preview uses only SELECT and leaves reader/editor settings and the editor transaction intact
+      ---
+      duration_ms: 1.5251
+      type: 'test'
+      ...
+    1..5
+ok 1 - packet preview integration: observed SQL bytes agree with a disposable low-packet server
+  ---
+  duration_ms: 280.320592
+  type: 'test'
+  ...
+1..1
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 434.278416

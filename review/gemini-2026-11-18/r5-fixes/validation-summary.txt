@@ -1,0 +1,45 @@
+npm run check
+  duration_ms: 0.473763
+  type: 'test'
+  ...
+1..1201
+# tests 1206
+# suites 0
+# pass 1191
+# fail 0
+# cancelled 0
+# skipped 15
+# todo 0
+# duration_ms 8133.598674
+
+npm run test:website
+PASS navigation remains reachable in a short landscape viewport
+PASS clipboard permission failure falls back and restores focus and selection
+PASS clipboard failure is announced; modern clipboard succeeds and feedback resets
+PASS responsive layout, focus indicators and reduced motion work
+PASS downloads show real response metadata and copy the provided checksum
+PASS overview video decodes, plays and provides localized captions
+PASS hosting form validates, invalidates stale results, copies and downloads configuration
+PASS documentation search supports accents, error codes, no results and language switching
+PASS changelog renders safe notes and excludes draft and external releases
+PASS all six localized pages fit mobile and desktop with no broken loaded images
+PASS mobile navigation and download fallbacks remain usable without JavaScript
+Website smoke: 14/14 passed
+
+npm --prefix server run check
+npm notice run sqlpro-server@0.1.0 check
+npm notice run node --check src/index.cjs && node --check src/app.cjs && node --check src/db.cjs && node --check src/auth.cjs && node --check src/vault.cjs && node --check src/ratelimit.cjs && node --check src/errors.cjs
+
+npm run server:test
+  duration_ms: 92.39748
+  type: 'test'
+  ...
+1..17
+# tests 17
+# suites 0
+# pass 17
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1201.471166

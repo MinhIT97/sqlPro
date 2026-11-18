@@ -1,11 +1,29 @@
 # Bàn giao triển khai SqlPro cho Gemini
 
+## Bàn giao sau review cuối 18/11
+
+Ưu tiên gói nhỏ theo [bảng việc chưa làm](CODE_REVIEW_FINAL_2026_11_18.md#3-các-việc-chưa-làm--giao-tiếp-cho-gemini): Migration Apply, Main-owned Data Sync, dialect/MariaDB JSON, rồi tích hợp crypto/replica/calendar/recovery và release matrix. Hai public Apply vẫn khóa. Autocomplete đã có nguyên nhân và regression; không tiếp tục điều tra lại từ báo cáo R3/R5 cũ. Bản crypto mới ghi V2 có AAD, đọc legacy V1; cần contract/UI compatibility trước release. Handoff/bảng mốc cũ phía dưới là lịch sử, không phải danh sách lỗi hiện tại.
+
+> **Trạng thái hiện tại:** [Review cuối, các lỗi đã sửa và việc chưa làm](CODE_REVIEW_FINAL_2026_11_18.md). Các số liệu/findings phía dưới giữ lịch sử trước lượt chốt này.
+
+> **Cập nhật sau sửa lỗi 18/11:** [Kết quả sửa V01–V04](CODE_REVIEW_GEMINI_2026_11_18_R5_FIXES.md) là trạng thái mới nhất. Nội dung review bên dưới giữ nguyên làm lịch sử trước sửa.
+
+**Review vòng 5 — mốc hiện hành:** [CODE_REVIEW_GEMINI_2026_11_18_R5.md](CODE_REVIEW_GEMINI_2026_11_18_R5.md). Còn V01–V04 (1 P0, 2 P1, 1 P2); ưu tiên bind/chặn SQL mode chưa hỗ trợ, phân biệt user/system assignment, ledger COMMIT và late worker cleanup. Check 1.176 pass/0 fail/14 skip, smoke đạt; chưa DB thật/installed evidence. Không chấp nhận “4/4 triệt để” chỉ từ probe cũ; lượt review không sửa runtime hoặc commit.
+
+**Review vòng 4 — mốc hiện hành:** [CODE_REVIEW_GEMINI_2026_11_18_R4.md](CODE_REVIEW_GEMINI_2026_11_18_R4.md). Còn 4 nhóm (1 P0, 3 P1); ưu tiên U01 parser phân biệt literal/comment/identifier, rồi U02 transaction, U03 ledger/IPC outcome, U04 worker lifecycle. Missing approval token và no-replace replica đã cải thiện, chưa nghiệm thu “5/5 triệt để”. Check 1.172 pass/0 fail/14 skip, smoke đạt; chưa DB thật/installed evidence. Lượt review không sửa runtime hoặc commit.
+
+**Review vòng 3 — mốc hiện hành:** [CODE_REVIEW_GEMINI_2026_11_18_R3.md](CODE_REVIEW_GEMINI_2026_11_18_R3.md). Chưa nghiệm thu “8/8 triệt để”; còn 5 nhóm (2 P0, 3 P1). Ưu tiên T01 chặn missing/null approval receipt trong Production restore, T02 scope/exact-case, rồi transaction/worker uncertainty/no-replace replica. Check 1.166 pass/0 fail/14 skip, smoke đạt; chưa có DB thật/installed evidence. Lượt review không sửa runtime hoặc commit.
+
+**Review vòng 2 — 18/11:** [CODE_REVIEW_GEMINI_2026_11_18_R2.md](CODE_REVIEW_GEMINI_2026_11_18_R2.md) là mốc mới nhất. Chưa chấp nhận “12/12 triệt để”; ưu tiên selective restore/file proof/cancel/policy và bảo toàn backup đích (S01–S05), giữ khóa sync/migration Apply. Check 1.159 pass/0 fail/14 skip; chưa có DB thật/installed evidence. Tài liệu và kết luận vòng 1 bên dưới là lịch sử đối chiếu.
+
+**Mốc review mới nhất — 18/11/2026:** xem [review Gemini và tồn đọng](CODE_REVIEW_GEMINI_2026_11_18.md). 12 findings (2 P0, 9 P1, 1 P2); chưa nghiệm thu B02–B18 hoàn tất. Check 1.149 pass/0 fail/14 skip không thay thế DB/installed evidence. B13/B14 vẫn là metadata/filter và SQL Editor, B16 vẫn là refactor/UX; các nhóm benchmark/recovery helper không hoàn thành thay các gói đó. Thứ tự giao sửa nằm ở mục 5 của báo cáo; lượt review này không sửa runtime hoặc commit.
+
 Ngày cập nhật: 18/11/2026. Mốc đối chiếu ban đầu: f812fc1, phiên bản package 0.3.12.
 Tài liệu này là kế hoạch bàn giao dựa trên code và test hiện có, không phải chứng nhận phát hành.
 
-Trạng thái sau review nền E2: xem [B02_REVIEW_FIXES.md](B02_REVIEW_FIXES.md). Đã sửa ownership/lease, cancel/late completion, worker deadline/identity và projection; 78 test migration đạt. Test source có collector + DatabaseSession thật với driver giả lập. Main chưa có facade điều phối toàn luồng, source verifier Main vẫn khởi tạo thiếu store nên fail-closed; chưa nghiệm thu E2 integration/DB thật hoặc toàn B02/G6.
+Trạng thái sau hoàn thành B02-E2.1 (18/11): Đã hoàn thành triển khai facade `electron/schema-migration-orchestrator.cjs` kết nối toàn diện Main store, sessionRegistry, openSessions, generation, per-job ownsLease contextHooks, source verifier đọc worker mới, native confirm mặc định Hủy, và completion tracking. Suite migration đạt 101/101 test pass. `npm run check` 1085 pass / 0 fail / 14 opt-in skip (1099 tổng). Renderer smoke 100/100, website smoke 14/14, server tests 17/17. Apply IPC vẫn fail-closed `MIGRATION_APPLY_NOT_READY`; chưa nghiệm thu generator E3 hoặc DB thật.
 
-**Nhiệm vụ đang giao: B02-E2.1 — Tích hợp Main và kiểm chứng lifecycle**, theo thứ tự và tiêu chí ở cuối [B02_REVIEW_FIXES.md](B02_REVIEW_FIXES.md). Chỉ làm E2.1 rồi gửi review. Giữ `MIGRATION_APPLY_NOT_READY` ở Main/service; không thêm start/write IPC khác, không nâng preview thành ready. Chưa làm E3/B03 hoặc UI Apply.
+**Bàn giao review: B02-E2.1 — Tích hợp Main và kiểm chứng lifecycle**, theo tiêu chí tại [B02_REVIEW_FIXES.md](B02_REVIEW_FIXES.md). Gửi Codex review trước E3; chưa tick hoàn tất B02/G6.
 
 ## 1. Phân công và cách làm từ đây
 

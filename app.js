@@ -5741,6 +5741,8 @@ function backupDetailsHtml(entry) {
     ${!selection ? '<p class="hint">Backup cũ chưa có danh sách đối tượng. Đọc tệp SQL để xem nội dung.</p>' : ''}
     <button data-backup-action="inspect">⌕ Đọc danh sách từ tệp SQL</button>
     <button data-backup-action="selection-preview">Xem phạm vi chọn bảng…</button>
+    <button data-backup-action="create-replica">⧉ Tạo bản sao (Replica)…</button>
+    <button data-backup-action="container-info">🔒 Kiểm tra container…</button>
     <button data-backup-action="trial" ${connectionIsReadOnly()?'disabled':''}>↶ Phục hồi thử vào database tạm</button>
     <div id="backupTrialReport" role="status" aria-live="polite"></div>
     <div id="backupInventory" role="status" aria-live="polite"></div>
@@ -5767,6 +5769,8 @@ function renderBackupsView() {
         <button data-backup-action="copy-backup" ${selected ? '' : 'disabled'}>⎘ Sao chép (Ctrl+C)</button>
         <button data-backup-action="paste-backup" ${app.copiedBackup ? '' : 'disabled'}>📋 Dán (Ctrl+V)</button>
         <button data-backup-action="copy-to-db" ${selected ? '' : 'disabled'}>⧉ Sao chép sang DB khác…</button>
+        <button data-backup-action="create-replica" ${selected ? '' : 'disabled'}>⧉ Tạo Replica…</button>
+        <button data-backup-action="container-info" ${selected ? '' : 'disabled'}>🔒 Kiểm tra container…</button>
         <button data-backup-action="delete" class="danger" ${selected && !selected.pinned && !selected.annotationError ? '' : 'disabled'}>⌫ Xóa bản sao lưu</button>
         <button data-backup-action="export" ${selected ? '' : 'disabled'}>⇩ Xuất tệp SQL</button>
         <button data-backup-action="refresh">↻ Làm mới</button>
@@ -5794,6 +5798,8 @@ function backupContextMenuHtml(hasSelection) {
     ${item('copy-backup', '⎘', 'Sao chép bản sao lưu (Ctrl+C)', !hasSelection)}
     ${item('paste-backup', '📋', 'Dán bản sao lưu vào đây (Ctrl+V)', !canPaste)}
     ${item('copy-to-db', '⧉', 'Sao chép sang Database khác…', !hasSelection)}
+    ${item('create-replica', '⧉', 'Tạo bản sao (Replica)…', !hasSelection)}
+    ${item('container-info', '🔒', 'Kiểm tra container / Mã hóa…', !hasSelection)}
     ${item('create', '＋', 'Tạo bản sao lưu mới')}
     ${item('delete', '⌫', 'Xóa bản sao lưu', !hasSelection || selected?.pinned || selected?.annotationError)}
     <div class="context-menu-sep"></div>
@@ -6971,6 +6977,72 @@ async function runBackupManagerAction(action) {
   if (action === 'copy-backup' && app.selectedBackupId) return copySelectedBackupToClipboard(app.selectedBackupId);
   if (action === 'paste-backup' && app.copiedBackup) return pasteBackupModal();
   if (action === 'copy-to-db' && app.selectedBackupId) return copyBackupToDatabaseModal(app.selectedBackupId);
+  if (action === 'create-replica' && app.selectedBackupId) {
+    const current = app.backups.find((entry) => entry.id === app.selectedBackupId);
+    if (!current) return;
+    const profileId = app.connection?.id || null;
+    const database = app.database;
+    const id = current.id;
+    modal(`<h2>Tạo bản sao (Replica)</h2>
+      <p class="hint">Tạo bản sao độc lập của tệp backup sang thư mục khác và kiểm tra tính toàn vẹn checksum.</p>
+      <label>Thư mục đích</label>
+      <input id="replicaDestDirInput" placeholder="/path/to/destination" autofocus>
+      <div class="actions">
+        <button data-click="close-modal">Hủy</button>
+        <button class="primary" id="confirmCreateReplicaBtn">Tạo Replica</button>
+      </div>`);
+    const input = $('#replicaDestDirInput');
+    const button = $('#confirmCreateReplicaBtn');
+    let running = false;
+    button?.addEventListener('click', async () => {
+      if (running) return;
+      const destinationDir = input?.value.trim();
+      if (!destinationDir) return toast('Vui lòng nhập đường dẫn thư mục đích.', 'error');
+      running = true; button.disabled = true;
+      try {
+        const result = await call(desktop.db.createBackupReplica({
+          profileId,
+          database,
+          id,
+          destinationDir,
+          expectedFileChecksum: current.checksum || null
+        }));
+        closeModal();
+        toast(`Đã tạo replica: ${result.replicaPath}`, 'success');
+      } catch (error) {
+        toast(error.message, 'error');
+      } finally {
+        running = false; button.disabled = false;
+      }
+    });
+    return;
+  }
+  if (action === 'container-info' && app.selectedBackupId) {
+    const current = app.backups.find((entry) => entry.id === app.selectedBackupId);
+    if (!current) return;
+    const profileId = app.connection?.id || null;
+    const database = app.database;
+    const id = current.id;
+    try {
+      const info = await call(desktop.db.inspectBackupContainer({
+        profileId,
+        database,
+        id
+      }));
+      modal(`<h2>Thông tin Container Backup</h2>
+        <dl class="backup-details-grid">
+          <div><dt>Định dạng container</dt><dd>${esc(info.format || 'V1 / Raw SQL')}</dd></div>
+          <div><dt>Trạng thái mã hóa</dt><dd>${info.encrypted ? '🔒 Có mã hóa' : 'Không mã hóa'}</dd></div>
+          <div><dt>Nén dữ liệu</dt><dd>${info.compressed ? '✓ GZIP / Nén' : 'Không nén'}</dd></div>
+          <div><dt>Thuật toán</dt><dd>${esc(info.cipher || 'None')}</dd></div>
+          <div><dt>Dung lượng tệp</dt><dd>${formatBytes(current.bytes)}</dd></div>
+        </dl>
+        <div class="actions"><button data-click="close-modal">Đóng</button></div>`);
+    } catch (error) {
+      toast(`Không kiểm tra được container: ${error.message}`, 'error');
+    }
+    return;
+  }
   if (action === 'refresh') return refreshBackupList();
   if (action === 'copy' && app.selectedBackupId) {
     try {

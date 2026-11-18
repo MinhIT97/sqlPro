@@ -419,6 +419,13 @@ class DataDiffService {
         if (JSON.stringify(sourceReader.primaryKeys) !== JSON.stringify(targetReader.primaryKeys)) {
           throw error('DATA_DIFF_SCHEMA_MISMATCH', 'Khóa chính giữa hai bảng không khớp nhau.');
         }
+        for (const pkName of sourceReader.primaryKeys) {
+          const sc = sourceReader.columns.find(c => c.name === pkName);
+          const tc = targetReader.columns.find(c => c.name === pkName);
+          if (sc?.collation && tc?.collation && sc.collation.toLowerCase() !== tc.collation.toLowerCase()) {
+            throw error('DATA_DIFF_SCHEMA_MISMATCH', `Collation của khóa chính "${pkName}" không khớp giữa nguồn (${sc.collation}) và đích (${tc.collation}).`);
+          }
+        }
 
         const report = await compareKeysetStreams({
           sourceReader,

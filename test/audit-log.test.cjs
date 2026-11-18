@@ -41,6 +41,26 @@ test('sanitizeAuditSummary strips passwords, tokens, and trims length', () => {
   assert.ok(!scrubbedToken.includes('abc123def456'));
   assert.ok(!scrubbedToken.includes('xyz789'));
 
+  const textWithPluginPassword = "ALTER USER 'bob'@'%' IDENTIFIED WITH mysql_native_password BY 'pluginSecret!';";
+  const scrubbedPlugin = SqlAuditLog.sanitizeAuditSummary(textWithPluginPassword);
+  assert.ok(!scrubbedPlugin.includes('pluginSecret!'));
+  assert.ok(scrubbedPlugin.includes('********'));
+
+  const textWithSetPassword = "SET PASSWORD FOR 'admin'@'localhost' = 'adminSecret!';";
+  const scrubbedSetPassword = SqlAuditLog.sanitizeAuditSummary(textWithSetPassword);
+  assert.ok(!scrubbedSetPassword.includes('adminSecret!'));
+  assert.ok(scrubbedSetPassword.includes('********'));
+
+  const textWithBearer = 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.t-ID';
+  const scrubbedBearer = SqlAuditLog.sanitizeAuditSummary(textWithBearer);
+  assert.ok(!scrubbedBearer.includes('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9'));
+  assert.ok(scrubbedBearer.includes('Bearer ********'));
+
+  const textWithPrivateKey = 'SSL config -----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY----- configured';
+  const scrubbedKey = SqlAuditLog.sanitizeAuditSummary(textWithPrivateKey);
+  assert.ok(!scrubbedKey.includes('MIIEowIBAAKCAQEA'));
+  assert.ok(scrubbedKey.includes('********'));
+
   const longText = 'A'.repeat(500);
   assert.ok(SqlAuditLog.sanitizeAuditSummary(longText).length <= 300);
 });

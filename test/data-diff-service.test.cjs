@@ -256,6 +256,51 @@ test('DataDiffService detects schema mismatch between source and target', async 
   assert.equal(res.error.code, 'DATA_DIFF_SCHEMA_MISMATCH');
 });
 
+test('DataDiffService rejects mismatched PK collations between source and target', async () => {
+  const fakeSession = (name) => ({
+    name,
+    async connect() {},
+    async useDatabase() {},
+    async listColumns() {
+      if (name === 'src') {
+        return [{ name: 'code', type: 'varchar(32)', key: 'PRI', collation: 'utf8mb4_bin' }];
+      }
+      return [{ name: 'code', type: 'varchar(32)', key: 'PRI', collation: 'latin1_bin' }];
+    },
+    async raw() {
+      return { result: [{ engine: 'InnoDB' }] };
+    },
+    async close() {}
+  });
+
+  const service = new DataDiffService({
+    store: {
+      getWithSecrets(id) {
+        return { id, host: '127.0.0.1' };
+      }
+    },
+    createSession(profile) {
+      return fakeSession(profile.id === 'p1' ? 'src' : 'dst');
+    }
+  });
+
+  const { jobId } = await service.startDiff({
+    sourceProfileId: 'p1',
+    targetProfileId: 'p2',
+    sourceDb: 'db',
+    targetDb: 'db',
+    sourceTable: 't',
+    targetTable: 't'
+  });
+
+  const job = service.jobs.get(jobId);
+  await job.promise;
+
+  const res = service.getDiffStatus(jobId);
+  assert.equal(res.status, 'failed');
+  assert.equal(res.error.code, 'DATA_DIFF_SCHEMA_MISMATCH');
+});
+
 test('DataDiffService enforces max concurrent diff jobs quota', async () => {
   const blocker = new AbortController();
   const service = new DataDiffService({

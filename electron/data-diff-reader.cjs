@@ -105,11 +105,9 @@ function compareKeyTuples(tupleA, tupleB, pkTypes = []) {
     if (isNumericColumnType(type)) {
       cmp = compareDecimalStrings(valA, valB);
     } else {
-      const sa = String(valA);
-      const sb = String(valB);
-      if (sa < sb) cmp = -1;
-      else if (sa > sb) cmp = 1;
-      else cmp = 0;
+      const bufA = Buffer.from(String(valA), 'utf8');
+      const bufB = Buffer.from(String(valB), 'utf8');
+      cmp = Buffer.compare(bufA, bufB);
     }
 
     if (cmp !== 0) return cmp;
@@ -209,11 +207,17 @@ async function validateTableForDiff(session, database, table) {
   const pkTypes = primaryKeys.map(pkName => {
     const col = columns.find(c => c.name === pkName);
     const baseType = String(col?.type || '').toLowerCase().split(/[ (]/)[0];
-    // Text key ordering depends on server collation; the JS merge has no such proof.
-    if (!/^(?:tinyint|smallint|mediumint|int|integer|bigint|decimal|numeric)$/.test(baseType)) {
-      throw error('DATA_DIFF_UNSUPPORTED_PK_TYPE', `Khóa chính "${pkName}" có kiểu "${col?.type}" không hỗ trợ keyset pagination an toàn.`);
+    if (isNumericColumnType(baseType)) {
+      return col?.type || '';
     }
-    return col?.type || '';
+    if (/^(?:char|varchar)$/.test(baseType)) {
+      const collation = String(col?.collation || '').trim();
+      if (collation && /(?:_bin|^binary)$/i.test(collation)) {
+        return col?.type || '';
+      }
+      throw error('DATA_DIFF_UNSUPPORTED_PK_TYPE', `Khóa chính "${pkName}" có kiểu "${col?.type}" và collation "${collation || 'không xác định'}" không phải binary collation; chưa thể chứng minh thứ tự sắp xếp nhất quán với máy chủ.`);
+    }
+    throw error('DATA_DIFF_UNSUPPORTED_PK_TYPE', `Khóa chính "${pkName}" có kiểu "${col?.type}" không hỗ trợ keyset pagination an toàn.`);
   });
 
   let engine = null;
@@ -232,7 +236,7 @@ async function validateTableForDiff(session, database, table) {
   }
 
   return {
-    columns: columns.map(c => ({ name: c.name, type: c.type })),
+    columns: columns.map(c => ({ name: c.name, type: c.type, collation: c.collation || null })),
     primaryKeys,
     pkTypes,
     engine

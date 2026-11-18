@@ -127,6 +127,18 @@ test('validateTableForDiff rejects tables without PK or with unsupported types',
       if (table === 'unsupported_float_pk') {
         return [{ name: 'id', type: 'float', key: 'PRI' }];
       }
+      if (table === 'varchar_ci_pk') {
+        return [{ name: 'code', type: 'varchar(64)', key: 'PRI', collation: 'utf8mb4_general_ci' }];
+      }
+      if (table === 'varchar_bin_pk') {
+        return [{ name: 'code', type: 'varchar(64)', key: 'PRI', collation: 'utf8mb4_bin' }];
+      }
+      if (table === 'composite_bin_pk') {
+        return [
+          { name: 'tenant_id', type: 'int', key: 'PRI' },
+          { name: 'uuid', type: 'varchar(36)', key: 'PRI', collation: 'utf8mb4_bin' }
+        ];
+      }
       if (table === 'valid') {
         return [
           { name: 'id', type: 'int', key: 'PRI' },
@@ -154,6 +166,17 @@ test('validateTableForDiff rejects tables without PK or with unsupported types',
     () => validateTableForDiff(fakeSession, 'db', 'unsupported_float_pk'),
     { code: 'DATA_DIFF_UNSUPPORTED_PK_TYPE' }
   );
+
+  await assert.rejects(
+    () => validateTableForDiff(fakeSession, 'db', 'varchar_ci_pk'),
+    { code: 'DATA_DIFF_UNSUPPORTED_PK_TYPE' }
+  );
+
+  const binValid = await validateTableForDiff(fakeSession, 'db', 'varchar_bin_pk');
+  assert.deepEqual(binValid.primaryKeys, ['code']);
+
+  const compValid = await validateTableForDiff(fakeSession, 'db', 'composite_bin_pk');
+  assert.deepEqual(compValid.primaryKeys, ['tenant_id', 'uuid']);
 
   const valid = await validateTableForDiff(fakeSession, 'db', 'valid');
   assert.deepEqual(valid.primaryKeys, ['id']);

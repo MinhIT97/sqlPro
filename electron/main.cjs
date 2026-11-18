@@ -266,7 +266,7 @@ const dataDiffService = new DataDiffService({
 const { DataSyncPlanService } = require('./data-sync-plan-service.cjs');
 const { DataSyncExecutor } = require('./data-sync-executor.cjs');
 
-const dataSyncPlanService = new DataSyncPlanService({ store });
+const dataSyncPlanService = new DataSyncPlanService({ store, dataDiffService });
 const dataSyncExecutor = new DataSyncExecutor({
   consumePlan: (token) => dataSyncPlanService.consumePlan(token),
   getProfileWithSecrets: (id) => store.getWithSecrets(id),

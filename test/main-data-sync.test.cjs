@@ -96,8 +96,158 @@ test('Main Data Sync: end-to-end plan creation and guarded execution with optimi
   // - Executes INSERT with quoted identifiers
   // - Executes UPDATE with optimistic concurrency guard
   // - Commits transaction
-  assert.equal(executedSql[0].sql, 'START TRANSACTION');
+  assert.ok(executedSql.some(q => q.sql === 'START TRANSACTION'));
   assert.ok(executedSql.some(q => q.sql.includes('INSERT INTO `finance_db`.`accounts`')));
   assert.ok(executedSql.some(q => q.sql.includes('UPDATE `finance_db`.`accounts`') && q.sql.includes('`balance` = ?')));
   assert.equal(executedSql[executedSql.length - 1].sql, 'COMMIT');
+});
+
+test('DataSyncExecutor rejects non-InnoDB table engines (e.g. MyISAM) to prevent unrollbackable writes', async () => {
+  const diffReport = {
+    coverage: { complete: true, consistent: true, canSynchronize: false },
+    primaryKeys: ['id'],
+    columns: [{ name: 'id', type: 'int' }, { name: 'val', type: 'varchar(20)' }],
+    summary: { totalSource: 1, totalTarget: 1, identicalCount: 0, differentCount: 1, onlyInSourceCount: 0, onlyInTargetCount: 0 },
+    identical: [],
+    onlyInSource: [],
+    different: [{
+      rowKey: '["1"]',
+      sourceRow: { id: 1, val: 'new' },
+      targetRow: { id: 1, val: 'old' },
+      differences: [{ column: 'val', sourceValue: 'new', targetValue: 'old' }]
+    }],
+    onlyInTarget: []
+  };
+
+  const store = {
+    getWithSecrets: () => ({ id: 'p_target', environment: 'staging', readOnly: false })
+  };
+  const planService = new DataSyncPlanService({ store });
+  const plan = planService.createSyncPlan({
+    diffReport,
+    sourceScope: { profileId: 'p_src', database: 'db', table: 'myisam_tbl' },
+    targetScope: { profileId: 'p_target', database: 'db', table: 'myisam_tbl' }
+  });
+
+  const fakeSession = {
+    async connect() {},
+    async useDatabase() {},
+    async listColumns() {
+      return [{ name: 'id', type: 'int', key: 'PRI' }, { name: 'val', type: 'varchar(20)', key: '' }];
+    },
+    async raw(sql) {
+      if (sql.includes('SELECT ENGINE FROM information_schema.TABLES')) {
+        return { result: [{ ENGINE: 'MyISAM' }] };
+      }
+      return { result: [] };
+    },
+    async close() {}
+  };
+
+  const executor = new DataSyncExecutor({
+    consumePlan: (token) => planService.consumePlan(token),
+    getProfileWithSecrets: (id) => store.getWithSecrets(id),
+    createSession: () => fakeSession
+  });
+
+  await assert.rejects(
+    executor.executeSyncPlan({ planToken: plan.planToken }),
+    { code: 'UNSUPPORTED_TABLE_ENGINE' }
+  );
+});
+
+test('DataSyncExecutor rejects tables with triggers to prevent unverified side-effects', async () => {
+  const diffReport = {
+    coverage: { complete: true, consistent: true, canSynchronize: false },
+    primaryKeys: ['id'],
+    columns: [{ name: 'id', type: 'int' }, { name: 'val', type: 'varchar(20)' }],
+    summary: { totalSource: 1, totalTarget: 1, identicalCount: 0, differentCount: 1, onlyInSourceCount: 0, onlyInTargetCount: 0 },
+    identical: [],
+    onlyInSource: [],
+    different: [{
+      rowKey: '["1"]',
+      sourceRow: { id: 1, val: 'new' },
+      targetRow: { id: 1, val: 'old' },
+      differences: [{ column: 'val', sourceValue: 'new', targetValue: 'old' }]
+    }],
+    onlyInTarget: []
+  };
+
+  const store = {
+    getWithSecrets: () => ({ id: 'p_target', environment: 'staging', readOnly: false })
+  };
+  const planService = new DataSyncPlanService({ store });
+  const plan = planService.createSyncPlan({
+    diffReport,
+    sourceScope: { profileId: 'p_src', database: 'db', table: 'users_trigger' },
+    targetScope: { profileId: 'p_target', database: 'db', table: 'users_trigger' }
+  });
+
+  const fakeSession = {
+    async connect() {},
+    async useDatabase() {},
+    async listColumns() {
+      return [{ name: 'id', type: 'int', key: 'PRI' }, { name: 'val', type: 'varchar(20)', key: '' }];
+    },
+    async raw(sql) {
+      if (sql.includes('SELECT ENGINE FROM information_schema.TABLES')) {
+        return { result: [{ ENGINE: 'InnoDB' }] };
+      }
+      if (sql.includes('SELECT TRIGGER_NAME FROM information_schema.TRIGGERS')) {
+        return { result: [{ TRIGGER_NAME: 'audit_log_trigger' }] };
+      }
+      return { result: [] };
+    },
+    async close() {}
+  };
+
+  const executor = new DataSyncExecutor({
+    consumePlan: (token) => planService.consumePlan(token),
+    getProfileWithSecrets: (id) => store.getWithSecrets(id),
+    createSession: () => fakeSession
+  });
+
+  await assert.rejects(
+    executor.executeSyncPlan({ planToken: plan.planToken }),
+    { code: 'TARGET_TABLE_TRIGGERS_DETECTED' }
+  );
+});
+
+test('DataSyncPlanService resolves report and scopes from Main-owned dataDiffService via jobId', async () => {
+  const dataDiffService = {
+    getJob(id) {
+      if (id === 'job_diff_123') {
+        return {
+          status: 'completed',
+          sourceScope: { profileId: 'p_src', database: 'prod_db', table: 'orders' },
+          targetScope: { profileId: 'p_tgt', database: 'backup_db', table: 'orders' },
+          report: {
+            coverage: { complete: true, consistent: true, canSynchronize: false },
+            primaryKeys: ['id'],
+            columns: [{ name: 'id', type: 'int' }, { name: 'total', type: 'decimal(10,2)' }],
+            summary: { totalSource: 1, totalTarget: 0, identicalCount: 0, differentCount: 0, onlyInSourceCount: 1, onlyInTargetCount: 0 },
+            identical: [],
+            onlyInSource: [{ rowKey: '["100"]', row: { id: 100, total: '99.95' } }],
+            different: [],
+            onlyInTarget: []
+          }
+        };
+      }
+      return null;
+    }
+  };
+
+  const planService = new DataSyncPlanService({ dataDiffService });
+  const plan = planService.createSyncPlan({ jobId: 'job_diff_123' });
+
+  assert.ok(plan.planToken);
+  assert.equal(plan.counts.inserts, 1);
+  assert.equal(plan.sourceScope.database, 'prod_db');
+  assert.equal(plan.targetScope.database, 'backup_db');
+
+  // Unknown jobId rejects
+  assert.throws(
+    () => planService.createSyncPlan({ jobId: 'unknown_job' }),
+    { code: 'DIFF_JOB_NOT_FOUND' }
+  );
 });

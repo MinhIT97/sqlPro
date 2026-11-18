@@ -282,7 +282,7 @@ function exportJsonValue(value) {
 function exportJsonField(value, column) {
   // jsonStrings prevents numeric rounding in the driver. Keep JSON columns as
   // JSON values in exports rather than encoding their source text a second time.
-  if (isJsonColumn(column.type) && typeof value === 'string') {
+  if (isJsonColumn(column) && typeof value === 'string') {
     try { JSON.parse(value); return value; } catch { /* Handle non-JSON legacy values as text. */ }
   }
   return JSON.stringify(exportJsonValue(value));
@@ -385,8 +385,14 @@ function isBinaryColumn(type) {
   return /^(binary|varbinary|tinyblob|blob|mediumblob|longblob)\b/i.test(type);
 }
 
-function isJsonColumn(type) {
-  return /^json\b/i.test(type);
+function isJsonColumn(columnOrType) {
+  if (!columnOrType) return false;
+  if (typeof columnOrType === 'object') {
+    if (columnOrType.isJson === true) return true;
+    if (columnOrType.checkClause && /json_valid/i.test(columnOrType.checkClause)) return true;
+    return /^json\b/i.test(columnOrType.type || '');
+  }
+  return /^json\b/i.test(String(columnOrType));
 }
 
 function isTextColumn(type) {
@@ -433,7 +439,7 @@ function originalValuesPredicate(columns, original) {
     }
     let value = rawValue;
     if (value && typeof value === 'object' && !Buffer.isBuffer(value) && !ArrayBuffer.isView(value)) {
-      value = isJsonColumn(column.type) ? JSON.stringify(value) : String(value);
+      value = isJsonColumn(column) ? JSON.stringify(value) : String(value);
     }
     if (spec.kind === 'json') {
       // Parse both operands as documents; binary comparison also works with MariaDB's JSON text representation.
@@ -484,7 +490,7 @@ function validateImportValue(raw, column, rowNumber, nullSentinel) {
     return null;
   }
   if (Buffer.isBuffer(value)) return value;
-  if (isJsonColumn(column.type)) {
+  if (isJsonColumn(column)) {
     if (typeof value === 'string') {
       const text = value.trim();
       if (!text) {
@@ -1393,6 +1399,34 @@ class DatabaseSession {
         ? String(row.generationExpression).trim()
         : null
     }));
+
+    if (/mariadb/i.test(this.version || '')) {
+      try {
+        const remainingTimeout = getRemainingTimeoutMs(deadline);
+        const { result: checkRows } = await this.raw(
+          `SELECT CHECK_CLAUSE AS checkClause
+             FROM information_schema.CHECK_CONSTRAINTS
+            WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = ?`,
+          [database, table], remainingTimeout, { prepared: true }
+        );
+        if (Array.isArray(checkRows)) {
+          for (const chk of checkRows) {
+            const match = /json_valid\s*\(\s*`?([^`\s)]+)`?\s*\)/i.exec(chk.checkClause || '');
+            if (match) {
+              const colName = match[1];
+              const col = columns.find(c => c.name === colName);
+              if (col) {
+                col.isJson = true;
+                col.checkClause = chk.checkClause;
+              }
+            }
+          }
+        }
+      } catch {
+        // Fallback: CHECK_CONSTRAINTS might not be accessible or table might not have checks
+      }
+    }
+
     this.metadata.set(cacheKey, columns);
     return columns;
   }

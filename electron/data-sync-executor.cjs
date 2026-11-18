@@ -127,6 +127,30 @@ class DataSyncExecutor {
         }
       }
 
+      // 5. Engine and Trigger safety verification (must be InnoDB for rollback guarantees)
+      if (typeof worker.raw === 'function') {
+        const tablesToCheck = plan.tables ? Object.keys(plan.tables) : [table];
+        for (const tName of tablesToCheck) {
+          const engineRes = await worker.raw(
+            'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?',
+            [database, tName]
+          );
+          const engine = (engineRes?.result?.[0]?.ENGINE || engineRes?.result?.[0]?.engine || '').toUpperCase();
+          if (engine && engine !== 'INNODB') {
+            throw error('UNSUPPORTED_TABLE_ENGINE', `Chỉ hỗ trợ đồng bộ dữ liệu an toàn với bảng engine InnoDB (bảng "${tName}" sử dụng ${engine}).`);
+          }
+
+          const triggerRes = await worker.raw(
+            'SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ?',
+            [database, tName]
+          );
+          if (Array.isArray(triggerRes?.result) && triggerRes.result.length > 0) {
+            const names = triggerRes.result.map(t => t.TRIGGER_NAME || t.trigger_name).filter(Boolean).join(', ');
+            throw error('TARGET_TABLE_TRIGGERS_DETECTED', `Bảng đích "${tName}" có triggers (${names}). Tác vụ đồng bộ bị chặn để ngăn tác dụng phụ ngoài ý muốn.`);
+          }
+        }
+      }
+
       // 5. Execute in transactional batches
       const effectiveBatchSize = Math.max(1, Math.min(500, Number(batchSize) || 50));
       const batches = [];

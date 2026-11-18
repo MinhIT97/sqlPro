@@ -75,3 +75,83 @@ test('row update distinguishes missing rows from unchanged matched rows', async 
   assert.deepEqual(await session.updateRow(input), { status: 'unchanged', matchedRows: 1, affectedRows: 1, changedRows: 0 });
   await assert.rejects(session.updateRow({ ...input, values: { unknown: 'ignored' } }), { code: 'NO_ROW_CHANGES' });
 });
+
+test('MariaDB JSON contract: accepts JSON objects for check-constrained longtext, rejects plain longtext objects', async () => {
+  // 1. Column with MariaDB JSON contract (longtext with isJson: true)
+  const mariaJsonCol = column('data', 'longtext', { isJson: true, checkClause: 'json_valid(`data`)' });
+  const plainLongtextCol = column('notes', 'longtext');
+  const { session, requests } = setup([
+    column('id', 'int', { key: 'PRI', nullable: 'NO' }),
+    mariaJsonCol,
+    plainLongtextCol
+  ]);
+
+  // Updating MariaDB JSON column with an object properly serializes to JSON string
+  await session.updateRow({
+    database: 'demo',
+    table: 'maria_items',
+    keys: { id: 1 },
+    values: { data: { count: 42, active: true }, notes: 'plain text notes' }
+  });
+
+  assert.equal(requests[0].params[0], '{"count":42,"active":true}');
+  assert.equal(requests[0].params[1], 'plain text notes');
+
+  // Updating MariaDB JSON with invalid JSON string fails with ROW_VALUE_INVALID
+  await assert.rejects(
+    session.updateRow({
+      database: 'demo',
+      table: 'maria_items',
+      keys: { id: 1 },
+      values: { data: '{malformed_json}' }
+    }),
+    { code: 'ROW_VALUE_INVALID' }
+  );
+
+  // Plain longtext column must NEVER accept arbitrary object (not treating all longtext as JSON)
+  await assert.rejects(
+    session.updateRow({
+      database: 'demo',
+      table: 'maria_items',
+      keys: { id: 1 },
+      values: { notes: { raw: 'object' } }
+    }),
+    { code: 'ROW_VALUE_INVALID' }
+  );
+});
+
+test('DatabaseSession.listColumns detects MariaDB json_valid check constraints on longtext columns', async () => {
+  const session = new DatabaseSession({});
+  session.version = '11.4.13-MariaDB-ubu2404';
+
+  session.raw = async (sql, params) => {
+    if (sql.includes('FROM information_schema.COLUMNS')) {
+      return {
+        result: [
+          { name: 'id', type: 'int', nullable: 'NO', position: 1, keyType: 'PRI' },
+          { name: 'payload', type: 'longtext', nullable: 'YES', position: 2, keyType: '' },
+          { name: 'description', type: 'longtext', nullable: 'YES', position: 3, keyType: '' }
+        ]
+      };
+    }
+    if (sql.includes('FROM information_schema.CHECK_CONSTRAINTS')) {
+      return {
+        result: [
+          { checkClause: 'json_valid(`payload`)' },
+          { checkClause: '`id` > 0' }
+        ]
+      };
+    }
+    return { result: [] };
+  };
+
+  const columns = await session.listColumns('test_db', 't_items', { fresh: true });
+
+  const payloadCol = columns.find(c => c.name === 'payload');
+  assert.equal(payloadCol.isJson, true);
+  assert.equal(payloadCol.checkClause, 'json_valid(`payload`)');
+
+  const descCol = columns.find(c => c.name === 'description');
+  assert.equal(descCol.isJson, undefined);
+  assert.equal(descCol.checkClause, undefined);
+});

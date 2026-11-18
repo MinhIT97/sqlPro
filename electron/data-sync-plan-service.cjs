@@ -70,6 +70,7 @@ class DataSyncPlanService {
   constructor(options = {}) {
     this.options = { ...DEFAULT_SYNC_PLAN_OPTIONS, ...options };
     this.store = options.store || null;
+    this.dataDiffService = options.dataDiffService || null;
     this.pendingPlans = new Map();
     this.usedTokens = new Set();
   }
@@ -92,6 +93,7 @@ class DataSyncPlanService {
   }
 
   createSyncPlan({
+    jobId,
     diffReport,
     sourceScope,
     targetScope,
@@ -104,14 +106,28 @@ class DataSyncPlanService {
       throw error('SYNC_PLAN_BUSY', 'Quá nhiều kế hoạch đồng bộ đang chờ; vui lòng thử lại sau.');
     }
 
-    if (!diffReport || typeof diffReport !== 'object') {
+    let report = diffReport;
+    let srcScope = sourceScope;
+    let tgtScope = targetScope;
+
+    if (jobId && this.dataDiffService && typeof this.dataDiffService.getJob === 'function') {
+      const job = this.dataDiffService.getJob(jobId);
+      if (!job || job.status !== 'completed' || !job.report) {
+        throw error('DIFF_JOB_NOT_FOUND', 'Không tìm thấy kết quả so sánh hoàn tất từ Main.');
+      }
+      report = job.report;
+      srcScope = job.sourceScope;
+      tgtScope = job.targetScope;
+    }
+
+    if (!report || typeof report !== 'object') {
       throw error('INVALID_DIFF_REPORT', 'Báo cáo so sánh dữ liệu không hợp lệ.');
     }
 
-    if (!sourceScope || !sourceScope.profileId || !sourceScope.database || !sourceScope.table) {
+    if (!srcScope || !srcScope.profileId || !srcScope.database || !srcScope.table) {
       throw error('INVALID_SCOPE', 'Thông tin bảng nguồn không hợp lệ.');
     }
-    if (!targetScope || !targetScope.profileId || !targetScope.database || !targetScope.table) {
+    if (!tgtScope || !tgtScope.profileId || !tgtScope.database || !tgtScope.table) {
       throw error('INVALID_SCOPE', 'Thông tin bảng đích không hợp lệ.');
     }
 
@@ -119,12 +135,12 @@ class DataSyncPlanService {
       throw error('UNSUPPORTED_SYNC_DIRECTION', 'Hiện chỉ hỗ trợ đồng bộ chiều Nguồn -> Đích (source-to-target).');
     }
 
-    const primaryKeys = Array.isArray(diffReport.primaryKeys) ? diffReport.primaryKeys : [];
+    const primaryKeys = Array.isArray(report.primaryKeys) ? report.primaryKeys : [];
     if (!primaryKeys.length) {
       throw error('DATA_DIFF_NO_PRIMARY_KEY', 'Bảng không có khóa chính; không thể tạo kế hoạch đồng bộ.');
     }
 
-    const columns = Array.isArray(diffReport.columns) ? diffReport.columns : [];
+    const columns = Array.isArray(report.columns) ? report.columns : [];
     if (!columns.length) {
       throw error('INVALID_COLUMNS', 'Thông tin cột bảng không hợp lệ.');
     }
@@ -133,7 +149,7 @@ class DataSyncPlanService {
     const operations = [];
 
     // 1. INSERTS (rows only in source)
-    const onlyInSource = Array.isArray(diffReport.onlyInSource) ? diffReport.onlyInSource : [];
+    const onlyInSource = Array.isArray(report.onlyInSource) ? report.onlyInSource : [];
     for (const item of onlyInSource) {
       const row = item.row;
       const pkValues = [];
@@ -156,7 +172,7 @@ class DataSyncPlanService {
     }
 
     // 2. UPDATES (rows differing between source and target)
-    const different = Array.isArray(diffReport.different) ? diffReport.different : [];
+    const different = Array.isArray(report.different) ? report.different : [];
     for (const item of different) {
       const sRow = item.sourceRow;
       const tRow = item.targetRow;
@@ -187,7 +203,7 @@ class DataSyncPlanService {
 
     // 3. DELETES (rows only in target - OPT-IN ONLY)
     if (includeDeletes) {
-      const onlyInTarget = Array.isArray(diffReport.onlyInTarget) ? diffReport.onlyInTarget : [];
+      const onlyInTarget = Array.isArray(report.onlyInTarget) ? report.onlyInTarget : [];
       for (const item of onlyInTarget) {
         const row = item.row;
         const pkValues = [];
@@ -224,8 +240,8 @@ class DataSyncPlanService {
     const planToken = crypto.randomBytes(32).toString('hex');
     const expiresAt = Date.now() + this.options.planTtlMs;
 
-    const safeSourceScope = structuredClone(sourceScope);
-    const safeTargetScope = structuredClone(targetScope);
+    const safeSourceScope = structuredClone(srcScope);
+    const safeTargetScope = structuredClone(tgtScope);
 
     const payloadToHash = {
       sourceScope: safeSourceScope,

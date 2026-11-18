@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const SchemaDiff = require('../schema-diff.js');
+const { SchemaMigrationGenerator } = require('./schema-migration-generator.cjs');
 
 const DEFAULT_SERVICE_OPTIONS = Object.freeze({
   snapshotTtlMs: 10 * 60 * 1000, planTtlMs: 5 * 60 * 1000,
@@ -140,6 +141,19 @@ class SchemaMigrationService {
       applySupported: false, applyBlockReason: APPLY_BLOCK_REASON,
       sourceScope: projectScope(plan.sourceScope), targetScope: projectScope(plan.targetScope),
       statements: plan.statements, summary: plan.summary
+    });
+  }
+
+  createCandidatePlan({ sourceSnapshotId, targetSnapshotId, options = {}, ttlMs } = {}) {
+    const source = this.getSnapshot(sourceSnapshotId);
+    const target = this.getSnapshot(targetSnapshotId);
+    if (!options || typeof options !== 'object' || Array.isArray(options)) throw error('INVALID_PLAN_OPTIONS', 'Tùy chọn migration không hợp lệ.');
+    const generator = new SchemaMigrationGenerator(this.options);
+    return generator.generateCandidatePlan({
+      sourceSnapshot: source,
+      targetSnapshot: target,
+      options: { ...options, sourceSnapshotId, targetSnapshotId },
+      ttlMs
     });
   }
 

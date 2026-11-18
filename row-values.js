@@ -54,7 +54,7 @@
         : spec.kind === 'time' ? 'HH:mm:ss · hỗ trợ thời lượng âm, hơn 24 giờ và giây lẻ.'
           : 'YYYY-MM-DD HH:mm:ss · giữ nguyên giờ theo phiên database, không đổi múi giờ.';
     } else if (['enum', 'set'].includes(base)) { spec.kind = base; spec.choices = parseChoices(column.type); }
-    else if (base === 'json') { spec.kind = 'json'; spec.hint = 'Nhập JSON hợp lệ. JSON null khác với SQL NULL.'; }
+    else if (base === 'json' || column.isJson === true || (column.checkClause && /json_valid/i.test(column.checkClause))) { spec.kind = 'json'; spec.hint = 'Nhập JSON hợp lệ. JSON null khác với SQL NULL.'; }
     else if (/^(binary|varbinary|tinyblob|blob|mediumblob|longblob)$/.test(base)) {
       spec.kind = 'binary'; spec.hint = 'Hex: 0x0123abcd. 0x là dữ liệu nhị phân rỗng.';
       if (typeof value === 'string' && value.includes('…')) { spec.readOnly = true; spec.hint = 'Chỉ có bản xem trước nhị phân. Dùng SQL hoặc nhập tệp để thay đổi dữ liệu đầy đủ.'; }
@@ -97,7 +97,15 @@
       if (!spec.nullable) invalid('không cho phép NULL.');
       return null;
     }
-    const value = typeof raw === 'string' ? raw : String(raw);
+    if (typeof raw === 'object' && spec.kind !== 'json' && !Buffer.isBuffer(raw) && !ArrayBuffer.isView(raw)) {
+      invalid('không thể lưu object/mảng vào kiểu dữ liệu này.');
+    }
+    let value;
+    if (spec.kind === 'json' && typeof raw === 'object') {
+      try { value = JSON.stringify(raw); } catch { invalid('không thể chuyển thành JSON.'); }
+    } else {
+      value = typeof raw === 'string' ? raw : String(raw);
+    }
     const text = value.trim();
     if (spec.kind === 'integer') {
       if (!/^[+-]?\d+$/.test(text)) invalid('cần nhập số nguyên.');

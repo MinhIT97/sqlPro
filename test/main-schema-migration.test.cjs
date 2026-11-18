@@ -19,10 +19,21 @@ function fixture() {
     async close() { this.connection = null; this.dead = true; }
     async raw(sql, params, timeoutMs) {
       queries.push({ sql, params, timeoutMs, profileId: this.profile.id });
-      if (controls.onRaw) await controls.onRaw(sql, this);
+      if (controls.onRaw) {
+        const intercept = await controls.onRaw(sql, this, params);
+        if (intercept !== undefined) return intercept;
+      }
       if (sql.includes("COLUMN_NAME IN ('EXPRESSION'")) return { result: [] };
       if (sql.includes('foreign_key_checks')) return { result: [{ fkChecks: 1, foreignKeys: 1, sqlMode: '', autocommit: 1 }] };
-      if (sql.includes('information_schema.TABLES')) return { result: controls.tables || [{ name: 'users', type: 'BASE TABLE', engine: 'InnoDB' }] };
+      if (sql.includes('information_schema.TABLES')) {
+        const allTables = (controls.tablesByProfile && controls.tablesByProfile[this.profile.id]) || controls.tables || [{ name: 'users', type: 'BASE TABLE', engine: 'InnoDB' }];
+        if (sql.includes('TABLE_NAME = ?') && params && params.length >= 2) {
+          const tableName = params[1];
+          const matched = allTables.filter(t => t.name === tableName);
+          return { result: matched };
+        }
+        return { result: allTables };
+      }
       if (sql.includes('information_schema.COLUMNS')) return { result: [{ name: 'id', type: 'int', nullable: 'NO', position: 1 }] };
       return { result: [] };
     }
@@ -32,7 +43,9 @@ function fixture() {
       if (id === 'electron') return {
         app: { requestSingleInstanceLock: () => true, on() {}, whenReady: () => new Promise(() => {}), getPath: () => '/tmp/sqlpro-main-schema-tests' },
         ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
-        dialog: { showMessageBox() { throw Error('Unexpected production approval'); } }
+        dialog: {
+          showMessageBox: (...args) => (controls.showMessageBox ? controls.showMessageBox(...args) : Promise.reject(Error('Unexpected production approval')))
+        }
       };
       if (id === './database.cjs') return { ...require(path.join(root, id)), DatabaseSession: Session };
       if (id === './store.cjs') return { getWithSecrets: id => ({ id, host: 'fixture', port: 3306, user: 'fixture', ssh: {}, ...profiles[id] }) };
@@ -313,4 +326,324 @@ test('main lifecycle cancel during worker execution cleans up leases and keeps E
   // Editor session remains functional
   const editorSnap = await r.call('db:schema-snapshot', { profileId: 'tgt', database: 'tgt_db' });
   assert.equal(editorSnap.ok, true);
+});
+
+test('complete collector -> generator -> admission -> orchestrator -> worker flow with preCondition and postCondition', async () => {
+  const r = fixture();
+  r.profiles.src = { readOnly: true, environment: 'local' };
+  r.profiles.tgt = { readOnly: false, environment: 'local' };
+  r.controls.tablesByProfile = {
+    src: [
+      { name: 'users', type: 'BASE TABLE', engine: 'InnoDB' },
+      { name: 'orders', type: 'BASE TABLE', engine: 'InnoDB' }
+    ],
+    tgt: [
+      { name: 'users', type: 'BASE TABLE', engine: 'InnoDB' }
+    ]
+  };
+
+  const snapSrc = await r.call('db:schema-snapshot', { profileId: 'src', database: 'src_db' });
+  const snapTgt = await r.call('db:schema-snapshot', { profileId: 'tgt', database: 'tgt_db' });
+  assert.equal(snapSrc.ok, true);
+  assert.equal(snapTgt.ok, true);
+
+  // Generate candidate plan via generator on Main
+  const candidate = r.evaluate('schemaMigrationService').createCandidatePlan({
+    sourceSnapshotId: snapSrc.data.snapshotId,
+    targetSnapshotId: snapTgt.data.snapshotId
+  });
+
+  assert.equal(candidate.status, 'ready');
+  assert.equal(candidate.applySupported, true);
+  assert.equal(candidate.statements.length, 1);
+  assert.equal(candidate.statements[0].type, 'CREATE_TABLE');
+  assert.equal(candidate.statements[0].table, 'orders');
+  assert.ok(candidate.statements[0].preCondition);
+  assert.equal(candidate.statements[0].preCondition.type, 'TABLE_NOT_EXISTS');
+  assert.ok(candidate.statements[0].postCondition);
+  assert.equal(candidate.statements[0].postCondition.type, 'TABLE_EXISTS');
+
+  // When DDL executes on target worker, simulate table creation so postCondition succeeds
+  r.controls.onRaw = async (sql) => {
+    if (sql.includes('CREATE TABLE `orders`')) {
+      r.controls.tablesByProfile.tgt.push({ name: 'orders', type: 'BASE TABLE', engine: 'InnoDB' });
+    }
+  };
+
+  // Admit plan into orchestrator
+  const admitted = r.evaluate('schemaMigrationOrchestrator').admitPlan(candidate);
+  assert.equal(admitted.status, 'ready');
+
+  // Execute migration job
+  const result = await r.evaluate('schemaMigrationOrchestrator').executeMigrationJob({
+    planToken: admitted.planToken
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.equal(result.executedCount, 1);
+  assert.equal(result.totalCount, 1);
+  assert.equal(result.partialCommit, false);
+
+  // PreCondition and PostCondition queries were executed
+  const preCheck = r.queries.find(q => q.sql.includes('TABLE_NAME = ?') && q.params?.includes('orders') && q.params?.includes('tgt_db'));
+  assert.ok(preCheck, 'PreCondition check query must be executed');
+
+  const ddlQuery = r.queries.find(q => q.sql.includes('CREATE TABLE `orders`'));
+  assert.ok(ddlQuery, 'DDL must be executed');
+
+  // Leases released
+  assert.equal(r.evaluate('sessionRegistry.leases.size'), 0);
+});
+
+test('preCondition failure halts execution immediately with zero DDL queries executed', async () => {
+  const r = fixture();
+  r.profiles.src = { readOnly: true, environment: 'local' };
+  r.profiles.tgt = { readOnly: false, environment: 'local' };
+  r.controls.tablesByProfile = {
+    src: [
+      { name: 'users', type: 'BASE TABLE', engine: 'InnoDB' },
+      { name: 'orders', type: 'BASE TABLE', engine: 'InnoDB' }
+    ],
+    tgt: [
+      { name: 'users', type: 'BASE TABLE', engine: 'InnoDB' }
+    ]
+  };
+
+  const snapSrc = await r.call('db:schema-snapshot', { profileId: 'src', database: 'src_db' });
+  const snapTgt = await r.call('db:schema-snapshot', { profileId: 'tgt', database: 'tgt_db' });
+
+  const candidate = r.evaluate('schemaMigrationService').createCandidatePlan({
+    sourceSnapshotId: snapSrc.data.snapshotId,
+    targetSnapshotId: snapTgt.data.snapshotId
+  });
+
+  const admitted = r.evaluate('schemaMigrationOrchestrator').admitPlan(candidate);
+
+  // Simulate that the table already exists at target when preCondition checks
+  r.controls.onRaw = async (sql, session, params) => {
+    if (session.profile.id === 'tgt' && sql.includes('information_schema.TABLES') && sql.includes('TABLE_NAME = ?') && params?.includes('orders')) {
+      return { result: [{ TABLE_NAME: 'orders' }] }; // Return 1 row instead of 0
+    }
+  };
+
+  await assert.rejects(
+    r.evaluate('schemaMigrationOrchestrator').executeMigrationJob({ planToken: admitted.planToken }),
+    { code: 'MIGRATION_PRECONDITION_FAILED' }
+  );
+
+  // Assert ZERO DDL queries were executed
+  assert.ok(!r.queries.some(q => q.sql.includes('CREATE TABLE `orders`')), 'DDL must not run when preCondition fails');
+  assert.equal(r.evaluate('sessionRegistry.leases.size'), 0);
+});
+
+test('postCondition failure detects unverified schema state and reports failure with partialCommit', async () => {
+  const r = fixture();
+  r.profiles.src = { readOnly: true, environment: 'local' };
+  r.profiles.tgt = { readOnly: false, environment: 'local' };
+  r.controls.tablesByProfile = {
+    src: [
+      { name: 'users', type: 'BASE TABLE', engine: 'InnoDB' },
+      { name: 'orders', type: 'BASE TABLE', engine: 'InnoDB' }
+    ],
+    tgt: [
+      { name: 'users', type: 'BASE TABLE', engine: 'InnoDB' }
+    ]
+  };
+
+  const snapSrc = await r.call('db:schema-snapshot', { profileId: 'src', database: 'src_db' });
+  const snapTgt = await r.call('db:schema-snapshot', { profileId: 'tgt', database: 'tgt_db' });
+
+  const candidate = r.evaluate('schemaMigrationService').createCandidatePlan({
+    sourceSnapshotId: snapSrc.data.snapshotId,
+    targetSnapshotId: snapTgt.data.snapshotId
+  });
+
+  const admitted = r.evaluate('schemaMigrationOrchestrator').admitPlan(candidate);
+
+  // Do NOT add 'orders' to target tables, so postCondition check (expecting 1) returns 0 rows
+  await assert.rejects(
+    r.evaluate('schemaMigrationOrchestrator').executeMigrationJob({ planToken: admitted.planToken }),
+    (err) => {
+      assert.equal(err.code, 'MIGRATION_POSTCONDITION_FAILED');
+      assert.equal(err.job.executedCount, 1);
+      assert.equal(err.job.partialCommit, true);
+      return true;
+    }
+  );
+
+  assert.equal(r.evaluate('sessionRegistry.leases.size'), 0);
+});
+
+test('target schema drift between plan admission and execution halts migration before DDL', async () => {
+  const r = fixture();
+  r.profiles.src = { readOnly: true, environment: 'local' };
+  r.profiles.tgt = { readOnly: false, environment: 'local' };
+  r.controls.tablesByProfile = {
+    src: [
+      { name: 'users', type: 'BASE TABLE', engine: 'InnoDB' },
+      { name: 'orders', type: 'BASE TABLE', engine: 'InnoDB' }
+    ],
+    tgt: [
+      { name: 'users', type: 'BASE TABLE', engine: 'InnoDB' }
+    ]
+  };
+
+  const snapSrc = await r.call('db:schema-snapshot', { profileId: 'src', database: 'src_db' });
+  const snapTgt = await r.call('db:schema-snapshot', { profileId: 'tgt', database: 'tgt_db' });
+
+  const candidate = r.evaluate('schemaMigrationService').createCandidatePlan({
+    sourceSnapshotId: snapSrc.data.snapshotId,
+    targetSnapshotId: snapTgt.data.snapshotId
+  });
+
+  const admitted = r.evaluate('schemaMigrationOrchestrator').admitPlan(candidate);
+
+  // Target schema drifts out-of-band before execution starts
+  r.controls.tablesByProfile.tgt.push({ name: 'external_drift_table', type: 'BASE TABLE', engine: 'InnoDB' });
+
+  await assert.rejects(
+    r.evaluate('schemaMigrationOrchestrator').executeMigrationJob({ planToken: admitted.planToken }),
+    { code: 'TARGET_SCHEMA_DRIFT' }
+  );
+
+  assert.ok(!r.queries.some(q => q.sql.includes('CREATE TABLE `orders`')), 'Zero DDL must run on target schema drift');
+  assert.equal(r.evaluate('sessionRegistry.leases.size'), 0);
+});
+
+test('in-flight unexpected driver error marks executionUncertain: true without false success', async () => {
+  const r = fixture();
+  r.profiles.src = { readOnly: true, environment: 'local' };
+  r.profiles.tgt = { readOnly: false, environment: 'local' };
+  r.controls.tablesByProfile = {
+    src: [
+      { name: 'users', type: 'BASE TABLE', engine: 'InnoDB' },
+      { name: 'orders', type: 'BASE TABLE', engine: 'InnoDB' }
+    ],
+    tgt: [
+      { name: 'users', type: 'BASE TABLE', engine: 'InnoDB' }
+    ]
+  };
+
+  const snapSrc = await r.call('db:schema-snapshot', { profileId: 'src', database: 'src_db' });
+  const snapTgt = await r.call('db:schema-snapshot', { profileId: 'tgt', database: 'tgt_db' });
+
+  const candidate = r.evaluate('schemaMigrationService').createCandidatePlan({
+    sourceSnapshotId: snapSrc.data.snapshotId,
+    targetSnapshotId: snapTgt.data.snapshotId
+  });
+
+  const admitted = r.evaluate('schemaMigrationOrchestrator').admitPlan(candidate);
+
+  // Simulate network drop / unknown driver crash when DDL executes
+  r.controls.onRaw = async (sql) => {
+    if (sql.includes('CREATE TABLE `orders`')) {
+      const crash = new Error('Connection lost to target database server');
+      crash.code = 'PROTOCOL_CONNECTION_LOST';
+      throw crash;
+    }
+  };
+
+  await assert.rejects(
+    r.evaluate('schemaMigrationOrchestrator').executeMigrationJob({ planToken: admitted.planToken }),
+    (err) => {
+      assert.equal(err.job.executionUncertain, true);
+      assert.equal(err.job.partialCommit, true);
+      assert.equal(err.job.status, 'uncertain');
+      return true;
+    }
+  );
+
+  assert.equal(r.evaluate('sessionRegistry.leases.size'), 0);
+});
+
+test('production approval dialog matrix: requires approval, dialog cancel, dialog confirm, context drift, single-use token', async () => {
+  const r = fixture();
+  r.profiles.src = { readOnly: true, environment: 'local' };
+  r.profiles.tgt = { readOnly: false, environment: 'production' };
+  r.controls.tablesByProfile = {
+    src: [
+      { name: 'users', type: 'BASE TABLE', engine: 'InnoDB' },
+      { name: 'orders', type: 'BASE TABLE', engine: 'InnoDB' }
+    ],
+    tgt: [
+      { name: 'users', type: 'BASE TABLE', engine: 'InnoDB' }
+    ]
+  };
+
+  const snapSrc = await r.call('db:schema-snapshot', { profileId: 'src', database: 'src_db' });
+  const snapTgt = await r.call('db:schema-snapshot', { profileId: 'tgt', database: 'tgt_db' });
+
+  const candidate1 = r.evaluate('schemaMigrationService').createCandidatePlan({
+    sourceSnapshotId: snapSrc.data.snapshotId,
+    targetSnapshotId: snapTgt.data.snapshotId
+  });
+  const admitted1 = r.evaluate('schemaMigrationOrchestrator').admitPlan(candidate1);
+
+  // 1. Without approval token, execution must be blocked on production target
+  await assert.rejects(
+    r.evaluate('schemaMigrationOrchestrator').executeMigrationJob({ planToken: admitted1.planToken }),
+    { code: 'PRODUCTION_APPROVAL_REQUIRED' }
+  );
+
+  // Plan 2 for dialog cancel test
+  const candidate2 = r.evaluate('schemaMigrationService').createCandidatePlan({
+    sourceSnapshotId: snapSrc.data.snapshotId,
+    targetSnapshotId: snapTgt.data.snapshotId
+  });
+  const admitted2 = r.evaluate('schemaMigrationOrchestrator').admitPlan(candidate2);
+
+  // 2. Dialog cancel: user clicks Cancel (response: 0)
+  r.controls.showMessageBox = async () => ({ response: 0 });
+  await assert.rejects(
+    r.evaluate('schemaMigrationOrchestrator').requestProductionApproval(admitted2.planToken),
+    { code: 'MIGRATION_APPROVAL_CANCELED' }
+  );
+
+  // 3. Dialog confirm: user clicks Approve (response: 1)
+  r.controls.showMessageBox = async () => ({ response: 1 });
+  const approvalRes = await r.evaluate('schemaMigrationOrchestrator').requestProductionApproval(admitted2.planToken);
+  assert.ok(approvalRes.approvalToken);
+  assert.ok(approvalRes.expiresAt);
+
+  // 4. Target profile drift invalidates approval
+  r.profiles.tgt.host = 'drifted-production-host';
+  await assert.rejects(
+    r.evaluate('schemaMigrationOrchestrator').executeMigrationJob({
+      planToken: admitted2.planToken,
+      approvalToken: approvalRes.approvalToken
+    }),
+    { code: 'MIGRATION_CONTEXT_CHANGED' }
+  );
+
+  // Restore profile host
+  delete r.profiles.tgt.host;
+
+  // Re-approve after context was restored
+  const freshApproval = await r.evaluate('schemaMigrationOrchestrator').requestProductionApproval(admitted2.planToken);
+
+  // 5. Successful execution with valid approval token
+  r.controls.onRaw = async (sql) => {
+    if (sql.includes('CREATE TABLE `orders`')) {
+      r.controls.tablesByProfile.tgt.push({ name: 'orders', type: 'BASE TABLE', engine: 'InnoDB' });
+    }
+  };
+
+  const result = await r.evaluate('schemaMigrationOrchestrator').executeMigrationJob({
+    planToken: admitted2.planToken,
+    approvalToken: freshApproval.approvalToken
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.equal(result.executedCount, 1);
+
+  // 6. Token is single-use; reuse must be rejected
+  await assert.rejects(
+    r.evaluate('schemaMigrationOrchestrator').executeMigrationJob({
+      planToken: admitted2.planToken,
+      approvalToken: freshApproval.approvalToken
+    }),
+    { code: 'MIGRATION_TOKEN_USED' }
+  );
+
+  assert.equal(r.evaluate('sessionRegistry.leases.size'), 0);
 });

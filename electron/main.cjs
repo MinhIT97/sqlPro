@@ -48,6 +48,20 @@ const { RestoreObjectInventory } = require('./restore-object-inventory.cjs');
 const { RestoreDependencyGraph } = require('./restore-dependency-graph.cjs');
 const { validateAnalyzeSource, buildAnalyzeQuery, assertAnalyzeSession, assertPlanExport } = require('./query-analyze.cjs');
 const { explainSettings, explainSchema } = require('../query-results.js');
+const {
+  SchemaSnapshotCollector,
+  projectSnapshotForRenderer
+} = require('./schema-snapshot.cjs');
+const { SchemaMigrationService } = require('./schema-migration-service.cjs');
+const {
+  SchemaMigrationAdmission,
+  SchemaMigrationApproval,
+  createMainContextHooks,
+  createSourceVerifier
+} = require('./schema-migration-admission.cjs');
+const schemaMigrationService = new SchemaMigrationService();
+const schemaMigrationAdmission = new SchemaMigrationAdmission();
+const schemaMigrationApproval = new SchemaMigrationApproval();
 let scheduleServices;
 let schedulerReady = false;
 let backupContextGeneration = 0;
@@ -62,6 +76,9 @@ function backupSchedules() {
 
 function stopBackupSchedules() {
   backupContextGeneration++;
+  schemaMigrationService.clear();
+  schemaMigrationAdmission.clear();
+  schemaMigrationApproval.clear();
   backupInspection.invalidate?.();
   scheduleServices?.scheduler.stop();
   if (activeDatabaseTransfer?.scheduleId || ['backup-retention', 'backup-selection-preview'].includes(activeDatabaseTransfer?.operation)) cancelDatabaseTransfer(activeDatabaseTransfer);
@@ -245,6 +262,21 @@ function profileTargetChanged() {
 function assertSessionProfile(current) {
   if (sessionProfileFingerprint(store.getWithSecrets(current.profileId)) !== current.profileFingerprint) throw profileTargetChanged();
 }
+
+const schemaMigrationSourceVerifier = createSourceVerifier();
+const schemaMigrationContextHooks = createMainContextHooks({
+  store,
+  openSessions,
+  sessionRegistry,
+  getGeneration: () => backupContextGeneration,
+  fingerprintProfile: productionProfileFingerprint,
+  sessionFingerprint: sessionProfileFingerprint,
+  assertProfile: assertSessionProfile
+});
+schemaMigrationApproval.getProfileWithSecrets = (id) => store.getWithSecrets(id);
+schemaMigrationApproval.fingerprintProfile = productionProfileFingerprint;
+schemaMigrationApproval.checkContext = (plan) => schemaMigrationContextHooks.checkContext(plan);
+schemaMigrationApproval.getGeneration = () => backupContextGeneration;
 
 async function confirmProductionTransfer(profileId, database, filePath, operation, details) {
   const profile = store.getWithSecrets(profileId);
@@ -1185,6 +1217,62 @@ handle('db:show-create', (payload) => {
   }
   return withSessionFor(payload.profileId, (session) => session.showCreate(payload.database, payload.name, payload.kind), { retry: true });
 });
+
+function assertSchemaSnapshotScope(snapshot) {
+  const scope = snapshot.scope;
+  const entry = openSessions.get(scope.profileId);
+  if (!entry || entry.session.dead || entry.sessionId !== scope.sessionId
+      || backupContextGeneration !== scope.generation
+      || productionProfileFingerprint(store.getWithSecrets(scope.profileId)) !== scope.profileFingerprint) {
+    throw Object.assign(new Error('Phiên kết nối hoặc cấu hình đã thay đổi. Hãy thu thập lại snapshot.'), { code: 'SESSION_CONTEXT_CHANGED' });
+  }
+  assertSessionProfile(entry);
+  return entry;
+}
+
+handle('db:schema-snapshot', async (payload) => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+      || typeof payload.database !== 'string' || !payload.database.trim()
+      || payload.database.length > 64 || payload.database.includes('\0')) throw new Error('Database không hợp lệ.');
+  const profileId = resolveProfileId(payload.profileId);
+  const database = payload.database;
+  const generation = backupContextGeneration;
+  const entry = await ensureSession(profileId);
+  assertSessionProfile(entry);
+  if (generation !== backupContextGeneration) throw Object.assign(new Error('Phiên ứng dụng đã thay đổi.'), { code: 'SESSION_CONTEXT_CHANGED' });
+  if (entry.productionWriteInProgress || entry.exclusiveOperation || entry.session.activeTask
+      || entry.session.inTransaction || entry.session.autocommit === false || sessionRegistry.leases.get(entry)) {
+    throw Object.assign(new Error('Phiên đang bận. Hãy đợi tác vụ hoàn tất rồi thử lại.'), { code: 'SESSION_BUSY' });
+  }
+  const release = sessionRegistry.acquire(entry);
+  entry.exclusiveOperation = true;
+  try {
+    const collector = new SchemaSnapshotCollector(entry.session, {
+      profileId: entry.profileId, sessionId: entry.sessionId, generation,
+      profileFingerprint: productionProfileFingerprint(store.getWithSecrets(entry.profileId))
+      // Quotas belong to Main; renderer options cannot disable them.
+    });
+    const snapshot = await collector.collect(database);
+    assertSchemaSnapshotScope(snapshot);
+    const snapshotId = schemaMigrationService.storeSnapshot(snapshot);
+    return { ...projectSnapshotForRenderer(snapshot), snapshotId };
+  } finally {
+    entry.exclusiveOperation = false;
+    release();
+  }
+});
+
+handle('db:create-migration-plan', (payload) => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Tham số kế hoạch migration không hợp lệ.');
+  const source = schemaMigrationService.getSnapshot(payload.sourceSnapshotId);
+  const target = schemaMigrationService.getSnapshot(payload.targetSnapshotId);
+  assertSchemaSnapshotScope(source);
+  assertSchemaSnapshotScope(target);
+  return schemaMigrationService.createMigrationPlan(payload);
+});
+
+// Fail closed at the IPC boundary too: confirmed/production flags cannot enable DDL.
+handle('db:apply-migration-plan', () => schemaMigrationService.applyPlan());
 
 handle('db:table-data', (payload) => {
   if (!payload || typeof payload !== 'object') throw new Error('Tham số không hợp lệ.');

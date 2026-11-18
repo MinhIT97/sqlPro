@@ -1,9 +1,11 @@
 # Bàn giao triển khai SqlPro cho Gemini
 
-Ngày: 17/11/2026. Mốc đối chiếu: f812fc1, phiên bản package 0.3.12.
+Ngày cập nhật: 18/11/2026. Mốc đối chiếu ban đầu: f812fc1, phiên bản package 0.3.12.
 Tài liệu này là kế hoạch bàn giao dựa trên code và test hiện có, không phải chứng nhận phát hành.
 
-Trạng thái sau sửa findings B02: xem [B02_REVIEW_FIXES.md](B02_REVIEW_FIXES.md). Collector và test đã có; tích hợp main-owned plan/executor và kiểm chứng DB thật vẫn còn việc. Không coi fingerprint là quyền mở lại Apply.
+Trạng thái sau review cuối E1: xem [B02_REVIEW_FIXES.md](B02_REVIEW_FIXES.md). Collector/IPC, main-owned preview và admission/approval đã có; 23 test admission và 49 test migration đạt. Digest thống nhất, adapter tự kiểm payload thay vì tin digest caller. Executor thử nghiệm chưa nối Apply IPC; source verifier còn fail-closed. Chốt E1 trong phạm vi offline/Main contracts, chưa nghiệm thu DB thật hoặc toàn B02/G6.
+
+**Nhiệm vụ đang giao: B02-E2 — Job, worker và cancel**, theo thứ tự/file/test/điều kiện nhận ở cuối [B02_REVIEW_FIXES.md](B02_REVIEW_FIXES.md). Chỉ làm E2 rồi gửi Codex review; giữ `MIGRATION_APPLY_NOT_READY` tại Main/service, không thêm đường ghi lách guard. Chưa làm E3 hoặc chuyển B03. Các mục B02 tổng quát bên dưới là đích cuối, không thay thế phạm vi E2.
 
 ## 1. Phân công và cách làm từ đây
 

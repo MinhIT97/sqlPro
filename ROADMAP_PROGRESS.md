@@ -1,5 +1,53 @@
 # Tiến độ roadmap SqlPro
 
+## 18/11 — Chốt review E1 và bàn giao E2
+
+- Review lại các bản sửa E1, xác minh digest thống nhất giữa admission/approval/executor. Sửa thêm approval tin digest do caller truyền: tự hash lại payload và đối chiếu target ID/expiry; test đổi SQL/thứ tự/options/nguồn/đích với digest cũ đã fail trước sửa và pass sau sửa. Token sai vẫn bị consume.
+- `npm run check` **1043 pass / 0 fail / 14 opt-in skip** (1057 tổng); focused migration **49/49** (23 admission, 12 executor, 9 service, 5 Main IPC). Renderer **100/100**, website **14/14**, server syntax check và **17/17**, diff whitespace check đạt. Chỉ fixture/temp, chưa kiểm DB thật/bộ cài trong lượt này.
+- Chốt E1 trong phạm vi admission/approval và offline/Main contracts. Apply ở Main/service vẫn `MIGRATION_APPLY_NOT_READY`; source verifier vẫn `SOURCE_VERIFIER_NOT_READY`. Không nghiệm thu thực thi migration thật hoặc toàn B02/G6.
+- Gemini tiếp tục **B02-E2: Job, worker và cancel**, có thứ tự/module/test/tiêu chí nhận tại [B02_REVIEW_FIXES.md](B02_REVIEW_FIXES.md). Giữ guard, chưa mở UI Apply, chưa chuyển E3/B03.
+
+## 17/11 — Sửa lỗi tính nhất quán planDigest (P2) B02-E1 và nghiệm thu admission / approval
+
+- **Sửa lỗi tính nhất quán planDigest (P2)**:
+  - Tách/loại trừ trường `planDigest` khỏi payload khi tính hash trong `planDigest(plan)` tại cả `schema-migration-executor.cjs` và `schema-migration-admission.cjs`.
+  - Loại bỏ hoàn toàn sự tự tham chiếu khiến `admitted.planDigest !== planDigest(admitted)`. Đảm bảo giá trị digest do admission phát hành luôn ổn định, bất biến và trùng khớp 100% với hash do approval và executor tính toán.
+  - Hỗ trợ xác minh `approval.authorizeProduction({ plan, planDigest: admitted.planDigest, approvalToken })` trực tiếp bằng giá trị `admitted.planDigest` mà không bị `PRODUCTION_APPROVAL_MISMATCH`.
+  - Bổ sung kiểm thử equality, hash stability, tampering rejection và xác minh approval trong `test/schema-migration-admission.test.cjs`.
+- **Kiểm chứng**: `npm run check` **1042 pass / 0 fail / 14 skip** (1056 tổng). Focused migration suite **48/48** (22 admission/approval, 12 executor, 9 service, 5 main IPC; 58/58 gồm B01 baseline). Renderer smoke **100/100**, website **14/14**, server **17/17**, `git diff --check` đạt 0 lỗi formatting/whitespace. Apply IPC tiếp tục giữ khóa fail-closed. Đã sẵn sàng cho Codex review E1.
+
+## 17/11 — Sửa 4 findings vòng 2 B02-E1 và nghiệm thu admission / approval
+
+- **Sửa finding 1 vòng 2 (P1)**: Tái kiểm tra profile và generation ngay sau `await checkContext()` và trước khi lưu token; target bị chuyển sang read-only hoặc cấu hình đổi trong khi kiểm tra context bị chặn ngay với `CONNECTION_READ_ONLY` / `PRODUCTION_CONTEXT_CHANGED`.
+- **Sửa finding 2 vòng 2 (P2)**: Tính toán `expiresAt` sau dialog bằng `Math.min(plan.expiresAt, finalNow + ttlMs)`; loại bỏ hoàn toàn khả năng approval hết hạn muộn hơn plan gây mismatch trong `authorizeProduction()`.
+- **Sửa finding 3 vòng 2 (P2)**: Quản lý slot quota in-flight bằng `inFlightSlots = new Set()`; `clear()` dọn sạch slot mà không làm bộ đếm bị âm khi các yêu cầu cũ chạm khối `finally`.
+- **Sửa finding 4 vòng 2 (P2)**: Đối chiếu `sourceProfile` với `plan.sourceScope` và `fingerprintProfile` trước và sau dialog; ngăn chặn hiển thị dialog với thông tin nguồn giả mạo hoặc trôi cấu hình.
+- **Kiểm chứng**: `npm run check` **1041 pass / 0 fail / 14 skip** (1055 tổng). Focused migration suite **47/47** (21 admission/approval, 12 executor, 9 service, 5 main IPC; 57/57 gồm B01 baseline). Renderer smoke **100/100**, website **14/14**, server **17/17**, `git diff --check` đạt 0 lỗi formatting/whitespace. Apply IPC giữ khóa fail-closed. Sẵn sàng giao Codex review E1.
+
+## 17/11 — Sửa 7 findings review B02-E1 và nghiệm thu admission / approval
+
+- **Sửa finding 1 (P1)**: Bắt buộc `showConfirmDialog` là hàm hợp lệ; thiếu hoặc sai hàm từ chối ngay với `CONFIRM_DIALOG_REQUIRED`, không bao giờ tự phát approval token.
+- **Sửa finding 2 (P1)**: Đối chiếu `targetProfile.id` và `fingerprintProfile(targetProfile)` với `plan.targetScope` trước khi mở dialog và sau await confirmation; từ chối profile giả hoặc lệch fingerprint với `TARGET_PROFILE_MISMATCH` / `PRODUCTION_CONTEXT_CHANGED`.
+- **Sửa finding 3 (P1)**: Thêm `generation` tracking tại `SchemaMigrationApproval`; gọi `clear()` (khi logout/reset) hủy toàn bộ yêu cầu đang chờ và chặn hồi sinh token sau dialog với `PRODUCTION_CONTEXT_CHANGED`.
+- **Sửa finding 4 (P1)**: Chấm dứt auto-extension plan hết hạn trong `admitCandidate()`; plan có `expiresAt <= now` hoặc vượt max TTL bị từ chối ngay với `MIGRATION_PLAN_EXPIRED` / `INVALID_PLAN_EXPIRY`.
+- **Sửa finding 5 (P1)**: `createSourceVerifier()` trong E1 trả lỗi fail-closed `SOURCE_VERIFIER_NOT_READY`, không dùng lại cache cũ để tránh che giấu drift schema nguồn. Verifier đọc mới sẽ được hoàn thiện ở E2.
+- **Sửa finding 6 (P2)**: Quản lý `usedTokens` tại `SchemaMigrationAdmission`; token đã consume bị cấm tái cấp hoặc tái admit với `MIGRATION_TOKEN_USED`.
+- **Sửa finding 7 (P2)**: Giữ slot quota (`inFlightCount`) trước await `showConfirmDialog`; với limit=1, cuộc gọi đồng thời thứ hai bị chặn ngay với `PRODUCTION_APPROVAL_BUSY` trước khi mở dialog; slot được giải phóng trong `finally`.
+- **Kiểm chứng**: `npm run check` **1037 pass / 0 fail / 14 skip** (1051 tổng). Focused migration suite **43/43** (17 admission/approval, 12 executor, 9 service, 5 main IPC; 53/53 gồm B01 baseline). Renderer smoke **100/100**, website **14/14**, server **17/17**, `git diff --check` đạt 0 lỗi formatting/whitespace. Apply IPC giữ khóa fail-closed. Sẵn sàng giao Codex review E1.
+
+## 17/11 — Review executor thử nghiệm và giao B02-E1
+
+- Sửa admission nhận plan từ caller/replay, dùng sai Production confirm, profile/context thay đổi qua await, thiếu source proof, FK override và ledger timeout/cancel. Executor chỉ nhận token qua các hook tin cậy do Main cung cấp; progress nhận bản sao, lỗi callback async được giữ riêng; cleanup giữ thông tin DDL đã chạy.
+- Module này **chưa nối IPC**. Main/service tiếp tục trả `MIGRATION_APPLY_NOT_READY`; preview không được tự nâng thành ready. Chưa nghiệm thu job cancel xuyên suốt, expected schema từng bước hoặc DB thật.
+- Check **1020 pass / 0 fail / 14 skip** (1034 tổng); focused **26/26**; Electron **100/100**, website **14/14**, server check và **17/17**. Chỉ fixture/temp, chưa kiểm MySQL/MariaDB thật/bộ cài trong lượt này.
+- Gemini làm **B02-E1: Main-owned admission và Production approval**, giữ Apply khóa rồi gửi review. Cấu trúc, thứ tự, test và điều kiện nhận nằm ở cuối [B02_REVIEW_FIXES.md](B02_REVIEW_FIXES.md); E2/E3 là các gói sau, B02/G6 chưa hoàn tất.
+
+## 17/11 — Review IPC snapshot và migration preview
+
+- Sửa collision content hash giữa hai server bằng `snapshotId` riêng; snapshot/plan giữ bản sao bất biến, có TTL/quota. IPC snapshot giữ lease độc quyền và kiểm phiên/cấu hình/policy/generation thật sau await; quota renderer không ghi đè giới hạn main.
+- Gỡ executor thử nghiệm dùng phiên Editor/tắt FK mặc định; cả IPC và service Apply giữ `MIGRATION_APPLY_NOT_READY`, kể cả renderer gửi confirmed/token. Plan chỉ preview, không có statement được phép thực thi; metadata chưa đầy đủ/chưa hỗ trợ bị chặn trước SchemaDiff.
+- Check **1008 pass / 0 fail / 14 skip**, focused service/IPC **14/14** qua driver giả lập. Chưa kiểm DB thật. Tiếp theo: worker executor + production approval + drift/source/target/partial DDL/cancel và matrix MySQL/MariaDB theo [B02_REVIEW_FIXES.md](B02_REVIEW_FIXES.md). B02/G6 chưa hoàn tất.
+
 ## 17/11 — B01 xác minh và B02 sửa metadata sau review
 
 - Lưu hồ sơ B00/B01 và collector schema đang triển khai. Sửa mất expression/visibility của index và mất DEFINER/SQL_MODE/order/charset/collation của trigger trong fingerprint; thiếu dữ kiện báo unknown/partial, trường hợp chưa hỗ trợ migration giữ blocked.

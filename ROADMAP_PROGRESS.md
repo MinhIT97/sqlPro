@@ -1,5 +1,36 @@
 # Tiến độ roadmap SqlPro
 
+## 18/11 — Review/sửa module E2, giao E2.1
+
+- Sửa ghi đè lease, job chạy lại/foreign job, token-plan mismatch, nhả target trước cleanup và late success sau cancel. Ownership do manager xác minh từ digest/token/entry, không tin `plan.jobId`; target keys dùng tuple, số job lưu/TTL hữu hạn.
+- Thêm worker guard cho connect/USE/collect/DDL treo, close và connect mở muộn; source/target có identity riêng, captureSessionId chỉ để correlation. Verifier đọc mới kiểm scope/hash/coverage/engine/version và credential drift; close lỗi không cấp proof. Projection dùng allowlist, observer async không treo worker hoặc làm unhandled rejection.
+- Check **1072 pass / 0 fail / 14 skip** (1086 tổng); focused **78/78**; Electron **100/100**, website **14/14**, server check + **17/17**, diff check đạt. Có test collector + DatabaseSession thật với driver giả lập và schema drift qua metadata reads; chưa chạy DB thật/bộ cài/benchmark trong lượt này.
+- E2 **chưa nghiệm thu tích hợp Main**: verifier Main vẫn thiếu cấu hình store, chưa có facade điều phối job/executor toàn luồng. Apply vẫn khóa. Gemini làm **E2.1 — Tích hợp Main và kiểm chứng lifecycle**, theo [B02_REVIEW_FIXES.md](B02_REVIEW_FIXES.md); chưa chuyển E3/B03.
+
+## 18/11 — Hồ sơ triển khai E2 trước review
+
+- **Xây dựng module Main-only `electron/schema-migration-jobs.cjs`**:
+  - Quản lý trạng thái job với state machine rõ ràng: `preparing` -> `verifying` -> `executing` -> `completed` | `cancelled` | `failed` | `uncertain`.
+  - Quản lý hạn mức và cạnh tranh (concurrency quota): tối đa 2 job active song song, cấm 2 job chạy đồng thời trên cùng database đích (`TARGET_BUSY`). Tự động dọn dẹp job cũ theo TTL (`jobTtlMs`).
+  - Hủy bỏ toàn diện (cancellation): `cancelJob(jobId)`, `cancelAll(reason)`, `clear()`. Tích hợp `AbortController`/signal xuyên suốt các bước; hủy giữa chừng DDL không hứa rollback, đánh dấu `uncertain` và bảo vệ ledger executed.
+  - Chiếu dữ liệu an toàn cho renderer (`projectForRenderer()`): áp dụng whitelist nghiêm ngặt, tuyệt đối không lộ mật khẩu, thông tin kết nối, raw SQL, DEFINER hay nội dung lỗi driver. Mã lỗi được whitelist hóa an toàn (`sanitizeErrorCode`). Toàn bộ ledger chi tiết và raw SQL chỉ lưu trữ in-memory tại Main Process.
+- **Source Verifier đọc mới trên worker độc lập (`createSourceVerifier` trong `electron/schema-migration-admission.cjs`)**:
+  - Thay thế placeholder fail-closed của E1 bằng implementation hoàn chỉnh. Đọc profile với secret từ store thật, tạo `DatabaseSession` độc lập (không dùng phiên Editor), kết nối, `USE \`<database>\``, và thu thập snapshot mới qua `SchemaSnapshotCollector`.
+  - Kiểm tra trôi cấu hình (drift) profile nguồn trước và sau khi đọc metadata; chặn ngay khi coverage không `complete` (`SOURCE_SCHEMA_INCOMPLETE`) hoặc khi fingerprint `snapshotIdentity` bị thay đổi (`SOURCE_SCHEMA_DRIFT`).
+  - Phân biệt rõ danh tính worker (`workerSessionId`) với phiên Editor đã được bind (`captureSessionId` / `sessionId`).
+- **Điều phối Lease & Session Registry**:
+  - Khi job chạy, phiên Editor của target và source được đánh dấu `exclusiveOperation = true` và `exclusiveOwnerJobId = job.jobId`.
+  - Mọi thao tác khác từ Editor hoặc job cạnh tranh đều thấy `SESSION_BUSY`, bảo vệ tính toàn vẹn của phiên.
+  - `checkContext(plan)` của chính migration job nhận diện `exclusiveOwnerJobId === plan.jobId` nên không tự chặn chính mình. Leases được giải phóng sạch sẽ trong `finally`.
+- **Giữ nguyên Fail-Closed Apply Guard**:
+  - `db:apply-migration-plan` và `SchemaMigrationService.applyPlan` tiếp tục trả lỗi `MIGRATION_APPLY_NOT_READY`. Không có bất kỳ đường ghi công khai nào được mở.
+- **Kiểm chứng thực tế**:
+  - Unit tests mới: `test/schema-migration-jobs.test.cjs` (9/9 pass), `test/schema-migration-source-verifier.test.cjs` (7/7 pass).
+  - Toàn bộ test migration: **75/75 pass** (5 Main IPC, 10 B01 baseline, 23 admission, 12 executor, 9 jobs, 9 service, 7 source verifier).
+  - `npm run check`: **1059 pass / 0 fail / 14 opt-in skip** (1073 tổng).
+  - Electron renderer smoke: **100/100 pass**. Website smoke: **14/14 pass**. Server tests: **17/17 pass**.
+  - `git diff --check`: đạt chuẩn, 0 lỗi whitespace/formatting. Sẵn sàng bàn giao diff/test E2 cho Codex review.
+
 ## 18/11 — Chốt review E1 và bàn giao E2
 
 - Review lại các bản sửa E1, xác minh digest thống nhất giữa admission/approval/executor. Sửa thêm approval tin digest do caller truyền: tự hash lại payload và đối chiếu target ID/expiry; test đổi SQL/thứ tự/options/nguồn/đích với digest cũ đã fail trước sửa và pass sau sửa. Token sai vẫn bị consume.

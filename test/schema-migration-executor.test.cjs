@@ -33,7 +33,11 @@ function fixture(overrides = {}) {
     getProfileWithSecrets: id => profiles[id], fingerprintProfile: computeSchemaFingerprint,
     checkContext: async () => true, verifySource: async s => proof(s),
     createSession: p => { created++; assert.equal(p.id, 'target'); return worker; },
-    createCollector: () => ({ collect: async () => proof(plan.targetScope) }), ...overrides
+    createCollector: (session, ctx) => {
+      assert.equal(ctx.sessionId, session.sessionId);
+      assert.notEqual(ctx.sessionId, plan.targetScope.sessionId);
+      return { collect: async () => ({ ...proof(plan.targetScope), scope: { ...plan.targetScope, sessionId: ctx.sessionId } }) };
+    }, ...overrides
   };
   const executor = new SchemaMigrationExecutor(options);
   return { token, plan, profiles, queries, events, worker, options, executor, proof,
@@ -81,6 +85,19 @@ test('admitted plan is detached and progress observers cannot mutate ledger or c
   assert.ok(!r.queries.some(sql => sql.includes('DROP DATABASE')));
   assert.ok(!r.queries.some(sql => sql.startsWith('SET ')));
   assert.equal(result.observerWarnings.length, 2);
+  assert.equal(r.counts().closed, 1);
+});
+
+test('a worker rejecting with no error object never becomes a successful DDL', async () => {
+  const r = fixture(), raw = r.worker.raw;
+  r.worker.raw = sql => sql.startsWith('SELECT') ? raw(sql) : Promise.reject(null);
+  await assert.rejects(r.run(), err => {
+    assert.equal(err.code, 'MIGRATION_EXECUTION_FAILED');
+    assert.equal(err.executionUncertain, true);
+    assert.equal(err.executedCount, 0);
+    assert.equal(err.ledger[0].status, 'uncertain');
+    return true;
+  });
   assert.equal(r.counts().closed, 1);
 });
 
@@ -156,10 +173,10 @@ test('fresh source/target proof and safe worker settings are required, including
       if (variant === 'source-session') proof.scope.sessionId = 'stale-session';
       return proof;
     };
-    r.executor.createCollector = () => ({ collect: async () => ({ ...r.proof(r.plan.targetScope),
+    r.executor.createCollector = (_, ctx) => ({ collect: async () => ({ ...r.proof(r.plan.targetScope), scope: { ...r.plan.targetScope, sessionId: ctx.sessionId },
       ...(variant === 'target' ? { snapshotIdentity: '0'.repeat(64) } : {}),
       ...(variant === 'target-session' ? { scope: { ...r.plan.targetScope, sessionId: 'stale-session' } } : {}),
-      ...(variant === 'target-engine' ? { scope: { ...r.plan.targetScope, engine: 'MariaDB' } } : {}),
+      ...(variant === 'target-engine' ? { scope: { ...r.plan.targetScope, sessionId: ctx.sessionId, engine: 'MariaDB' } } : {}),
       ...(variant === 'incomplete' ? { coverage: 'partial' } : {}) }) });
     if (variant === 'fk-zero') r.worker.raw = async sql => { r.queries.push(sql); return { result: [{ fkChecks: 0, autocommit: 1 }] }; };
     if (variant === 'setting-missing') r.worker.raw = async sql => { r.queries.push(sql); return { result: [] }; };
@@ -250,4 +267,45 @@ test('worker close failure is reported and plan digest binds SQL as well as targ
   const original = planDigest(r.plan);
   r.plan.statements[0].sql = 'DROP DATABASE sample';
   assert.notEqual(planDigest(r.plan), original);
+});
+
+test('cancel during target connect or collector stops promptly and closes worker; source verifier receives signal', async () => {
+  for (const phase of ['connect', 'use', 'collect']) {
+    const r = fixture(), controller = new AbortController();
+    let began, finish;
+    const started = new Promise(resolve => { began = resolve; });
+    const pendingPhase = () => { began(); return new Promise(resolve => { finish = resolve; }); };
+    r.options.verifySource = async (scope, options) => { assert.equal(options.signal, controller.signal); return r.proof(scope); };
+    if (phase === 'connect') r.worker.connect = pendingPhase;
+    else if (phase === 'use') r.worker.useDatabase = pendingPhase;
+    else r.executor.createCollector = () => ({ collect: pendingPhase });
+    const pending = r.run({ signal: controller.signal });
+    await started;
+    controller.abort();
+    await assert.rejects(pending, { code: 'QUERY_CANCELED' });
+    assert.equal(r.counts().closed, 1);
+    assert.ok(r.queries.every(sql => sql.startsWith('SELECT')));
+    finish(r.proof(r.plan.targetScope));
+    await new Promise(resolve => setImmediate(resolve));
+  }
+});
+
+test('worker deadline interrupts a hung DDL and reports uncertain execution without retry', async () => {
+  const r = fixture();
+  r.plan.options.statementTimeoutMs = 15;
+  const raw = r.worker.raw;
+  r.worker.raw = sql => {
+    if (sql.startsWith('SELECT')) return raw(sql);
+    r.queries.push(sql);
+    return new Promise(() => {});
+  };
+  await assert.rejects(r.run(), err => {
+    assert.equal(err.code, 'QUERY_TIMEOUT');
+    assert.equal(err.executionUncertain, true);
+    assert.equal(err.partialCommit, true);
+    assert.equal(err.ledger[0].status, 'uncertain');
+    assert.equal(err.ledger[1].status, 'not_run');
+    return true;
+  });
+  assert.equal(r.counts().closed, 1);
 });

@@ -1,8 +1,10 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const { assertWritable } = require('./connection-policy.cjs');
 const { DatabaseSession, isTimeoutOrConnectionError } = require('./database.cjs');
 const { SchemaSnapshotCollector, computeSchemaFingerprint } = require('./schema-snapshot.cjs');
+const { createWorkerGuard } = require('./schema-migration-worker.cjs');
 const error = (code, message) => Object.assign(new Error(message), { code });
 const hash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 
@@ -52,6 +54,7 @@ class SchemaMigrationExecutor {
     // Reserve before the first await, even if admission subsequently fails.
     this.usedTokens.set(planToken, now + 300000);
     const plan = freeze(structuredClone(await this.options.consumePlan(planToken)));
+    const jobContext = { jobId: callerFields.jobId };
     if (!plan || typeof plan.planId !== 'string' || !plan.planId || plan.planToken !== planToken || plan.status !== 'ready' || plan.applySupported !== true) {
       throw error('MIGRATION_PLAN_BLOCKED', 'Plan chưa được Main cấp quyền thực thi.');
     }
@@ -79,6 +82,7 @@ class SchemaMigrationExecutor {
     }
     const digest = planDigest(plan);
     let approval = null;
+    const contextGuard = createWorkerGuard({}, { signal, deadline: plan.expiresAt });
     const assertLive = () => {
       if (signal?.aborted) throw error('QUERY_CANCELED', 'Đã hủy migration.');
       if (Date.now() >= plan.expiresAt) throw error('MIGRATION_PLAN_EXPIRED', 'Plan đã hết hạn.');
@@ -97,7 +101,7 @@ class SchemaMigrationExecutor {
     };
     const guard = async () => {
       profiles();
-      if (await this.options.checkContext(plan) !== true) throw error('MIGRATION_CONTEXT_UNVERIFIED', 'Chưa xác minh được context tại Main.');
+      if (await contextGuard.run(() => this.options.checkContext(plan, jobContext), timeoutMs) !== true) throw error('MIGRATION_CONTEXT_UNVERIFIED', 'Chưa xác minh được context tại Main.');
       return profiles(); // Re-read authoritative policy after every async context check.
     };
     let current = await guard();
@@ -115,12 +119,19 @@ class SchemaMigrationExecutor {
       }
     };
     checkApproval(profiles().target);
-    const matchesSnapshot = (snapshot, scope) => snapshot?.coverage === 'complete'
-      && snapshot.database === scope.database && snapshot.snapshotIdentity === scope.snapshotIdentity
-      && ['profileId', 'sessionId', 'generation', 'profileFingerprint', 'database', 'engine', 'serverVersion']
-        .every(key => snapshot.scope?.[key] === scope[key]);
+    const matchesSnapshot = (snapshot, scope) => {
+      if (!snapshot || snapshot.coverage !== 'complete') return false;
+      if (snapshot.database !== scope.database) return false;
+      if (snapshot.snapshotIdentity !== scope.snapshotIdentity) return false;
+      const coreKeys = ['profileId', 'generation', 'profileFingerprint', 'database', 'engine'];
+      if (!coreKeys.every(key => snapshot.scope?.[key] === scope[key])) return false;
+      if (scope.serverVersion && snapshot.scope?.serverVersion !== scope.serverVersion) return false;
+      const boundSession = snapshot.scope?.captureSessionId || snapshot.scope?.sessionId;
+      if (boundSession !== scope.sessionId) return false;
+      return true;
+    };
     const verifySource = async () => {
-      const sourceSnapshot = await this.options.verifySource(plan.sourceScope);
+      const sourceSnapshot = await this.options.verifySource(plan.sourceScope, { signal, ...jobContext });
       await guard();
       if (!matchesSnapshot(sourceSnapshot, plan.sourceScope)) {
         throw error('SOURCE_SCHEMA_DRIFT', 'Snapshot nguồn không đầy đủ hoặc đã thay đổi.');
@@ -129,24 +140,9 @@ class SchemaMigrationExecutor {
     await verifySource();
 
     const ledger = plan.statements.map((s, index) => ({ id: s.id || `stmt_${index + 1}`, sql: s.sql, status: 'pending', durationMs: null, error: null }));
-    let worker, executedCount = 0, executionUncertain = false, failure = null, cleanupError = null;
+    let worker, workerGuard, executedCount = 0, executionUncertain = false, failure = null, cleanupError = null;
     const observerWarnings = [];
-    const abort = () => {
-      if (!worker) return;
-      worker.dead = true;
-      try { worker.connection?.destroy(); } catch { /* Closing the worker is retried in finally. */ }
-    };
-    signal?.addEventListener('abort', abort, { once: true });
-    const query = sql => {
-      if (signal?.aborted) { abort(); throw error('QUERY_CANCELED', 'Đã hủy migration.'); }
-      if (!signal) return worker.raw(sql, [], timeoutMs);
-      return new Promise((resolve, reject) => {
-        const cancel = () => reject(error('QUERY_CANCELED', 'Đã hủy truy vấn migration; kết quả DDL cần đối chiếu.'));
-        signal.addEventListener('abort', cancel, { once: true });
-        Promise.resolve().then(() => { assertLive(); return worker.raw(sql, [], timeoutMs); })
-          .then(resolve, reject).finally(() => signal.removeEventListener('abort', cancel));
-      });
-    };
+    const query = sql => workerGuard.run(() => worker.raw(sql, [], timeoutMs), timeoutMs);
     try {
       current = await guard();
       checkApproval(current.target);
@@ -154,13 +150,18 @@ class SchemaMigrationExecutor {
       if (!worker || ['connect', 'useDatabase', 'raw', 'close'].some(key => typeof worker[key] !== 'function')) {
         throw error('INVALID_MIGRATION_WORKER', 'Worker độc lập không hợp lệ.');
       }
-      await worker.connect();
+      workerGuard = createWorkerGuard(worker, { signal, deadline: plan.expiresAt });
+      await workerGuard.run(() => worker.connect(), timeoutMs);
       await guard();
-      await worker.useDatabase(plan.targetScope.database);
+      await workerGuard.run(() => worker.useDatabase(plan.targetScope.database), timeoutMs);
       await guard();
-      const collector = this.createCollector(worker, { ...plan.targetScope });
-      const fresh = await collector.collect(plan.targetScope.database);
+      const workerSessionId = `worker_target_${crypto.randomBytes(16).toString('hex')}`;
+      worker.sessionId = workerSessionId;
+      const collector = this.createCollector(worker, { ...plan.targetScope, sessionId: workerSessionId });
+      const captured = await workerGuard.run(() => collector.collect(plan.targetScope.database), timeoutMs);
       await guard();
+      if (captured?.scope?.sessionId !== workerSessionId) throw error('TARGET_SCHEMA_DRIFT', 'Identity worker đích không khớp.');
+      const fresh = { ...captured, scope: { ...captured.scope, workerSessionId, captureSessionId: plan.targetScope.sessionId } };
       if (!matchesSnapshot(fresh, plan.targetScope)) {
         throw error('TARGET_SCHEMA_DRIFT', 'Snapshot đích không đầy đủ hoặc đã thay đổi.');
       }
@@ -194,9 +195,8 @@ class SchemaMigrationExecutor {
       }
     } catch (err) { failure = err; }
     finally {
-      signal?.removeEventListener('abort', abort);
       if (worker && typeof worker.close === 'function') {
-        try { await worker.close(); } catch { cleanupError = 'MIGRATION_WORKER_CLOSE_FAILED'; }
+        try { await (workerGuard || createWorkerGuard(worker)).close(); } catch { cleanupError = 'MIGRATION_WORKER_CLOSE_FAILED'; }
       }
     }
     if (failure || cleanupError) {

@@ -917,7 +917,7 @@ test('SchemaMigrationExecutor executes admitted candidate when wired with Main h
     verifySource: async scope => proof(scope),
     authorizeProduction: args => r.evaluate('(a) => schemaMigrationApproval.authorizeProduction(a)')(args),
     createSession: () => { workerCreated++; return fakeWorker; },
-    createCollector: () => ({ collect: async () => proof(admitted.targetScope) })
+    createCollector: (_, ctx) => ({ collect: async () => ({ ...proof(admitted.targetScope), scope: { ...admitted.targetScope, sessionId: ctx.sessionId } }) })
   });
 
   const result = await executor.executePlan({

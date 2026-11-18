@@ -136,4 +136,8 @@ test('snapshot IPC validates database, protects Editor transactions and invalida
   assert.equal(response.ok, true);
   r.evaluate('stopBackupSchedules()');
   assert.equal(r.evaluate('schemaMigrationService.snapshots.size'), 0);
+  assert.equal(r.evaluate('schemaMigrationAdmission.admittedPlans.size'), 0);
+  assert.equal(r.evaluate('schemaMigrationApproval.pending.size'), 0);
+  assert.equal(r.evaluate('schemaMigrationJobManager.jobs.size'), 0);
+  assert.equal(r.evaluate('schemaMigrationJobManager.activeJobsByTarget.size'), 0);
 });

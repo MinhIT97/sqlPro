@@ -59,9 +59,11 @@ const {
   createMainContextHooks,
   createSourceVerifier
 } = require('./schema-migration-admission.cjs');
+const { SchemaMigrationJobManager } = require('./schema-migration-jobs.cjs');
 const schemaMigrationService = new SchemaMigrationService();
 const schemaMigrationAdmission = new SchemaMigrationAdmission();
 const schemaMigrationApproval = new SchemaMigrationApproval();
+const schemaMigrationJobManager = new SchemaMigrationJobManager();
 let scheduleServices;
 let schedulerReady = false;
 let backupContextGeneration = 0;
@@ -79,6 +81,7 @@ function stopBackupSchedules() {
   schemaMigrationService.clear();
   schemaMigrationAdmission.clear();
   schemaMigrationApproval.clear();
+  schemaMigrationJobManager.clear();
   backupInspection.invalidate?.();
   scheduleServices?.scheduler.stop();
   if (activeDatabaseTransfer?.scheduleId || ['backup-retention', 'backup-selection-preview'].includes(activeDatabaseTransfer?.operation)) cancelDatabaseTransfer(activeDatabaseTransfer);
@@ -271,7 +274,8 @@ const schemaMigrationContextHooks = createMainContextHooks({
   getGeneration: () => backupContextGeneration,
   fingerprintProfile: productionProfileFingerprint,
   sessionFingerprint: sessionProfileFingerprint,
-  assertProfile: assertSessionProfile
+  assertProfile: assertSessionProfile,
+  ownsLease: (jobId, plan, entry) => schemaMigrationJobManager.ownsLease(jobId, plan, entry)
 });
 schemaMigrationApproval.getProfileWithSecrets = (id) => store.getWithSecrets(id);
 schemaMigrationApproval.fingerprintProfile = productionProfileFingerprint;

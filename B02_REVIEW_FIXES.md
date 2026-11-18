@@ -2,7 +2,43 @@
 
 Ngày cập nhật: 18/11/2026. Gói này lưu cả hồ sơ B00/B01 và collector B02 đã được chỉnh sau review. B01 là xác minh rủi ro; các lỗi runtime của migration/diagnostics/privacy trong báo cáo chưa được sửa bởi gói này.
 
-**Hiện trạng mới nhất:** E1 đã chốt review trong phạm vi admission/approval và test offline/Main contracts. Executor thử nghiệm **chưa nối vào Apply IPC**; service chỉ tạo preview, Apply vẫn trả `MIGRATION_APPLY_NOT_READY`, source verifier vẫn trả `SOURCE_VERIFIER_NOT_READY`. Gemini làm **B02-E2** theo phần bàn giao cuối tài liệu; chưa chuyển B03 hoặc coi B02/G6 hoàn tất.
+**Hiện trạng mới nhất:** Đã review/sửa nền module E2; **chưa nghiệm thu tích hợp E2 toàn đường chạy**. Job/worker/verifier có test hồi quy, nhưng Main chưa có factory điều phối executor/job và vẫn khởi tạo source verifier không kèm store (fail-closed). Apply tại Main/service vẫn `MIGRATION_APPLY_NOT_READY`. Gemini tiếp tục **E2.1** ở cuối tài liệu, chưa chuyển E3/B03 hoặc coi B02/G6 hoàn tất.
+
+## 18/11 — Review/sửa nền E2 trước commit
+
+- **P1 — ownership/session:** Không ghi đè exclusive flag/lease của tác vụ khác. Kiểm mọi entry trước acquire, cleanup cả khi acquire một phần lỗi; dùng `SessionRegistry` thật trong test. Job phải được đúng manager đăng ký, chỉ chạy một lần và token phải khớp plan.
+- **P1 — cancel/cleanup:** `cancelling` là trạng thái đang dọn, chưa phải terminal. Cancel/clear không nhả target hoặc slot chạy trước cleanup; kết quả executor trả muộn không chuyển job hủy thành completed. Clear giữ reservation của job còn chạy, chặn callback muộn và chỉ xóa entry sau cleanup. Observer listener được tháo đúng vòng đời.
+- **P1 — ranh giới context:** Bỏ việc thêm `jobId` do caller đưa vào plan và bỏ ngoại lệ loại `jobId` khỏi digest. `checkContext(plan, {jobId})` chỉ bỏ qua lease khi callback `manager.ownsLease` xác minh registration, plan digest/token, entry thực và đúng số lease. Chèn `plan.jobId` hoặc đoán owner ID không cấp quyền.
+- **P1 — worker treo/mở muộn:** Thêm `schema-migration-worker.cjs` dùng chung cho source và target; race cancel/deadline qua connect/USE/collect/DDL, close có giới hạn, phá kết nối/SSH khi bị hủy. Connect trả muộn vẫn bị destroy/close, không chạy bước tiếp. Timeout DDL trả uncertain/partialCommit, không retry và không hứa rollback. Promise reject không có error object vẫn là lỗi, không bị đổi thành DDL thành công.
+- **P1 — proof nguồn:** Verifier có deadline chung, scope/quota/coverage/hash/engine/version checks, recheck credential trong vòng đời worker ngay cả khi policy fingerprint không hash password. Close lỗi không trả proof thành công. Cả source và target collector dùng identity worker riêng; `captureSessionId` chỉ là correlation tới capture Editor, không giả worker thuộc phiên Editor.
+- **P2 — quota/projection:** Target key dùng JSON tuple, tránh va chạm dấu `:`. Giới hạn số job lưu và TTL; metadata identity bất biến. Error code dùng allowlist thực thay vì regex; cleanup/status/duration/warnings được chiếu an toàn. Observer nhận bản sao riêng, async rejection được bắt, promise treo không giữ worker chờ ACK.
+- **Kiểm chứng:** `npm run check` **1072 pass / 0 fail / 14 opt-in skip** (1086 tổng); focused migration **78/78** (23 admission, 15 executor, 15 jobs, 9 service, 11 verifier, 5 Main IPC). Electron **100/100**, website **14/14**, server check đạt và **17/17**, diff whitespace check đạt. Fixture source mới chạy collector + `DatabaseSession` thật, metadata driver giả lập; lần đọc mới thực sự phát SQL và đổi column type làm drift hash.
+- Chưa chạy MySQL/MariaDB thật, bộ cài, benchmark hoặc DB ứng dụng. Các số liệu/nhận định E2 trước review bên dưới là lịch sử, không phải nghiệm thu Main integration hay bật ghi.
+
+## 18/11 — Hồ sơ triển khai E2 trước review
+
+- **Schema Migration Job Module (`electron/schema-migration-jobs.cjs`)**:
+  - Quản lý vòng đời migration job với state machine rõ ràng: `preparing` -> `verifying` -> `executing` -> `completed` | `cancelled` | `failed` | `uncertain`.
+  - Quản lý concurrency quota: tối đa 2 job active song song, cấm 2 job chạy đồng thời trên cùng database đích (`TARGET_BUSY`). Tự động dọn dẹp job cũ theo TTL (`jobTtlMs`).
+  - Hỗ trợ hủy bỏ toàn diện: `cancelJob(jobId)`, `cancelAll(reason)`, `clear()`. Tích hợp `AbortController`/signal xuyên suốt các bước.
+  - Phân tách và bảo vệ dữ liệu: `projectForRenderer()` áp dụng whitelist nghiêm ngặt, tuyệt đối không lộ mật khẩu, thông tin kết nối, raw SQL, DEFINER, hay nội dung lỗi driver chứa SQL. Mã lỗi được whitelist hóa an toàn (`sanitizeErrorCode`). Toàn bộ ledger chi tiết và raw SQL chỉ lưu trữ in-memory tại Main Process.
+- **Source Verifier đọc mới trên worker độc lập (`createSourceVerifier` trong `electron/schema-migration-admission.cjs`)**:
+  - Thay thế placeholder fail-closed của E1 bằng implementation hoàn chỉnh. Đọc profile với secret từ store thật, tạo `DatabaseSession` độc lập (không dùng phiên Editor), kết nối, `USE \`<database>\``, và thu thập snapshot mới qua `SchemaSnapshotCollector`.
+  - Kiểm tra trôi cấu hình (drift) profile nguồn trước và sau khi đọc metadata; chặn ngay khi coverage không `complete` (`SOURCE_SCHEMA_INCOMPLETE`) hoặc khi fingerprint `snapshotIdentity` bị thay đổi (`SOURCE_SCHEMA_DRIFT`).
+  - Đảm bảo worker session luôn được đóng trong `finally`.
+  - Phân biệt rõ danh tính worker (`workerSessionId`) với phiên Editor đã được bind (`captureSessionId` / `sessionId`).
+- **Điều phối Lease & Session Registry**:
+  - Khi job chạy, phiên Editor của target và source được đánh dấu `exclusiveOperation = true` và `exclusiveOwnerJobId = job.jobId`.
+  - Mọi thao tác khác từ Editor hoặc job cạnh tranh đều thấy `SESSION_BUSY`, bảo vệ tính toàn vẹn của phiên.
+  - `checkContext(plan)` của chính migration job nhận diện `exclusiveOwnerJobId === plan.jobId` nên không tự chặn chính mình. Leases được giải phóng sạch sẽ trong `finally`.
+- **Giữ nguyên Fail-Closed Apply Guard**:
+  - `db:apply-migration-plan` và `SchemaMigrationService.applyPlan` tiếp tục trả lỗi `MIGRATION_APPLY_NOT_READY`. Không có bất kỳ đường ghi công khai nào được mở.
+- **Kiểm chứng thực tế**:
+  - Unit tests mới: `test/schema-migration-jobs.test.cjs` (9/9 pass), `test/schema-migration-source-verifier.test.cjs` (7/7 pass).
+  - Toàn bộ test migration: **75/75 pass** (5 Main IPC, 10 B01 baseline, 23 admission, 12 executor, 9 jobs, 9 service, 7 source verifier).
+  - `npm run check`: **1059 pass / 0 fail / 14 opt-in skip** (1073 tổng).
+  - Electron renderer smoke: **100/100 pass**. Website smoke: **14/14 pass**. Server tests: **17/17 pass**.
+  - `git diff --check`: đạt chuẩn, 0 lỗi whitespace/formatting.
 
 ## 18/11 — Review cuối E1 và chốt commit
 
@@ -108,7 +144,7 @@ E1 được chốt review ngày 18/11 trong phạm vi ghi ở đầu tài liệu
 - `npm run check`, Electron renderer smoke, website smoke, server check/test và `git diff --check` đạt. Không dùng dữ liệu ứng dụng làm fixture.
 - Chưa nghiệm thu chạy migration thật. Codex review E1 xong mới giao E2.
 
-## Giao Gemini làm tiếp: B02-E2 — Job, worker và cancel
+## Hồ sơ phạm vi E2 — Job, worker và cancel
 
 Chỉ triển khai E2 rồi gửi diff/test cho Codex review. **Cả `db:apply-migration-plan` và `SchemaMigrationService.applyPlan` tiếp tục trả `MIGRATION_APPLY_NOT_READY`.** Không thêm endpoint khác để lách guard này; không tự nâng preview/blocked thành ready. Candidate ghi chỉ dùng trong fixture/test nội bộ cho đến E3.
 
@@ -129,6 +165,18 @@ Chỉ triển khai E2 rồi gửi diff/test cho Codex review. **Cả `db:apply-m
 - Các test Apply IPC/service vẫn xác nhận guard không mở session hoặc phát USE/SET/DDL, kể cả gửi candidate ready/token/confirmed. Test execution nội bộ dùng fixture, không được trở thành public write path.
 - `npm run check`, renderer/website smoke, server check/test và `git diff --check` đạt. Báo đúng DB thật nào đã chạy hoặc chưa chạy; chưa tick B02/G6 hoàn tất.
 
-### Gói sau E2 — chưa giao triển khai
+## Giao Gemini làm tiếp: B02-E2.1 — Tích hợp Main và kiểm chứng lifecycle
+
+Chỉ làm E2.1 rồi gửi review. **Giữ nguyên `MIGRATION_APPLY_NOT_READY` tại Main/service; không thêm endpoint chạy DDL khác, không tự nâng preview thành ready.** Chưa làm generator E3 hoặc UI Apply.
+
+1. Đọc các module/test migration hiện tại và `main.cjs`. Tạo facade/factory Main-only (có thể dùng `schema-migration-orchestrator.cjs`) để dựng admission, approval, job, executor và source verifier với store/registry/context thật. Hiện `schemaMigrationSourceVerifier = createSourceVerifier()` tại Main còn fail-closed do thiếu store; không được chỉ truyền store rồi bỏ qua scope/lifecycle/credential checks.
+2. Chốt handshake private giữa create job / peek / consume token / approval / cancel: lấy plan từ admission Main-owned theo token, so digest với job bất biến; không nhận plan/SQL/hook/profile do renderer cung cấp. Định nghĩa rõ khi nào consume/revoke plan và approval trong pre-cancel, timeout, TTL và retry; một job không được chạy lại. Không chuyển `jobId` thành quyền bằng cách chèn vào plan hoặc loại nó khỏi digest.
+3. Dựng executor per-job với hook Main thật; `checkContext(plan, {jobId})` phải dùng `manager.ownsLease`. Verifier đọc source worker phải nhận đúng signal/job context và xác minh capture session/generation/credential sau await. Không dùng callback `checkContext: () => true` trong production. Native Production dialog lấy từ Main, mặc định Hủy; không cho caller override receipt/dialog/hooks.
+4. Lưu completion promise tại Main để cancel/logout/reset có thể invalidate trước và theo dõi cleanup hữu hạn; không nhả reservation khi chỉ vừa phát signal. Observer Main gửi event nhanh, có whitelist và kiểm lifecycle; kết quả muộn sau logout không được xuất hiện trên phiên mới. Nếu thêm IPC status/cancel thì chỉ đọc/hủy job Main-owned với sender/scope đúng; **không thêm start/write IPC trong E2.1**.
+5. Mở rộng test VM chạy `main.cjs` thật: tạo capture qua named IPC, preview vẫn disabled; dựng ready candidate chỉ trong fixture nội bộ. Chạy registry/collector/services/executor thật với driver giả lập. Chứng minh chỉ worker phát USE/metadata/DDL fixture, phiên Editor không bị Commit/Rollback/SET; thay đổi metadata nguồn phải được phát hiện qua reads mới, không sửa proof giả.
+6. Test Main lifecycle có job đang chạy: cancel trong connect/USE/collect/DDL/close, profile/credential/session/generation đổi khi confirm pending hoặc worker await, hai job tranh source/target, acquire lỗi, native confirm hủy/hết hạn, cleanup lỗi, callback muộn. Assert số worker/lease/listener/reservation sau cleanup và trạng thái partial/uncertain. Chạy thêm fixture DB cô lập nếu có điều kiện; không dùng DB ứng dụng.
+7. Chạy full check, renderer/website, server check/test và diff check; cập nhật đúng bằng chứng/skip/giới hạn. Apply guard tests phải tiếp tục xác nhận không session/USE/SET/DDL dù gửi ready/confirmed/token/jobId. E2.1 xong gửi Codex review trước E3; không tick B02/G6 hoàn tất.
+
+### Gói sau E2.1 — chưa giao triển khai
 
 - **B02-E3 — generator và nghiệm thu engine:** allowlist DDL tối thiểu theo capability; kiểm schema kỳ vọng trước/sau từng bước, explicit block dependency/metadata chưa hỗ trợ; MySQL/MariaDB cô lập có marker và user quyền tối thiểu. Test drift, quyền thiếu, FK, implicit commit, lỗi ở câu đầu/giữa, timeout/cancel và kết quả schema thực. Chỉ đề xuất bỏ guard sau review bằng chứng toàn đường chạy; UI chuyển sang named APIs là phần tích hợp sau đó.

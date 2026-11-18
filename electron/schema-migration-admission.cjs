@@ -2,8 +2,10 @@
 
 const crypto = require('node:crypto');
 const { assertWritable } = require('./connection-policy.cjs');
-const { planDigest } = require('./schema-migration-executor.cjs');
-const { computeSchemaFingerprint } = require('./schema-snapshot.cjs');
+const { DatabaseSession } = require('./database.cjs');
+const { planDigest, runtimeProfile } = require('./schema-migration-executor.cjs');
+const { SchemaSnapshotCollector, computeSchemaFingerprint } = require('./schema-snapshot.cjs');
+const { createWorkerGuard } = require('./schema-migration-worker.cjs');
 
 const error = (code, message) => Object.assign(new Error(message), { code });
 const hash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
@@ -145,6 +147,13 @@ class SchemaMigrationAdmission {
     const frozen = freeze(structuredClone(admitted));
     this.admittedPlans.set(planToken, frozen);
     return frozen;
+  }
+
+  getAdmittedPlan(planToken) {
+    if (!hash(planToken)) return null;
+    this.prune();
+    const candidate = this.admittedPlans.get(planToken);
+    return candidate ? freeze(structuredClone(candidate)) : null;
   }
 
   consumePlan(planToken) {
@@ -422,7 +431,8 @@ function createMainContextHooks({
   getGeneration,
   fingerprintProfile,
   sessionFingerprint,
-  assertProfile
+  assertProfile,
+  ownsLease
 } = {}) {
   const getProfileWithSecrets = (profileId) => {
     if (!store || typeof store.getWithSecrets !== 'function') return null;
@@ -435,7 +445,7 @@ function createMainContextHooks({
       : computeSchemaFingerprint(profile);
   };
 
-  const checkContext = async (plan) => {
+  const checkContext = async (plan, jobContext = {}) => {
     if (!plan || typeof plan !== 'object') return false;
     const scopes = [plan.sourceScope, plan.targetScope];
     const currentGeneration = typeof getGeneration === 'function' ? getGeneration() : 0;
@@ -447,13 +457,10 @@ function createMainContextHooks({
       if (getFingerprint(profile) !== scope.profileFingerprint) return false;
       if (scope.generation !== currentGeneration) return false;
 
-      // Note for E2: Migration execution lease / background job registry is intentionally
-      // not implemented in E1. In E2, dedicated worker lease management, cancellable job tracking,
-      // and fresh background source verification will be orchestrated. E1 establishes the
-      // admission boundary, single-use receipt approval, and authoritative context checks.
-
       if (openSessions) {
         const entry = openSessions.get(scope.profileId);
+        const isJobOwner = () => Boolean(jobContext.jobId && typeof ownsLease === 'function'
+          && ownsLease(jobContext.jobId, plan, entry));
         if (!entry || entry.session?.dead || entry.sessionId !== scope.sessionId) return false;
         if (typeof assertProfile === 'function') {
           try { assertProfile(entry); } catch { return false; }
@@ -462,14 +469,27 @@ function createMainContextHooks({
         }
 
         // Check interactive editor session integrity:
-        // Transactions, disabled autocommit, active tasks, and active leases block execution.
+        // Transactions, disabled autocommit, active tasks block execution.
         if (entry.session?.inTransaction) return false;
         if (entry.session?.autocommit === false) return false;
         if (entry.session?.activeTask) return false;
-        if (entry.exclusiveOperation || entry.productionWriteInProgress) return false;
+
+        // Exclusive leases: if held by this migration job itself, allow it;
+        // if held by another operation or job, reject to protect session integrity.
+        if (entry.exclusiveOperation && !isJobOwner()) return false;
+        if (entry.productionWriteInProgress) return false;
+
         if (sessionRegistry) {
-          if (sessionRegistry.leases?.get(entry) || (typeof sessionRegistry.busy === 'function' && sessionRegistry.busy(entry))) {
+          const leaseCount = sessionRegistry.leases?.get(entry) || 0;
+          if (leaseCount > 0 && (!isJobOwner() || leaseCount !== 1)) {
             return false;
+          }
+          if (typeof sessionRegistry.busy === 'function') {
+            const otherBusy = Boolean(entry.session?.activeTask || entry.session?.inTransaction
+              || entry.session?.autocommit === false
+              || (typeof sessionRegistry.isProtected === 'function' && sessionRegistry.isProtected(entry) && !isJobOwner()));
+            if (otherBusy) return false;
+            if (leaseCount > 0 && (!isJobOwner() || leaseCount !== 1)) return false;
           }
         }
       }
@@ -484,9 +504,86 @@ function createMainContextHooks({
   };
 }
 
-function createSourceVerifier() {
-  return async () => {
-    throw error('SOURCE_VERIFIER_NOT_READY', 'Source verifier đọc mới từ worker độc lập chưa sẵn sàng trong E1; sẽ được triển khai tại E2.');
+function createSourceVerifier(options = {}) {
+  const {
+    store, createSession = profile => new DatabaseSession(profile),
+    createCollector = (session, context) => new SchemaSnapshotCollector(session, context),
+    fingerprintProfile = computeSchemaFingerprint, timeoutMs = 30000, quotas = {}, getSignal,
+    checkContext
+  } = options;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000) throw error('INVALID_VERIFIER_OPTIONS', 'Timeout verifier không hợp lệ.');
+  if (!store || typeof store.getWithSecrets !== 'function') {
+    return async () => { throw error('SOURCE_VERIFIER_NOT_READY', 'Source verifier chưa có store tin cậy.'); };
+  }
+  return async (inputScope, verifyOptions = {}) => {
+    const sourceScope = freeze(structuredClone(inputScope));
+    if (!sourceScope || !hash(sourceScope.snapshotIdentity) || !hash(sourceScope.profileFingerprint)
+        || typeof sourceScope.profileId !== 'string' || !sourceScope.profileId
+        || typeof sourceScope.sessionId !== 'string' || !sourceScope.sessionId
+        || !Number.isSafeInteger(sourceScope.generation) || sourceScope.generation < 0
+        || typeof sourceScope.database !== 'string' || !sourceScope.database.trim()
+        || sourceScope.database.length > 64 || sourceScope.database.includes('\0')
+        || !['MySQL', 'MariaDB'].includes(sourceScope.engine)) {
+      throw error('INVALID_SOURCE_SCOPE', 'Source scope không hợp lệ.');
+    }
+    const signal = verifyOptions.signal || getSignal?.();
+    const budget = verifyOptions.timeoutMs === undefined ? timeoutMs : Math.min(timeoutMs, verifyOptions.timeoutMs);
+    if (!Number.isSafeInteger(budget) || budget < 1) throw error('INVALID_VERIFIER_OPTIONS', 'Timeout verifier không hợp lệ.');
+    const deadline = Date.now() + budget;
+    const profile = store.getWithSecrets(sourceScope.profileId);
+    if (!profile || profile.id !== sourceScope.profileId) throw error('SOURCE_PROFILE_NOT_FOUND', 'Không tìm thấy profile nguồn.');
+    // Also guard credentials during this worker lifetime when the public policy
+    // fingerprint deliberately excludes secrets.
+    const captureFingerprint = computeSchemaFingerprint(profile);
+    const contextGuard = createWorkerGuard({}, { signal, deadline });
+    const guard = async () => {
+      if (signal?.aborted) throw error('QUERY_CANCELED', 'Đã hủy kiểm tra nguồn.');
+      if (typeof checkContext === 'function' && await contextGuard.run(() => checkContext(sourceScope, verifyOptions)) !== true) {
+        throw error('SOURCE_CONTEXT_CHANGED', 'Context nguồn đã thay đổi.');
+      }
+      const current = store.getWithSecrets(sourceScope.profileId);
+      if (!current || current.id !== sourceScope.profileId || fingerprintProfile(current) !== sourceScope.profileFingerprint
+          || computeSchemaFingerprint(current) !== captureFingerprint) throw error('SOURCE_PROFILE_DRIFT', 'Profile nguồn đã thay đổi.');
+      if (signal?.aborted) throw error('QUERY_CANCELED', 'Đã hủy kiểm tra nguồn.');
+      if (Date.now() >= deadline) throw error('QUERY_TIMEOUT', 'Hết thời gian kiểm tra nguồn.');
+    };
+    await guard();
+    let worker, workerGuard, result, failure, cleanupError;
+    try {
+      worker = createSession(runtimeProfile(structuredClone(profile)));
+      if (!worker || ['connect', 'useDatabase', 'close'].some(key => typeof worker[key] !== 'function')) {
+        throw error('INVALID_SOURCE_WORKER', 'Worker nguồn không hợp lệ.');
+      }
+      workerGuard = createWorkerGuard(worker, { signal, deadline });
+      await workerGuard.run(() => worker.connect());
+      await guard();
+      await workerGuard.run(() => worker.useDatabase(sourceScope.database));
+      await guard();
+      const workerSessionId = `worker_source_${crypto.randomBytes(16).toString('hex')}`;
+      worker.sessionId = workerSessionId;
+      const context = { profileId: sourceScope.profileId, sessionId: workerSessionId,
+        generation: sourceScope.generation, profileFingerprint: sourceScope.profileFingerprint };
+      const collector = createCollector(worker, { ...context, quotas: { ...quotas, timeoutMs: Math.max(1, deadline - Date.now()) } });
+      const snapshot = await workerGuard.run(() => collector.collect(sourceScope.database));
+      await guard();
+      if (!snapshot || snapshot.coverage !== 'complete') throw error('SOURCE_SCHEMA_INCOMPLETE', 'Snapshot nguồn chưa đầy đủ.');
+      if (snapshot.database !== sourceScope.database || snapshot.snapshotIdentity !== sourceScope.snapshotIdentity
+          || !['profileId', 'sessionId', 'generation', 'profileFingerprint'].every(key => snapshot.scope?.[key] === context[key])
+          || snapshot.scope.database !== sourceScope.database || snapshot.scope.engine !== sourceScope.engine
+          || (sourceScope.serverVersion && snapshot.scope.serverVersion !== sourceScope.serverVersion)) {
+        throw error('SOURCE_SCHEMA_DRIFT', 'Snapshot nguồn hoặc identity worker không khớp.');
+      }
+      result = { ...snapshot, scope: { ...snapshot.scope, workerSessionId, captureSessionId: sourceScope.sessionId } };
+    } catch (err) { failure = err; }
+    finally {
+      if (worker && typeof worker.close === 'function') {
+        try { await (workerGuard || createWorkerGuard(worker)).close(); }
+        catch { cleanupError = 'SOURCE_WORKER_CLOSE_FAILED'; }
+      }
+    }
+    if (failure || cleanupError) throw Object.assign(failure || error(cleanupError, 'Không đóng được worker nguồn.'), { cleanupError: cleanupError || null });
+    await guard();
+    return freeze(result);
   };
 }
 

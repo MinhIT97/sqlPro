@@ -5,7 +5,7 @@
 **Ngày cập nhật:** 18/11/2026\
 **Mục tiêu:** Ma trận phân loại toàn bộ hệ thống kiểm thử tự động, mức độ rủi ro, phân định rõ giữa kiểm thử offline/mock và kiểm thử trên cơ sở dữ liệu thật, cùng các ca kiểm thử biên (Negative / Boundary Cases) để phục vụ nghiệm thu chuẩn xác.
 
-**Kiểm chứng mới nhất sau review cuối B02-E1 (18/11):** `npm run check` 1043 pass / 0 fail / 14 opt-in skip (1057 tổng); focused migration executor/admission/service/Main IPC 49/49 (23 admission, 12 executor, 9 service, 5 IPC), Electron 100/100, website 14/14, server check đạt và server 17/17. Adapter approval tự hash payload và không tin digest caller; có test hồi quy fail trước sửa/pass sau sửa. Chưa kiểm DB thật/bộ cài trong lượt này. Executor thử nghiệm chưa nối Apply IPC, Apply ở Main/service vẫn khóa. Mốc commit và số liệu các đợt cũ bên dưới là đối chiếu lịch sử.
+**Kiểm chứng mới nhất sau review nền E2 (18/11):** `npm run check` 1072 pass / 0 fail / 14 opt-in skip (1086 tổng); focused migration 78/78 (5 IPC, 23 admission, 15 executor, 15 jobs, 9 service, 11 verifier). Electron 100/100, website 14/14, server check + 17/17 đạt. Test collector/DatabaseSession thật với driver giả lập xác minh metadata reads mới và drift; không phải DB thật. Main integration E2 còn thiếu, verifier Main vẫn fail-closed, Apply giữ `MIGRATION_APPLY_NOT_READY`; chưa nghiệm thu generator/DB matrix/bộ cài.
 
 ---
 
@@ -47,7 +47,7 @@
 | **G5.4** | Bộ lọc AND/OR nâng cao, sort đa cột, lưu preference | Thấp | `test/table-filters.test.cjs`, `test/table-view.test.cjs`, `test/table-preferences.test.cjs` | 35 unit + 10 UI | Pass |
 | **G5.5** | Mẫu truy vấn (Snippets) & Lịch sử làm sạch secret | Thấp | `test/query-snippets.test.cjs`, `test/risk-verification-b01.test.cjs`, `test/renderer-smoke.cjs` | 8 unit + 3 UI | Pass (Tái hiện hổng persistState) |
 | **G5.6** | Dashboard chẩn đoán: processlist, locks, safe kill | Cao | `test/diagnostics.test.cjs`, `test/risk-verification-b01.test.cjs`, `test/renderer-smoke.cjs` | 9 unit + 4 UI | Pass (Tái hiện target switch khi đổi app.connection trong lúc confirmation pending và gửi KILL nhầm đích) |
-| **G6.1–G6.4** | Schema Diff & Migration synchronization | Nghiêm trọng | `test/schema-diff.test.cjs`, `test/risk-verification-b01.test.cjs`, `test/schema-snapshot*.test.cjs`, `test/schema-migration-service.test.cjs`, `test/schema-migration-executor.test.cjs`, `test/schema-migration-admission.test.cjs`, `test/main-schema-migration.test.cjs` | Focused executor/admission/service/IPC 49/49 | Collector + main-owned preview có lease/scope/policy/quota/immutability test. E1 có admission, single-use Production receipt, context hooks, digest equality và kiểm payload độc lập khi xác minh approval; được chốt trong phạm vi offline/Main contracts. Executor độc lập có test token/receipt/drift/cancel/ledger/progress, chưa nối Apply IPC. **Apply bị khóa ở main và service bằng MIGRATION_APPLY_NOT_READY; chưa nghiệm thu job cancel/worker verifier (E2), generator/DB matrix (E3) hoặc ghi/DB thật.** |
+| **G6.1–G6.4** | Schema Diff & Migration synchronization | Nghiêm trọng | `test/schema-snapshot*.test.cjs`, `test/schema-migration*.test.cjs`, `test/main-schema-migration.test.cjs` | Focused 78/78 | Module jobs/worker/verifier có ownership/cancel/late-result/cleanup/quota/projection tests. Collector + DatabaseSession thật với driver giả lập chứng minh fresh reads/drift. **Main orchestration E2.1 còn thiếu; Apply vẫn khóa, chưa nghiệm thu generator E3 hoặc DB thật.** |
 | **G7.1–G7.5** | Data Diff & Báo cáo quan sát hữu hạn | Nghiêm trọng | `test/data-diff.test.cjs`, `test/renderer-smoke.cjs` | 6 unit + 6 UI | Pass; **Đồng bộ đang KHÓA CHỦ ĐÍCH** |
 | **G8.1** | Nhật ký thao tác cục bộ (Local Audit Log) | Thấp | `test/audit-log.test.cjs`, `test/audit-log-store.test.cjs` | 9 unit + 3 UI | Pass |
 | **G8.2–G8.5** | Tách module kiến trúc, UX phím bấm, Thử nghiệm người dùng | Thấp | `test/renderer-smoke.cjs` | 100 UI pass | Tách dần theo các gói B16 |
@@ -81,7 +81,7 @@
 
 ### 4.1 Bộ lệnh Kiểm thử Cơ sở (Offline / Mock)
 ```bash
-# 1. Kiểm tra toàn bộ cú pháp và chạy 1.057 unit/contract tests (1043 pass, 14 skip)
+# 1. Kiểm tra toàn bộ cú pháp và chạy 1.086 unit/contract tests (1072 pass, 14 skip)
 npm run check
 
 # 2. Chạy 100 bài kiểm thử giao diện Electron Renderer

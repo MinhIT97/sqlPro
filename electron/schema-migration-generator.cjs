@@ -21,6 +21,27 @@ function freeze(value) {
   return value;
 }
 
+function columnProof(column) {
+  return {
+    name: column.name, type: column.type.toLowerCase(),
+    nullable: column.nullable === true || column.nullable === 'YES' ? 'YES' : 'NO',
+    defaultValue: column.defaultValue !== undefined ? column.defaultValue : column.default ?? null,
+    extra: column.extra || (column.isAutoIncrement || column.autoIncrement ? 'auto_increment' : ''),
+    collation: column.collation || null
+  };
+}
+
+// MariaDB exposes SQL expressions (including quoted literals) as COLUMN_DEFAULT.
+// Until the collector carries a dialect-aware literal/expression contract, do
+// not pass those expressions through the MySQL literal formatter.
+function defaultMetadataBlock(snapshot) {
+  if (snapshot.engine !== 'MariaDB') return null;
+  return snapshot.tables.some(table => table.columns.some(column => {
+    const value = column.defaultValue !== undefined ? column.defaultValue : column.default;
+    return value != null && String(value).toUpperCase() !== 'NULL';
+  })) ? 'MARIADB_DEFAULT_REVIEW_REQUIRED' : null;
+}
+
 function inspectSnapshotMetadata(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') return 'INVALID_SNAPSHOT';
   if (snapshot.coverage !== 'complete') return 'SCHEMA_COVERAGE_INCOMPLETE';
@@ -99,6 +120,7 @@ class SchemaMigrationGenerator {
     }
 
     let blockReason = inspectSnapshotMetadata(sourceSnapshot) || inspectSnapshotMetadata(targetSnapshot);
+    if (!blockReason) blockReason = defaultMetadataBlock(sourceSnapshot) || defaultMetadataBlock(targetSnapshot);
     if (!blockReason) {
       if (sourceSnapshot.scope?.profileId === targetSnapshot.scope?.profileId && sourceSnapshot.database === targetSnapshot.database) {
         blockReason = 'SAME_DATABASE';
@@ -198,7 +220,9 @@ class SchemaMigrationGenerator {
           table: newTable.name,
           checkSql: 'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?',
           params: [targetDatabase, newTable.name],
-          expectedCount: 1
+          expectedCount: 1,
+          expectedColumns: sourceSnapshot.tables.find(table => table.name === newTable.name).columns.map(columnProof),
+          exactColumns: true
         }
       });
     }
@@ -275,7 +299,9 @@ class SchemaMigrationGenerator {
               column: newCol.name,
               checkSql: 'SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?',
               params: [targetDatabase, tblName, newCol.name],
-              expectedCount: 1
+              expectedCount: 1,
+              expectedColumns: [columnProof(sourceSnapshot.tables.find(table => table.name === tblName).columns.find(column => column.name === newCol.name))],
+              exactColumns: false
             }
           });
         }
@@ -395,6 +421,7 @@ module.exports = {
   SchemaMigrationGenerator,
   generateSafeMigrationPlan,
   inspectSnapshotMetadata,
+  defaultMetadataBlock,
   ALLOWLIST_STATEMENT_TYPES,
   DEFAULT_GENERATOR_OPTIONS
 };

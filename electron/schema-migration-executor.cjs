@@ -150,7 +150,7 @@ class SchemaMigrationExecutor {
     }));
     let worker, workerGuard, executedCount = 0, executionUncertain = false, failure = null, cleanupError = null;
     const observerWarnings = [];
-    const query = (sql, params = []) => workerGuard.run(() => worker.raw(sql, params, timeoutMs), timeoutMs);
+    const query = (sql, params = []) => workerGuard.run(() => worker.raw(sql, params, timeoutMs, { prepared: params.length > 0 }), timeoutMs);
     try {
       current = await guard();
       checkApproval(current.target);
@@ -208,6 +208,26 @@ class SchemaMigrationExecutor {
             const expected = entry.postCondition.expectedCount ?? 1;
             if (count !== expected) {
               throw error('MIGRATION_POSTCONDITION_FAILED', `Hậu điều kiện migration không đạt cho statement ${entry.id} (kỳ vọng: ${expected}, thực tế: ${count}).`);
+            }
+            if (entry.postCondition.expectedColumns) {
+              const metadata = await query(`SELECT COLUMN_NAME AS name, LOWER(COLUMN_TYPE) AS type,
+                  IS_NULLABLE AS nullable, COLUMN_DEFAULT AS defaultValue, EXTRA AS extra,
+                  COLLATION_NAME AS collation
+                FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION`,
+              [plan.targetScope.database, entry.postCondition.table]);
+              const actual = metadata?.result || metadata?.rows;
+              const expectedColumns = entry.postCondition.expectedColumns;
+              const fields = ['name', 'type', 'nullable', 'defaultValue', 'extra', 'collation'];
+              if (!Array.isArray(actual) || !Array.isArray(expectedColumns) || !expectedColumns.length
+                  || entry.postCondition.exactColumns && actual.length !== expectedColumns.length
+                  || expectedColumns.some(column => {
+                    if (!column || typeof column.name !== 'string') return true;
+                    const matches = actual.filter(item => item && item.name === column.name);
+                    return matches.length !== 1 || !fields.every(key => Object.hasOwn(column, key)
+                      && Object.hasOwn(matches[0], key) && matches[0][key] === column[key]);
+                  })) {
+                throw error('MIGRATION_POSTCONDITION_FAILED', `Định nghĩa cột/default sau migration không khớp cho statement ${entry.id}.`);
+              }
             }
           }
           entry.status = 'executed';

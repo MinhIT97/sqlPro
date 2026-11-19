@@ -46,13 +46,16 @@ function computePlanDigest(payload) {
 
 function projectPlanForRenderer(plan) {
   if (!plan) return null;
+  const projectScope = scope => Object.freeze({ profileId: scope.profileId, database: scope.database, table: scope.table });
   return Object.freeze({
     planToken: plan.planToken,
     planDigest: plan.planDigest,
     expiresAt: plan.expiresAt,
     direction: plan.direction,
-    sourceScope: Object.freeze({ ...plan.sourceScope }),
-    targetScope: Object.freeze({ ...plan.targetScope }),
+    sourceScope: projectScope(plan.sourceScope),
+    targetScope: projectScope(plan.targetScope),
+    applySupported: false,
+    applyBlockReason: 'SYNC_APPLY_NOT_READY',
     primaryKeys: Object.freeze([...plan.primaryKeys]),
     columns: Object.freeze(plan.columns.map(c => Object.freeze({ name: c.name, type: c.type }))),
     insertOrder: plan.insertOrder ? Object.freeze([...plan.insertOrder]) : null,
@@ -92,6 +95,23 @@ class DataSyncPlanService {
     this.usedTokens.clear();
   }
 
+  createSyncPlanFromJob(payload = {}) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+        || Object.keys(payload).some(key => !['jobId', 'direction', 'options'].includes(key))) {
+      throw error('CALLER_FIELDS_REJECTED', 'Chỉ nhận jobId và lựa chọn đồng bộ, không nhận report/scope từ renderer.');
+    }
+    if (typeof payload.jobId !== 'string' || !payload.jobId || payload.jobId.length > 160) {
+      throw error('DIFF_JOB_NOT_FOUND', 'Thiếu định danh kết quả so sánh do Main sở hữu.');
+    }
+    const options = payload.options ?? {};
+    if (!options || typeof options !== 'object' || Array.isArray(options)
+        || Object.keys(options).some(key => key !== 'includeDeletes')
+        || options.includeDeletes !== undefined && typeof options.includeDeletes !== 'boolean') {
+      throw error('INVALID_SYNC_OPTIONS', 'Lựa chọn đồng bộ không hợp lệ.');
+    }
+    return this.createSyncPlan({ ...payload, options });
+  }
+
   createSyncPlan({
     jobId,
     diffReport,
@@ -110,7 +130,13 @@ class DataSyncPlanService {
     let srcScope = sourceScope;
     let tgtScope = targetScope;
 
-    if (jobId && this.dataDiffService && typeof this.dataDiffService.getJob === 'function') {
+    if (jobId) {
+      if (diffReport !== undefined || sourceScope !== undefined || targetScope !== undefined) {
+        throw error('CALLER_FIELDS_REJECTED', 'Không nhận report/scope cùng jobId.');
+      }
+      if (typeof this.dataDiffService?.getJob !== 'function') {
+        throw error('DIFF_JOB_SERVICE_UNAVAILABLE', 'Thiếu dịch vụ kết quả so sánh do Main sở hữu.');
+      }
       const job = this.dataDiffService.getJob(jobId);
       if (!job || job.status !== 'completed' || !job.report) {
         throw error('DIFF_JOB_NOT_FOUND', 'Không tìm thấy kết quả so sánh hoàn tất từ Main.');
@@ -118,6 +144,9 @@ class DataSyncPlanService {
       report = job.report;
       srcScope = job.sourceScope;
       tgtScope = job.targetScope;
+      if (report.coverage?.complete !== true || report.coverage?.consistent !== true) {
+        throw error('DIFF_REPORT_INCOMPLETE', 'Kết quả so sánh chưa đầy đủ hoặc thiếu snapshot nhất quán.');
+      }
     }
 
     if (!report || typeof report !== 'object') {
@@ -260,6 +289,9 @@ class DataSyncPlanService {
       planToken,
       planDigest,
       expiresAt,
+      jobId: jobId || null,
+      // Bounded observations are preview evidence, never write authorization.
+      applySupported: jobId ? false : undefined,
       direction,
       sourceScope: safeSourceScope,
       targetScope: safeTargetScope,

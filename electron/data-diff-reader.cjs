@@ -204,21 +204,36 @@ async function validateTableForDiff(session, database, table) {
     throw error('DATA_DIFF_NO_PRIMARY_KEY', `Bảng ${database}.${table} không có Khóa chính (Primary Key); chưa thể so sánh keyset.`);
   }
 
-  const pkTypes = primaryKeys.map(pkName => {
+  const pkTypes = [];
+  for (const pkName of primaryKeys) {
     const col = columns.find(c => c.name === pkName);
     const baseType = String(col?.type || '').toLowerCase().split(/[ (]/)[0];
     if (isNumericColumnType(baseType)) {
-      return col?.type || '';
+      pkTypes.push(col.type);
+      continue;
     }
     if (/^(?:char|varchar)$/.test(baseType)) {
       const collation = String(col?.collation || '').trim();
-      if (collation && /(?:_bin|^binary)$/i.test(collation)) {
-        return col?.type || '';
+      // CHAR can trim padding; older *_bin collations can use PAD SPACE.
+      // This explicit VARCHAR subset is ordered by Unicode code point, equal
+      // to UTF-8 byte order, and requires server proof of NO PAD semantics.
+      if (baseType === 'varchar' && collation === 'utf8mb4_0900_bin') {
+        let proof;
+        try {
+          proof = (await session.raw(`SELECT COLLATION_NAME AS name, CHARACTER_SET_NAME AS charset,
+              PAD_ATTRIBUTE AS padAttribute FROM information_schema.COLLATIONS WHERE COLLATION_NAME = ?`,
+          [collation], 10000, { prepared: true }))?.result;
+        } catch { /* Unknown dialect/metadata is not a collation proof. */ }
+        if (Array.isArray(proof) && proof.length === 1 && proof[0].name === collation
+            && proof[0].charset === 'utf8mb4' && proof[0].padAttribute === 'NO PAD') {
+          pkTypes.push(col.type);
+          continue;
+        }
       }
-      throw error('DATA_DIFF_UNSUPPORTED_PK_TYPE', `Khóa chính "${pkName}" có kiểu "${col?.type}" và collation "${collation || 'không xác định'}" không phải binary collation; chưa thể chứng minh thứ tự sắp xếp nhất quán với máy chủ.`);
+      throw error('DATA_DIFF_UNSUPPORTED_PK_TYPE', `Khóa chính "${pkName}" có kiểu "${col?.type}" và collation "${collation || 'không xác định'}" chưa có bằng chứng equality/order/NO PAD phù hợp với comparator.`);
     }
     throw error('DATA_DIFF_UNSUPPORTED_PK_TYPE', `Khóa chính "${pkName}" có kiểu "${col?.type}" không hỗ trợ keyset pagination an toàn.`);
-  });
+  }
 
   let engine = null;
   try {

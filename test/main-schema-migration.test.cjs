@@ -34,6 +34,7 @@ function fixture() {
         }
         return { result: allTables };
       }
+      if (sql.includes('LOWER(COLUMN_TYPE)')) return { result: [{ name: 'id', type: 'int', nullable: 'NO', defaultValue: null, extra: '', collation: null }] };
       if (sql.includes('information_schema.COLUMNS')) return { result: [{ name: 'id', type: 'int', nullable: 'NO', position: 1 }] };
       return { result: [] };
     }
@@ -646,4 +647,52 @@ test('production approval dialog matrix: requires approval, dialog cancel, dialo
   );
 
   assert.equal(r.evaluate('sessionRegistry.leases.size'), 0);
+});
+
+test('N04: real Main diff job creates only a bound preview; forged payloads and stale/incomplete jobs fail closed', async () => {
+  const r = fixture();
+  r.profiles.src = { readOnly: true };
+  r.profiles.tgt = { readOnly: false };
+  r.controls.onRaw = (sql, worker) => {
+    if (sql.includes('information_schema.COLUMNS')) return { result: [{ name: 'id', type: 'int', nullable: 'NO', keyType: 'PRI', position: 1 }] };
+    if (sql.startsWith('SELECT `id` FROM')) return { rows: worker.profile.id === 'src' ? [[1]] : [] };
+  };
+  const service = r.evaluate('dataDiffService');
+  const started = await r.call('db:start-data-diff', { sourceProfileId: 'src', targetProfileId: 'tgt', sourceDb: 'source', targetDb: 'target', sourceTable: 'users', targetTable: 'users' });
+  const jobId = started.data.jobId;
+  try {
+    await service.jobs.get(jobId).promise;
+    const evidence = service.getJob(jobId);
+    assert.equal(evidence.status, 'completed');
+    assert.equal(Object.isFrozen(evidence.sourceScope), true);
+    const created = await r.call('db:create-data-sync-plan', { jobId });
+    assert.equal(created.ok, true, JSON.stringify(created.error));
+    assert.equal(created.data.counts.inserts, 1);
+    assert.equal(created.data.targetScope.database, 'target');
+    assert.equal(created.data.targetScope.profileFingerprint, undefined);
+    assert.equal(created.data.applySupported, false);
+    assert.equal((await r.call('db:apply-data-sync-plan', { planToken: created.data.planToken })).error.code, 'SYNC_APPLY_NOT_READY');
+    await assert.rejects(r.evaluate('dataSyncExecutor').executeSyncPlan({ planToken: created.data.planToken }), { code: 'SYNC_APPLY_NOT_READY' });
+    for (const fields of [{ diffReport: {} }, { targetScope: { database: 'forged' } }, { sql: 'DELETE FROM users' }]) {
+      assert.equal((await r.call('db:create-data-sync-plan', { jobId, ...fields })).error.code, 'CALLER_FIELDS_REJECTED');
+    }
+    assert.equal((await r.call('db:create-data-sync-plan', { jobId: 'missing' })).error.code, 'DIFF_JOB_NOT_FOUND');
+    r.profiles.tgt.readOnly = true;
+    assert.equal((await r.call('db:create-data-sync-plan', { jobId })).error.code, 'DATA_DIFF_CONTEXT_CHANGED');
+    r.profiles.tgt.readOnly = false;
+    const job = service.jobs.get(jobId), originalReport = job.report;
+    for (const status of ['running', 'cancelled', 'failed']) {
+      job.status = status;
+      assert.equal((await r.call('db:create-data-sync-plan', { jobId })).error.code, 'DIFF_JOB_NOT_FOUND');
+    }
+    job.status = 'completed';
+    for (const coverage of [{ complete: false, consistent: true }, { complete: true, consistent: false }]) {
+      job.report = { ...originalReport, coverage };
+      assert.equal((await r.call('db:create-data-sync-plan', { jobId })).error.code, 'DIFF_REPORT_INCOMPLETE');
+    }
+    job.report = originalReport;
+    job.completedAt = Date.now() - service.jobTtlMs - 1;
+    assert.equal((await r.call('db:create-data-sync-plan', { jobId })).error.code, 'DIFF_JOB_NOT_FOUND');
+    assert.equal(r.queries.some(q => /^(INSERT|UPDATE|DELETE)\b/.test(q.sql)), false);
+  } finally { await service.clear(); }
 });

@@ -1,0 +1,126 @@
+npm notice run sqlpro-desktop@0.3.12 server:test
+npm notice run npm --prefix server test
+npm notice run sqlpro-server@0.1.0 test
+npm notice run node --test test/*.test.cjs
+TAP version 13
+# (node:1858579) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: hash gate limits concurrent work, rejects a full queue and recovers after failure
+ok 1 - hash gate limits concurrent work, rejects a full queue and recovers after failure
+  ---
+  duration_ms: 1.689264
+  type: 'test'
+  ...
+# Subtest: async password hashing preserves format/verification and yields to the event loop
+ok 2 - async password hashing preserves format/verification and yields to the event loop
+  ---
+  duration_ms: 328.661228
+  type: 'test'
+  ...
+# Subtest: health stays responsive while real login requests are queued
+ok 3 - health stays responsive while real login requests are queued
+  ---
+  duration_ms: 302.305625
+  type: 'test'
+  ...
+# (node:1858580) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: meta exposes auth context and limits
+ok 4 - meta exposes auth context and limits
+  ---
+  duration_ms: 59.166064
+  type: 'test'
+  ...
+# Subtest: register, login, me and logout
+ok 5 - register, login, me and logout
+  ---
+  duration_ms: 120.666934
+  type: 'test'
+  ...
+# Subtest: duplicate email and wrong proof are rejected
+ok 6 - duplicate email and wrong proof are rejected
+  ---
+  duration_ms: 129.113075
+  type: 'test'
+  ...
+# Subtest: invalid auth proof and unknown session are rejected
+ok 7 - invalid auth proof and unknown session are rejected
+  ---
+  duration_ms: 21.845151
+  type: 'test'
+  ...
+# Subtest: expired session is rejected even if token exists
+ok 8 - expired session is rejected even if token exists
+  ---
+  duration_ms: 53.979139
+  type: 'test'
+  ...
+# Subtest: auth rate limit returns retry-after
+ok 9 - auth rate limit returns retry-after
+  ---
+  duration_ms: 82.53907
+  type: 'test'
+  ...
+# Subtest: registration can be disabled
+ok 10 - registration can be disabled
+  ---
+  duration_ms: 5.801774
+  type: 'test'
+  ...
+# (node:1858586) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: internal dependency failures do not disclose exception text, stack or details through logs or responses
+ok 11 - internal dependency failures do not disclose exception text, stack or details through logs or responses
+  ---
+  duration_ms: 57.953718
+  type: 'test'
+  ...
+# (node:1858587) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: two devices register, encrypt, sync, and propagate deletions
+ok 12 - two devices register, encrypt, sync, and propagate deletions
+  ---
+  duration_ms: 617.443938
+  type: 'test'
+  ...
+# Subtest: login from a second device fails with the wrong password
+ok 13 - login from a second device fails with the wrong password
+  ---
+  duration_ms: 256.365467
+  type: 'test'
+  ...
+# (node:1858593) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: vault starts empty and stores revisions
+ok 14 - vault starts empty and stores revisions
+  ---
+  duration_ms: 165.741866
+  type: 'test'
+  ...
+# Subtest: stale revision returns current envelope
+ok 15 - stale revision returns current envelope
+  ---
+  duration_ms: 71.598459
+  type: 'test'
+  ...
+# Subtest: vaults are isolated per user
+ok 16 - vaults are isolated per user
+  ---
+  duration_ms: 123.506995
+  type: 'test'
+  ...
+# Subtest: vault size and payload validation
+ok 17 - vault size and payload validation
+  ---
+  duration_ms: 79.642522
+  type: 'test'
+  ...
+1..17
+# tests 17
+# suites 0
+# pass 17
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1027.9912

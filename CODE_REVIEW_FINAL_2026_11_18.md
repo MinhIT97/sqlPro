@@ -1,5 +1,7 @@
 # Review, sửa lỗi và chốt commit — 18/11/2026
 
+> Review và bản sửa tiếp theo cho hai commit sau baseline: [N01–N07 đã xử lý](CODE_REVIEW_GEMINI_2026_11_19_FIXES.md), [bằng chứng review trước sửa](CODE_REVIEW_GEMINI_2026_11_19.md). Kết quả 18/11 bên dưới không bao phủ các thay đổi mới đó.
+
 Đối chiếu working tree trên `7ede1a6`, package 0.3.12. Người dùng yêu cầu rà soát, sửa lỗi, báo cáo phần còn lại và commit. Commit này gom triển khai Gemini đang có, các bản sửa từ review R1–R5 và bản sửa bổ sung dưới đây. Không mở khóa public Migration/Data Sync Apply và không chứng nhận toàn bộ sản phẩm hết lỗi.
 
 ## 1. Các lỗi đã sửa và bằng chứng

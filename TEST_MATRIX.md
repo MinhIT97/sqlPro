@@ -1,4 +1,10 @@
-# Ma trận kiểm thử SqlPro — trạng thái chốt 18/11/2026
+# Ma trận kiểm thử SqlPro — cập nhật 19/11/2026
+
+## Mốc mới nhất — sửa N01–N07
+
+[Bản sửa và phạm vi nghiệm thu](CODE_REVIEW_GEMINI_2026_11_19_FIXES.md): Node **1.250 tổng / 1.232 pass / 0 fail / 18 opt-in skip**; renderer **101/101**, website **14/14**, server syntax đạt và server tests **17/17**. Bảy regression thuần thất bại trên baseline và đạt trên bản sửa. DB regression mới trên MySQL 8.4.13/MariaDB 11.4.13 **9/9**, có metadata-lock race, DEFAULT qua hai SQL mode, collation và JSON. Không chạy lại toàn matrix engine/bộ cài của baseline bên dưới. Hai public Apply vẫn khóa; không chứng nhận release-ready.
+
+## Baseline 18/11 — lịch sử
 
 Package 0.3.12; đối chiếu working tree trên `7ede1a6`, được commit sau khi kiểm tra. [Báo cáo review cuối và việc chưa làm](CODE_REVIEW_FINAL_2026_11_18.md) là trạng thái hiện hành. Báo cáo R1–R5 giữ lịch sử, không tự suy nghiệm thu từ các dòng “hoàn thành” trong báo cáo cũ.
 

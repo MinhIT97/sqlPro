@@ -131,12 +131,12 @@ test('validateTableForDiff rejects tables without PK or with unsupported types',
         return [{ name: 'code', type: 'varchar(64)', key: 'PRI', collation: 'utf8mb4_general_ci' }];
       }
       if (table === 'varchar_bin_pk') {
-        return [{ name: 'code', type: 'varchar(64)', key: 'PRI', collation: 'utf8mb4_bin' }];
+        return [{ name: 'code', type: 'varchar(64)', key: 'PRI', collation: 'utf8mb4_0900_bin' }];
       }
       if (table === 'composite_bin_pk') {
         return [
           { name: 'tenant_id', type: 'int', key: 'PRI' },
-          { name: 'uuid', type: 'varchar(36)', key: 'PRI', collation: 'utf8mb4_bin' }
+          { name: 'uuid', type: 'varchar(36)', key: 'PRI', collation: 'utf8mb4_0900_bin' }
         ];
       }
       if (table === 'valid') {
@@ -147,7 +147,8 @@ test('validateTableForDiff rejects tables without PK or with unsupported types',
       }
       return [];
     },
-    async raw() {
+    async raw(sql) {
+      if (sql.includes('PAD_ATTRIBUTE')) return { result: [{ name: 'utf8mb4_0900_bin', charset: 'utf8mb4', padAttribute: 'NO PAD' }] };
       return { result: [{ engine: 'InnoDB' }] };
     }
   };

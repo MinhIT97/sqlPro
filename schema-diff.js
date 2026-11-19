@@ -32,7 +32,7 @@
   /**
    * Normalizes a column definition into a canonical form
    */
-  function normalizeColumn(col) {
+  function normalizeColumn(col, dialect = 'MySQL') {
     if (!col || typeof col !== 'object') return null;
     const name = String(col.name || '').trim();
     if (!name) return null;
@@ -41,14 +41,14 @@
     const nullable = col.nullable === true || col.nullable === 'YES' || col.isNullable === true || col.isNullable === 'YES';
     
     let defaultValue = col.defaultValue !== undefined ? col.defaultValue : col.default;
-    if (defaultValue === 'NULL' || defaultValue === null) {
+    if (defaultValue === null || dialect === 'MariaDB' && defaultValue === 'NULL') {
       defaultValue = null;
     } else if (defaultValue !== undefined) {
       defaultValue = String(defaultValue);
     }
 
     const extra = String(col.extra || '').trim().toLowerCase();
-    const isAutoIncrement = extra.includes('auto_increment') || Boolean(col.autoIncrement);
+    const isAutoIncrement = extra.includes('auto_increment') || Boolean(col.autoIncrement || col.isAutoIncrement);
     const comment = String(col.comment || '').trim();
     const charset = col.charset ? String(col.charset).trim().toLowerCase() : null;
     const collation = col.collation ? String(col.collation).trim().toLowerCase() : null;
@@ -145,7 +145,7 @@
   /**
    * Normalizes a table definition
    */
-  function normalizeTable(tbl) {
+  function normalizeTable(tbl, dialect = 'MySQL') {
     if (!tbl || typeof tbl !== 'object') return null;
     const name = String(tbl.name || tbl.tableName || '').trim();
     if (!name) return null;
@@ -158,7 +158,7 @@
     const columns = [];
     const colMap = new Map();
     for (const c of Array.isArray(tbl.columns) ? tbl.columns : []) {
-      const col = normalizeColumn(c);
+      const col = normalizeColumn(c, dialect);
       if (col && !colMap.has(col.name.toLowerCase())) {
         colMap.set(col.name.toLowerCase(), col);
         columns.push(col);
@@ -219,7 +219,7 @@
     const tables = [];
     const tableMap = new Map();
     for (const t of Array.isArray(raw.tables) ? raw.tables : []) {
-      const tbl = normalizeTable(t);
+      const tbl = normalizeTable(t, engine);
       if (tbl && !tableMap.has(tbl.name.toLowerCase())) {
         tableMap.set(tbl.name.toLowerCase(), tbl);
         tables.push(tbl);
@@ -657,10 +657,17 @@
 
     if (col.default !== null && col.default !== undefined) {
       const defUpper = String(col.default).toUpperCase();
-      if (['CURRENT_TIMESTAMP', 'NOW()', 'NULL'].includes(defUpper) || defUpper.startsWith('CURRENT_TIMESTAMP(')) {
+      if (/^(?:timestamp|datetime)\b/i.test(col.type)
+          && /^(?:CURRENT_TIMESTAMP(?:\([0-6]?\))?|NOW\(\))$/.test(defUpper)) {
         sql += ` DEFAULT ${col.default}`;
       } else {
-        sql += ` DEFAULT '${String(col.default).replace(/'/g, "''")}'`;
+        const value = String(col.default);
+        // A charset-qualified hex literal keeps escapes, quotes and Unicode
+        // independent of NO_BACKSLASH_ESCAPES on the destination connection.
+        if (/[\\\u0000-\u001f\u007f-\uffff]/.test(value)) {
+          const bytes = new TextEncoder().encode(value);
+          sql += ` DEFAULT _utf8mb4 0x${Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+        } else sql += ` DEFAULT '${value.replace(/'/g, "''")}'`;
       }
     } else if (col.nullable) {
       sql += ' DEFAULT NULL';

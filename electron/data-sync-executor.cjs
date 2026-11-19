@@ -46,6 +46,7 @@ class DataSyncExecutor {
 
     // 1. Consume token once
     const plan = this.consumePlan(planToken);
+    if (plan.applySupported === false) throw error('SYNC_APPLY_NOT_READY', 'Kế hoạch quan sát chỉ dùng để xem trước.');
 
     // 2. Resolve target profile and verify writable
     const targetProfileId = plan.targetScope.profileId;
@@ -128,28 +129,36 @@ class DataSyncExecutor {
       }
 
       // 5. Engine and Trigger safety verification (must be InnoDB for rollback guarantees)
-      if (typeof worker.raw === 'function') {
+      if (typeof worker.raw !== 'function') throw error('SYNC_METADATA_UNVERIFIED', 'Worker thiếu API xác minh metadata.');
+      const verifyTargetSafety = async () => {
         const tablesToCheck = plan.tables ? Object.keys(plan.tables) : [table];
         for (const tName of tablesToCheck) {
           const engineRes = await worker.raw(
             'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?',
-            [database, tName]
+            [database, tName], 30000, { prepared: true }
           );
-          const engine = (engineRes?.result?.[0]?.ENGINE || engineRes?.result?.[0]?.engine || '').toUpperCase();
-          if (engine && engine !== 'INNODB') {
+          const engineRows = engineRes?.result;
+          if (!Array.isArray(engineRows) || engineRows.length !== 1
+              || typeof (engineRows[0]?.ENGINE ?? engineRows[0]?.engine) !== 'string'
+              || !(engineRows[0].ENGINE ?? engineRows[0].engine).trim()) {
+            throw error('SYNC_METADATA_UNVERIFIED', `Chưa xác minh được engine của bảng "${tName}".`);
+          }
+          const engine = (engineRows[0].ENGINE ?? engineRows[0].engine).toUpperCase();
+          if (engine !== 'INNODB') {
             throw error('UNSUPPORTED_TABLE_ENGINE', `Chỉ hỗ trợ đồng bộ dữ liệu an toàn với bảng engine InnoDB (bảng "${tName}" sử dụng ${engine}).`);
           }
 
           const triggerRes = await worker.raw(
             'SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ?',
-            [database, tName]
+            [database, tName], 30000, { prepared: true }
           );
-          if (Array.isArray(triggerRes?.result) && triggerRes.result.length > 0) {
+          if (!Array.isArray(triggerRes?.result)) throw error('SYNC_METADATA_UNVERIFIED', `Chưa xác minh được triggers của bảng "${tName}".`);
+          if (triggerRes.result.length > 0) {
             const names = triggerRes.result.map(t => t.TRIGGER_NAME || t.trigger_name).filter(Boolean).join(', ');
             throw error('TARGET_TABLE_TRIGGERS_DETECTED', `Bảng đích "${tName}" có triggers (${names}). Tác vụ đồng bộ bị chặn để ngăn tác dụng phụ ngoài ý muốn.`);
           }
         }
-      }
+      };
 
       // 5. Execute in transactional batches
       const effectiveBatchSize = Math.max(1, Math.min(500, Number(batchSize) || 50));
@@ -167,6 +176,13 @@ class DataSyncExecutor {
         await worker.raw('START TRANSACTION');
 
         try {
+          // Open every target table inside this transaction before inspecting
+          // engine/triggers, retaining metadata locks until COMMIT/ROLLBACK.
+          const tablesToLock = plan.tables ? Object.keys(plan.tables) : [table];
+          for (const name of tablesToLock) {
+            await worker.raw(`SELECT 1 FROM ${quoteId(database)}.${quoteId(name)} LIMIT 0`);
+          }
+          await verifyTargetSafety();
           for (let opIdx = 0; opIdx < batch.length; opIdx++) {
             if (signal?.aborted) {
               throw error('SYNC_CANCELLED', 'Quá trình đồng bộ đã bị hủy bỏ bởi người dùng.');
@@ -174,6 +190,7 @@ class DataSyncExecutor {
 
             const op = batch[opIdx];
             const opTable = op.table || table;
+            if (!tablesToLock.includes(opTable)) throw error('INVALID_PLAN_SCOPE', 'Thao tác nằm ngoài danh sách bảng đã xác minh.');
             const opTableRef = `${quoteId(database)}.${quoteId(opTable)}`;
             const opPks = plan.tables ? plan.tables[opTable].primaryKeys : primaryKeys;
 

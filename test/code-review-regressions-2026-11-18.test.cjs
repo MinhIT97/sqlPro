@@ -298,6 +298,8 @@ test('R06: DataSyncExecutor guards originalValues on DELETE and UPDATE', async (
       async useDatabase() {},
       async listColumns() { return [{ name: 'id', type: 'int', key: 'PRI' }, { name: 'value', type: 'varchar(20)', key: '' }]; },
       async raw(sql, params) {
+        if (sql.includes('SELECT ENGINE FROM')) return { result: [{ ENGINE: 'InnoDB' }] };
+        if (sql.includes('SELECT TRIGGER_NAME FROM')) return { result: [] };
         queries.push({ sql, params });
         // Return 0 affected rows to simulate row was modified concurrently
         if (sql.startsWith('DELETE')) return { result: { affectedRows: 0 } };
@@ -345,6 +347,8 @@ test('R07: DataSyncExecutor handles lost COMMIT ACK with partialCommit=true and 
       async useDatabase() {},
       async listColumns() { return [{ name: 'id', type: 'int', key: 'PRI' }]; },
       async raw(sql) {
+        if (sql.includes('SELECT ENGINE FROM')) return { result: [{ ENGINE: 'InnoDB' }] };
+        if (sql.includes('SELECT TRIGGER_NAME FROM')) return { result: [] };
           if (sql.startsWith('SELECT @@SESSION.foreign_key_checks')) return { result: [{ foreignKeys: 1, sqlMode: '', autocommit: 1 }] };
         if (sql === 'COMMIT') throw Object.assign(new Error('commit acknowledgement lost'), { code: 'ECONNRESET' });
         return { result: { affectedRows: 1 } };
@@ -401,7 +405,7 @@ test('R12: Production approval requires valid approvalToken and matching planDig
     planToken: 'token_prod',
     planDigest: 'digest_prod',
     expiresAt: Date.now() + 60000,
-    targetScope: { profileId: 'prod', database: 'prod_db', profileFingerprint: 'fp_prod' },
+    targetScope: { profileId: 'prod', database: 'prod_db', table: 'users', profileFingerprint: 'fp_prod' },
     columns: [{ name: 'id', type: 'int' }],
     primaryKeys: ['id'],
     operations: [{
@@ -430,7 +434,11 @@ test('R12: Production approval requires valid approvalToken and matching planDig
       async connect() {},
       async useDatabase() {},
       async listColumns() { return [{ name: 'id', type: 'int', key: 'PRI' }]; },
-      async raw() { return { result: { affectedRows: 1 } }; },
+      async raw(sql) {
+        if (sql.includes('SELECT ENGINE FROM')) return { result: [{ ENGINE: 'InnoDB' }] };
+        if (sql.includes('SELECT TRIGGER_NAME FROM')) return { result: [] };
+        return { result: { affectedRows: 1 } };
+      },
       async close() {}
     })
   });

@@ -105,7 +105,7 @@
       .replace(/(PASSWORD\s*\(['"])[^'"]+(['"]\))/gi, '$1********$2')
       .replace(/(\/\*!\d+\s*IDENTIFIED\s+(?:WITH\s+['"]?[a-zA-Z0-9_]+['"]?\s+)?BY\s+['"])[^'"]+(['"])/gi, '$1********$2')
       .replace(/(Bearer\s+)[A-Za-z0-9._~+/-]+=*/gi, '$1********')
-      .replace(/-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----/g, '********');
+      .replace(/-----BEGIN ((?:[A-Z0-9]+ )*PRIVATE KEY)-----[\s\S]*?(?:-----END \1-----|$)/g, '********');
 
     // Replace linebreaks with spaces and trim
     scrubbed = scrubbed.replace(/\s+/g, ' ').trim();

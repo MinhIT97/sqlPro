@@ -1,5 +1,7 @@
 # Bàn giao triển khai SqlPro cho Gemini
 
+> **Mốc mới nhất 19/11:** [Đã xử lý N01–N07 và việc còn lại](CODE_REVIEW_GEMINI_2026_11_19_FIXES.md). Check 1.232 pass/0 fail/18 opt-in skip; DB regression mới 9/9. Hai public Apply vẫn khóa, MariaDB expression defaults và collation chưa chứng minh vẫn bị chặn. Các mốc review trước sửa bên dưới giữ lịch sử; không tự nghiệm thu toàn roadmap.
+
 ## Bàn giao sau review cuối 18/11
 
 Ưu tiên gói nhỏ theo [bảng việc chưa làm](CODE_REVIEW_FINAL_2026_11_18.md#3-các-việc-chưa-làm--giao-tiếp-cho-gemini): Migration Apply, Main-owned Data Sync, dialect/MariaDB JSON, rồi tích hợp crypto/replica/calendar/recovery và release matrix. Hai public Apply vẫn khóa. Autocomplete đã có nguyên nhân và regression; không tiếp tục điều tra lại từ báo cáo R3/R5 cũ. Bản crypto mới ghi V2 có AAD, đọc legacy V1; cần contract/UI compatibility trước release. Handoff/bảng mốc cũ phía dưới là lịch sử, không phải danh sách lỗi hiện tại.

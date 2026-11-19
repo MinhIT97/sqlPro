@@ -1,0 +1,117 @@
+{
+  "mainOwnedSync": {
+    "realGetJobType": "undefined",
+    "diffStatus": "completed",
+    "scopesStored": {
+      "source": null,
+      "target": null
+    },
+    "legitimatePlan": {
+      "ok": false,
+      "error": {
+        "message": "Báo cáo so sánh dữ liệu không hợp lệ.",
+        "code": "INVALID_DIFF_REPORT",
+        "sqlState": ""
+      }
+    },
+    "forgedPlan": {
+      "ok": true,
+      "inserts": 1,
+      "database": "made_up_target"
+    },
+    "apply": {
+      "ok": false,
+      "error": {
+        "message": "Chức năng áp dụng đồng bộ dữ liệu (Data Sync Apply) đang khóa an toàn để hoàn thiện kiểm chứng.",
+        "code": "SYNC_APPLY_NOT_READY",
+        "sqlState": ""
+      }
+    }
+  },
+  "syncUnknownEngine": {
+    "result": {
+      "success": true,
+      "committedCount": 1,
+      "totalCount": 1,
+      "partialCommit": false,
+      "durationMs": 0
+    },
+    "insertIssued": true,
+    "commitIssued": true
+  },
+  "rendererNoBuffer": {
+    "name": "ReferenceError",
+    "message": "Buffer is not defined"
+  },
+  "auditPrivateKey": {
+    "retainsHeader": true,
+    "retainsKeyBytes": true,
+    "entireKeyLength": 118,
+    "summaryLength": 118
+  },
+  "binaryCollation": {
+    "serverEquality": [
+      {
+        "sameKey": 1
+      }
+    ],
+    "jobStatus": "completed",
+    "summary": {
+      "totalSource": 1,
+      "totalTarget": 1,
+      "identicalCount": 0,
+      "onlyInSourceCount": 1,
+      "differentCount": 0,
+      "onlyInTargetCount": 1
+    },
+    "coverage": {
+      "version": 1,
+      "kind": "bounded-observation",
+      "complete": true,
+      "consistent": true,
+      "isolation": "consistent-snapshot",
+      "canSynchronize": false
+    }
+  },
+  "generatorDefault": {
+    "sourceCoverage": "complete",
+    "planStatus": "ready",
+    "sql": [
+      "CREATE TABLE `ddl_source` (\n  `id` INT NOT NULL,\n  `value` VARCHAR(100) COLLATE utf8mb4_0900_ai_ci NULL DEFAULT 'C:\\new',\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB COLLATE=utf8mb4_0900_ai_ci;"
+    ],
+    "internalExecution": {
+      "success": true,
+      "executedCount": 1
+    },
+    "defaults": [
+      {
+        "db": "sqlpro_r19_b3aad46a7e22",
+        "value": "C:\\new"
+      },
+      {
+        "db": "sqlpro_r19_b3aad46a7e22_target",
+        "value": "C:\new"
+      }
+    ]
+  },
+  "jsonConstraint": {
+    "serverAcceptsPlain": "plain",
+    "metadata": {
+      "name": "payload",
+      "type": "longtext",
+      "nullable": "YES",
+      "defaultValue": "NULL",
+      "key": "",
+      "extra": "",
+      "comment": "",
+      "position": 2,
+      "collation": "utf8mb4_uca1400_ai_ci",
+      "generationExpression": null,
+      "isJson": true,
+      "checkClause": "json_valid(`payload`) or `payload` = 'plain'"
+    },
+    "normalize": {
+      "error": "Cột \"payload\": JSON không hợp lệ."
+    }
+  }
+}

@@ -2482,7 +2482,7 @@ handle('db:cancel-data-diff', async (payload) => {
 });
 
 handle('db:create-data-sync-plan', async (payload) => {
-  return dataSyncPlanService.createSyncPlan(payload);
+  return dataSyncPlanService.createSyncPlanFromJob(payload);
 });
 
 handle('db:apply-data-sync-plan', async () => {

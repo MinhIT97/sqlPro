@@ -1,0 +1,52 @@
+TAP version 13
+# Subtest: N01: DEFAULT literals retain NULL/keyword strings and use mode-independent hex for escapes
+ok 1 - N01: DEFAULT literals retain NULL/keyword strings and use mode-independent hex for escapes
+  ---
+  duration_ms: 1.835733
+  type: 'test'
+  ...
+# Subtest: N02: text PK admission requires explicit UTF-8 NO PAD proof and rejects CHAR/PAD/unknown
+ok 2 - N02: text PK admission requires explicit UTF-8 NO PAD proof and rejects CHAR/PAD/unknown
+  ---
+  duration_ms: 2.048835
+  type: 'test'
+  ...
+# Subtest: N03: private keys never reach new audit entries, disk or exports
+ok 3 - N03: private keys never reach new audit entries, disk or exports
+  ---
+  duration_ms: 10.203618
+  type: 'test'
+  ...
+# Subtest: N04: public plan boundary rejects caller reports/scopes and missing Main service
+ok 4 - N04: public plan boundary rejects caller reports/scopes and missing Main service
+  ---
+  duration_ms: 0.685005
+  type: 'test'
+  ...
+# Subtest: N05: only a whole unconditional JSON_VALID constraint proves JSON for its exact column
+ok 5 - N05: only a whole unconditional JSON_VALID constraint proves JSON for its exact column
+  ---
+  duration_ms: 2.656594
+  type: 'test'
+  ...
+# Subtest: N06: browser normalizer without Buffer returns validation errors for object inputs
+ok 6 - N06: browser normalizer without Buffer returns validation errors for object inputs
+  ---
+  duration_ms: 2.351839
+  type: 'test'
+  ...
+# Subtest: N07: unknown/malformed engine or trigger metadata stops all DML and rolls back
+ok 7 - N07: unknown/malformed engine or trigger metadata stops all DML and rolls back
+  ---
+  duration_ms: 1.996795
+  type: 'test'
+  ...
+1..7
+# tests 7
+# suites 0
+# pass 7
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 33.036098

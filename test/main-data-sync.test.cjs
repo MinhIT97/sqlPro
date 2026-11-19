@@ -67,6 +67,8 @@ test('Main Data Sync: end-to-end plan creation and guarded execution with optimi
       ];
     },
     async raw(sql, params) {
+      if (sql.includes('SELECT ENGINE FROM')) return { result: [{ ENGINE: 'InnoDB' }] };
+      if (sql.includes('SELECT TRIGGER_NAME FROM')) return { result: [] };
       executedSql.push({ sql, params });
       return { result: { affectedRows: 1 } };
     },

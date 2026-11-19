@@ -1,0 +1,106 @@
+npm notice run sqlpro-desktop@0.3.12 test:renderer
+npm notice run node test/run-renderer-smoke.cjs
+PASS formatter button is bound after rendering
+PASS SQL editor undo and redo survive formatting and tab switches
+PASS Electron delivers Ctrl+Z to the focused SQL editor
+PASS autocomplete keeps case-sensitive sources and self-join aliases, caches bounded metadata and accepts columns with keyboard/undo
+PASS autocomplete isolates nested SELECT blocks and never fetches CTE/derived names as physical tables
+PASS explicit CTE column suggestions stay local, escape names and support keyboard insertion and undo
+PASS SELECT output names for CTE and derived sources need no metadata reads and support keyboard/undo
+PASS implicit SELECT aliases stay local, escape names and preserve keyboard insertion/undo
+PASS set output suggestions use first-arm names with no metadata reads and preserve keyboard/undo
+PASS local star output stays inside CTE/derived names without metadata and preserves keyboard/undo
+PASS qualified local join stars preserve owner and keyboard editing without reading source metadata
+PASS autocomplete ignores retired editor events and survives queued scroll/refocus, but closes on real scrolling
+PASS autocomplete replaces complete tokens at the caret, supports undo and ignores stale suggestions
+PASS review regressions preserve function arguments and block ambiguous qualified owners
+PASS selected SQL and success/failure history contain strings
+PASS query confirmation executes only after acceptance
+PASS EXPLAIN button uses the active statement and displays its result
+PASS result sorting is reversible and does not mutate source rows
+PASS duplicate EXPLAIN values use their own column metadata
+PASS EXPLAIN explanations support keyboard, escaped labels and small dark windows without extra queries
+PASS EXPLAIN JSON/TREE selector preserves native text, rejects ANALYZE and never retries unsupported formats
+PASS ANALYZE named action preserves cancel output, opens native plan with keyboard and exports cached results without replay
+PASS EXPLAIN compares consecutive plans with bounded details, keyboard and reconnect/scope resets
+PASS EXPLAIN settings opt-in supports keyboard, blocks comparisons after drift/missing evidence and fits small windows
+PASS EXPLAIN table definition opt-in resets scopes, blocks drift comparisons and keeps metadata escaped and usable with keyboard
+PASS drop actions honor confirmation and use object query payloads
+PASS column/index/FK forms submit valid query payloads
+PASS context menu initializes and deleting a row honors confirmation
+PASS inline edit preserves empty strings
+PASS table filters and explicit row counts remain usable in a smaller window
+PASS prefix and NULL filters keep count/export scope and reset using the keyboard
+PASS detached search debounce cannot change another table or overwrite a newer filter mode
+PASS grouped filters preview safely, apply with keyboard and keep count/export predicates identical
+PASS empty, stale-target and changed-metadata filter drafts stay open without issuing reads
+PASS IN lists support exact individual values, keyboard apply, count/export and opt-in restart restoration
+PASS empty and invalid numeric lists block apply; value budgets and Escape preserve the active predicate
+PASS column visibility and mixed sorts preserve hidden PK editing, export snapshot and keyboard control
+PASS view drafts reject duplicate/empty/stale metadata and Escape keeps the previous configuration
+PASS table preferences save layout locally with filter persistence off by default and keyboard access
+PASS opt-in filter persistence restores before the first SELECT and stays scoped to the exact database
+PASS schema drift blocks saved filters without SELECT until the user chooses defaults
+PASS saved preference dialog blocks stale scopes, applies explicitly, and deletion preserves the active view
+PASS late saved preferences cannot replace another table or resume an obsolete SELECT
+PASS file import previews mapping and sends a streaming payload
+PASS file export sends task, filter and order and reports the result
+PASS server variables and processlist load; kill confirms then refreshes
+PASS diagnostic dashboard switches between processlist, locks and slow queries tabs
+PASS smart data masking toggles and masks sensitive PII columns in data grid and query grid
+PASS schema diff modal opens, configures source/target, and navigates tabs
+PASS data diff modal opens, configures source/target tables, and navigates tabs
+PASS data diff shows bounded observations, keeps exact decimals and blocks every synchronization route
+PASS data diff refuses UNI guesses and incompatible metadata before SELECT
+PASS late data diff reads cannot populate a replacement modal or query the old target
+PASS changing the data diff target invalidates an in-flight report before the target SELECT
+PASS data diff masks PII in unmatched samples as well as changed cells
+PASS a truncated data diff result leaves no usable report or synchronization action
+PASS audit log modal opens, displays disclaimer, filters entries, and exports
+PASS query snippets modal opens, filters by search, and inserts into editor at caret with undo
+PASS query history view searches queries, scrubs sensitive SQL and prunes history
+PASS maintenance renders server response
+PASS ERD scrolls all loaded nodes and adds no window drag handlers
+PASS theme initializes immediately from saved preference
+PASS sidebar items support keyboard activation and clear labels
+PASS routines and events load lazily and render in the sidebar
+PASS routine details use SHOW CREATE and drop against the captured target
+PASS saved queries save, reopen, rename and delete locally
+PASS SSH trust preserves the connection form and accepted key for Save
+PASS canceling SSH trust and failing a retry both leave the form editable
+PASS new connections default to verified TLS and every unverified mode is visible
+PASS small SQL exports use the cancellable full-data task instead of a BLOB preview
+PASS production review preserves the underlying draft and supports cancel, keyboard and exact-token approval
+PASS production Commit preview explains that it applies to all tabs and is cancellable
+PASS transaction toolbar identifies the session and protects busy actions
+PASS read-only connections display their policy and disable table writes
+PASS backup details open by keyboard and fit a smaller window
+PASS selected-table source preview supports keyboard, flags missing FK, escapes names and never restores
+PASS backup notes save by keyboard, pin protects deletion and failures preserve the draft
+PASS retention preview explains protected backups, validates limits and discards stale results
+PASS retention history distinguishes incomplete reports and expands with the keyboard
+PASS backup schedule supports keyboard save, native Cancel, pause, reload and deleting only the schedule
+PASS backup includes routines, events and the strip-DEFINER option
+PASS row form uses schema controls and saves only changed values without losing precision
+PASS row form rejects invalid dates and JSON, and untouched zero dates do not get rewritten
+PASS inserting allows manual primary keys and distinguishes DEFAULT, NULL and empty strings
+PASS inline date picker keeps focus transitions from saving prematurely and preserves calendar dates
+PASS inline NULL mode keeps SQL NULL, literal NULL and empty text distinct
+PASS failed inline saves retain user input and Escape cancels without another write
+PASS failed or zero-row inline saves never retry on focusout and an explicit retry saves exactly once
+PASS zero-row inline saves retain input and never update the displayed row
+PASS zero-row form saves keep the draft and unchanged matched rows can be saved with the keyboard
+PASS table and SQL row editors send binary original hashes separately from visible previews
+PASS query-result editors use full schema metadata and keep the captured connection target
+PASS a queued close from a reused modal does not cancel the next confirmation
+PASS query result context menu exposes copy formats and safe record actions
+PASS query result menu disables writes for JOIN results
+PASS result grid selects ranges and disjoint rows, preserves selection on right-click and copies all selected rows
+PASS Electron Ctrl+A and Ctrl+C act on focused result rows while SQL editor keeps native select-all
+PASS drag selection highlights rows and bulk Delete confirms once with the selected primary keys
+PASS large results keep a bounded DOM, scroll to the final record and preserve position across renders
+PASS typed row form remains usable in dark theme and a smaller window
+PASS no renderer exceptions or unhandled rejections
+Renderer smoke: 101/101 passed
+[1858674:1119/100335.583486:ERROR:ui/gfx/x/atom_cache.cc:236] Add application/vnd.portal.filetransfer to kAtomsToCache
+[1858674:1119/100335.583591:ERROR:ui/gfx/x/atom_cache.cc:236] Add application/vnd.portal.files to kAtomsToCache

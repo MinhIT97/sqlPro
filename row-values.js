@@ -8,6 +8,20 @@
   const INTEGER_BITS = { tinyint: 8, smallint: 16, mediumint: 24, int: 32, integer: 32, bigint: 64 };
   const SPATIAL = /^(geometry|point|linestring|polygon|multipoint|multilinestring|multipolygon|geometrycollection)$/;
 
+  // Only the entire, unconditional JSON_VALID(column) constraint proves JSON.
+  // Outer parentheses are accepted only in balanced pairs around that expression.
+  function jsonConstraintColumn(clause) {
+    if (typeof clause !== 'string' || clause.length > 4096) return null;
+    const match = /^\s*(\(*\s*)json_valid\s*\(\s*(`(?:``|[^`])+`|[A-Za-z_$][A-Za-z0-9_$]*)\s*\)\s*(\)*)\s*$/i.exec(clause);
+    if (!match || (match[1].match(/\(/g) || []).length !== match[3].length) return null;
+    return match[2][0] === '`' ? match[2].slice(1, -1).replace(/``/g, '`') : match[2];
+  }
+
+  function isJsonColumn(column) {
+    return /^json\b/i.test(column?.type || '') || column?.isJson === true
+      || (typeof column?.name === 'string' && jsonConstraintColumn(column.checkClause) === column.name);
+  }
+
   function parseChoices(type) {
     const body = String(type).slice(String(type).indexOf('(') + 1, String(type).lastIndexOf(')'));
     const choices = [];
@@ -54,7 +68,7 @@
         : spec.kind === 'time' ? 'HH:mm:ss · hỗ trợ thời lượng âm, hơn 24 giờ và giây lẻ.'
           : 'YYYY-MM-DD HH:mm:ss · giữ nguyên giờ theo phiên database, không đổi múi giờ.';
     } else if (['enum', 'set'].includes(base)) { spec.kind = base; spec.choices = parseChoices(column.type); }
-    else if (base === 'json' || column.isJson === true || (column.checkClause && /json_valid/i.test(column.checkClause))) { spec.kind = 'json'; spec.hint = 'Nhập JSON hợp lệ. JSON null khác với SQL NULL.'; }
+    else if (isJsonColumn(column)) { spec.kind = 'json'; spec.hint = 'Nhập JSON hợp lệ. JSON null khác với SQL NULL.'; }
     else if (/^(binary|varbinary|tinyblob|blob|mediumblob|longblob)$/.test(base)) {
       spec.kind = 'binary'; spec.hint = 'Hex: 0x0123abcd. 0x là dữ liệu nhị phân rỗng.';
       if (typeof value === 'string' && value.includes('…')) { spec.readOnly = true; spec.hint = 'Chỉ có bản xem trước nhị phân. Dùng SQL hoặc nhập tệp để thay đổi dữ liệu đầy đủ.'; }
@@ -97,7 +111,8 @@
       if (!spec.nullable) invalid('không cho phép NULL.');
       return null;
     }
-    if (typeof raw === 'object' && spec.kind !== 'json' && !Buffer.isBuffer(raw) && !ArrayBuffer.isView(raw)) {
+    if (typeof raw === 'object' && spec.kind !== 'json'
+        && !(typeof Buffer !== 'undefined' && Buffer.isBuffer(raw)) && !ArrayBuffer.isView(raw)) {
       invalid('không thể lưu object/mảng vào kiểu dữ liệu này.');
     }
     let value;
@@ -196,5 +211,5 @@
     return base + (spec.precision ? `.${fraction}` : '');
   }
 
-  return Object.freeze({ parseChoices, describe, displayValue, normalizeValue, validDate, pickerValue, mergePickerValue });
+  return Object.freeze({ parseChoices, describe, displayValue, normalizeValue, validDate, pickerValue, mergePickerValue, jsonConstraintColumn, isJsonColumn });
 }));

@@ -34,7 +34,8 @@ function createAuditLogStore(root) {
       throw new Error('Định dạng tệp nhật ký thao tác không khớp phiên bản được hỗ trợ.');
     }
 
-    return parsed.entries;
+    // Apply current privacy rules to legacy entries before UI/export or a rewrite.
+    return parsed.entries.map(entry => SqlAuditLog.createAuditEntry(entry));
   }
 
   function writeRaw(entries) {

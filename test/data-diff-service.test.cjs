@@ -256,7 +256,7 @@ test('DataDiffService detects schema mismatch between source and target', async 
   assert.equal(res.error.code, 'DATA_DIFF_SCHEMA_MISMATCH');
 });
 
-test('DataDiffService rejects mismatched PK collations between source and target', async () => {
+test('DataDiffService rejects text PK collations without an equality/order proof', async () => {
   const fakeSession = (name) => ({
     name,
     async connect() {},
@@ -298,7 +298,7 @@ test('DataDiffService rejects mismatched PK collations between source and target
 
   const res = service.getDiffStatus(jobId);
   assert.equal(res.status, 'failed');
-  assert.equal(res.error.code, 'DATA_DIFF_SCHEMA_MISMATCH');
+  assert.equal(res.error.code, 'DATA_DIFF_UNSUPPORTED_PK_TYPE');
 });
 
 test('DataDiffService enforces max concurrent diff jobs quota', async () => {

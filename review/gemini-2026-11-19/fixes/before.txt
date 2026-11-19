@@ -1,0 +1,201 @@
+TAP version 13
+# Subtest: N01: DEFAULT literals retain NULL/keyword strings and use mode-independent hex for escapes
+not ok 1 - N01: DEFAULT literals retain NULL/keyword strings and use mode-independent hex for escapes
+  ---
+  duration_ms: 1.575789
+  type: 'test'
+  location: '/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:19:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    null !== 'NULL'
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'NULL'
+  actual: ~
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:22:12)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.start (node:internal/test_runner/test:944:17)
+    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)
+  ...
+# Subtest: N02: text PK admission requires explicit UTF-8 NO PAD proof and rejects CHAR/PAD/unknown
+not ok 2 - N02: text PK admission requires explicit UTF-8 NO PAD proof and rejects CHAR/PAD/unknown
+  ---
+  duration_ms: 1.033205
+  type: 'test'
+  location: '/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:31:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection: pad'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    code: 'DATA_DIFF_UNSUPPORTED_PK_TYPE'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:40:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: N03: private keys never reach new audit entries, disk or exports
+not ok 3 - N03: private keys never reach new audit entries, disk or exports
+  ---
+  duration_ms: 2.671852
+  type: 'test'
+  location: '/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:44:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    PRIVATE KEY
+
+    true !== false
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: false
+  actual: true
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:53:44)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: N04: public plan boundary rejects caller reports/scopes and missing Main service
+not ok 4 - N04: public plan boundary rejects caller reports/scopes and missing Main service
+  ---
+  duration_ms: 1.050849
+  type: 'test'
+  location: '/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:59:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+
+    + Comparison {}
+    - Comparison {
+    -   code: 'CALLER_FIELDS_REJECTED'
+    - }
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    code: 'CALLER_FIELDS_REJECTED'
+  actual:
+  error: 'service.createSyncPlanFromJob is not a function'
+  name: 'TypeError'
+  stack: |-
+    assert.throws.code (/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:61:31)
+    getActual (node:assert:609:5)
+    Function.throws (node:assert:757:24)
+    TestContext.<anonymous> (/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:61:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  operator: 'throws'
+  stack: |-
+    TestContext.<anonymous> (/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:61:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: N05: only a whole unconditional JSON_VALID constraint proves JSON for its exact column
+not ok 5 - N05: only a whole unconditional JSON_VALID constraint proves JSON for its exact column
+  ---
+  duration_ms: 1.425899
+  type: 'test'
+  location: '/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:66:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    json_valid(`payload`) OR payload='plain'
+
+    true !== false
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: false
+  actual: true
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:74:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: N06: browser normalizer without Buffer returns validation errors for object inputs
+not ok 6 - N06: browser normalizer without Buffer returns validation errors for object inputs
+  ---
+  duration_ms: 2.087197
+  type: 'test'
+  location: '/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:81:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /object\/mảng/. Input:
+
+    'ReferenceError: Buffer is not defined'
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+  error: 'Buffer is not defined'
+  name: 'ReferenceError'
+  stack: |-
+    Object.normalizeValue (evalmachine.<anonymous>:100:61)
+    /tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:84:72
+    getActual (node:assert:609:5)
+    Function.throws (node:assert:757:24)
+    TestContext.<anonymous> (/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:84:38)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+  operator: 'throws'
+  stack: |-
+    TestContext.<anonymous> (/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:84:38)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: N07: unknown/malformed engine or trigger metadata stops all DML and rolls back
+not ok 7 - N07: unknown/malformed engine or trigger metadata stops all DML and rolls back
+  ---
+  duration_ms: 1.145611
+  type: 'test'
+  location: '/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:90:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection: empty-engine'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    code: 'SYNC_METADATA_UNVERIFIED'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (/tmp/sqlpro-n19-baseline-c46l9era/test/review-nov19-regressions.test.cjs:109:7)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..7
+# tests 7
+# suites 0
+# pass 0
+# fail 7
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 22.862789

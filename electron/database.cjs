@@ -388,9 +388,7 @@ function isBinaryColumn(type) {
 function isJsonColumn(columnOrType) {
   if (!columnOrType) return false;
   if (typeof columnOrType === 'object') {
-    if (columnOrType.isJson === true) return true;
-    if (columnOrType.checkClause && /json_valid/i.test(columnOrType.checkClause)) return true;
-    return /^json\b/i.test(columnOrType.type || '');
+    return RowValues.isJsonColumn(columnOrType);
   }
   return /^json\b/i.test(String(columnOrType));
 }
@@ -1411,9 +1409,8 @@ class DatabaseSession {
         );
         if (Array.isArray(checkRows)) {
           for (const chk of checkRows) {
-            const match = /json_valid\s*\(\s*`?([^`\s)]+)`?\s*\)/i.exec(chk.checkClause || '');
-            if (match) {
-              const colName = match[1];
+            const colName = RowValues.jsonConstraintColumn(chk.checkClause);
+            if (colName !== null) {
               const col = columns.find(c => c.name === colName);
               if (col) {
                 col.isJson = true;

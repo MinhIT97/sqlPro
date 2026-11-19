@@ -312,7 +312,11 @@ test('S08: DataSyncExecutor handles async onProgress rejections safely without u
         async connect() {},
         async useDatabase() {},
         async listColumns() { return [{ name: 'id', type: 'int', key: 'PRI' }]; },
-        async raw() { return { result: { affectedRows: 1 } }; },
+        async raw(sql) {
+          if (sql.includes('SELECT ENGINE FROM')) return { result: [{ ENGINE: 'InnoDB' }] };
+          if (sql.includes('SELECT TRIGGER_NAME FROM')) return { result: [] };
+          return { result: { affectedRows: 1 } };
+        },
         async close() {}
       })
     });

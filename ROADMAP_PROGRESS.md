@@ -1,5 +1,11 @@
 # Tiến độ roadmap SqlPro
 
+## 19/11 — Sửa N01–N07 sau review hai commit Gemini
+
+- [Bản sửa và giới hạn](CODE_REVIEW_GEMINI_2026_11_19_FIXES.md): DEFAULT/hậu kiểm migration, collation proof, audit private key, Main-owned preview plan, JSON/browser contract và engine/trigger guards trong metadata lock.
+- Node **1.232 pass / 0 fail / 18 opt-in skip**, renderer **101/101**, website **14/14**, server **17/17**. Regression mới trên hai DB riêng **9/9**; không cộng hoặc tuyên bố chạy lại toàn matrix 18/11.
+- Giữ hai public Apply khóa. Còn dialect DEFAULT MariaDB, mở rộng collation proof, các tích hợp/UI/release đã nêu trong báo cáo; không tick thêm checkbox roadmap.
+
 ## 18/11 — Chốt review và sửa lỗi trước commit
 
 - [Báo cáo cuối](CODE_REVIEW_FINAL_2026_11_18.md): sửa autocomplete do sự kiện editor cũ, bảo toàn file mã hóa/giải mã, container V2, cron, Data Diff IPC/privacy/lifecycle/order proof và migration precondition/uncertainty/observer.

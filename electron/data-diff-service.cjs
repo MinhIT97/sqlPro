@@ -294,6 +294,25 @@ class DataDiffService {
     }
   }
 
+  // Main-only detached evidence; never return the mutable job, controller or promise.
+  getJob(jobId) {
+    this.prune();
+    const job = this.jobs.get(jobId);
+    if (!job || job.status !== 'completed' || !job.report || job.generation !== this.generation || this.clearing) return null;
+    for (const scope of [job.sourceScope, job.targetScope]) {
+      const profile = scope && this.store?.getWithSecrets?.(scope.profileId);
+      if (!profile || computeSchemaFingerprint(profile) !== scope.profileFingerprint) {
+        throw error('DATA_DIFF_CONTEXT_CHANGED', 'Cấu hình nguồn hoặc đích đã thay đổi.');
+      }
+    }
+    const { generateSyncSql: _ignored, ...report } = job.report;
+    const freeze = value => {
+      if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value); }
+      return value;
+    };
+    return freeze(structuredClone({ jobId, status: job.status, sourceScope: job.sourceScope, targetScope: job.targetScope, report }));
+  }
+
   async startDiff({
     sourceProfileId,
     sourceDb,
@@ -353,6 +372,9 @@ class DataDiffService {
 
     const job = {
       jobId,
+      generation,
+      sourceScope: Object.freeze({ profileId: sourceProfileId, database: sourceDb, table: sourceTable, generation, profileFingerprint: sourceFingerprint }),
+      targetScope: Object.freeze({ profileId: targetProfileId, database: targetDb, table: targetTable, generation, profileFingerprint: targetFingerprint }),
       status: 'running',
       createdAt: Date.now(),
       completedAt: null,

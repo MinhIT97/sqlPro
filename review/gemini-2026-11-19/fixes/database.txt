@@ -1,0 +1,66 @@
+TAP version 13
+# Subtest: N01/N02/N05 real MYSQL: default fidelity, collation admission and conditional JSON
+    # Subtest: CREATE_TABLE and ADD_COLUMN preserve defaults with sql_mode=(empty)
+    ok 1 - CREATE_TABLE and ADD_COLUMN preserve defaults with sql_mode=(empty)
+      ---
+      duration_ms: 143.138119
+      type: 'test'
+      ...
+    # Subtest: CREATE_TABLE and ADD_COLUMN preserve defaults with sql_mode=NO_BACKSLASH_ESCAPES
+    ok 2 - CREATE_TABLE and ADD_COLUMN preserve defaults with sql_mode=NO_BACKSLASH_ESCAPES
+      ---
+      duration_ms: 114.174555
+      type: 'test'
+      ...
+    # Subtest: PAD SPACE is blocked; verified utf8mb4_0900_bin keeps trailing-space keys distinct across chunks
+    ok 3 - PAD SPACE is blocked; verified utf8mb4_0900_bin keeps trailing-space keys distinct across chunks
+      ---
+      duration_ms: 62.174691
+      type: 'test'
+      ...
+    # Subtest: N07 internal executor: metadata lock blocks concurrent engine change, MyISAM/triggers block writes
+    ok 4 - N07 internal executor: metadata lock blocks concurrent engine change, MyISAM/triggers block writes
+      ---
+      duration_ms: 1117.224123
+      type: 'test'
+      ...
+    1..4
+ok 1 - N01/N02/N05 real MYSQL: default fidelity, collation admission and conditional JSON
+  ---
+  duration_ms: 1522.719409
+  type: 'test'
+  ...
+# Subtest: N01/N02/N05 real MARIA: default fidelity, collation admission and conditional JSON
+    # Subtest: JSON alias is recognized but conditional LONGTEXT remains text
+    ok 1 - JSON alias is recognized but conditional LONGTEXT remains text
+      ---
+      duration_ms: 21.948667
+      type: 'test'
+      ...
+    # Subtest: MariaDB expression defaults remain blocked until dialect contract is implemented
+    ok 2 - MariaDB expression defaults remain blocked until dialect contract is implemented
+      ---
+      duration_ms: 69.868052
+      type: 'test'
+      ...
+    # Subtest: N07 internal executor: metadata lock blocks concurrent engine change, MyISAM/triggers block writes
+    ok 3 - N07 internal executor: metadata lock blocks concurrent engine change, MyISAM/triggers block writes
+      ---
+      duration_ms: 1027.165321
+      type: 'test'
+      ...
+    1..3
+ok 2 - N01/N02/N05 real MARIA: default fidelity, collation admission and conditional JSON
+  ---
+  duration_ms: 1130.892813
+  type: 'test'
+  ...
+1..2
+# tests 9
+# suites 0
+# pass 9
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2802.354804

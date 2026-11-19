@@ -335,3 +335,24 @@ test('worker deadline interrupts a hung DDL and reports uncertain execution with
   });
   assert.equal(r.counts().closed, 1);
 });
+
+test('N01: acknowledged DDL with a wrong default fails semantic postcondition and preserves partial commit', async () => {
+  const r = fixture(), raw = r.worker.raw;
+  r.plan.statements[0].postCondition = {
+    table: 'users', checkSql: 'SELECT existence_marker', expectedCount: 1, exactColumns: true,
+    expectedColumns: [{ name: 'v', type: 'varchar(100)', nullable: 'YES', defaultValue: 'C:\\new', extra: '', collation: 'utf8mb4_bin' }]
+  };
+  r.worker.raw = async sql => {
+    if (sql.includes('existence_marker')) return { result: [{}] };
+    if (sql.includes('LOWER(COLUMN_TYPE)')) return { result: [{ name: 'v', type: 'varchar(100)', nullable: 'YES', defaultValue: 'C:\new', extra: '', collation: 'utf8mb4_bin' }] };
+    return raw(sql);
+  };
+  await assert.rejects(r.run(), err => {
+    assert.equal(err.code, 'MIGRATION_POSTCONDITION_FAILED');
+    assert.equal(err.executedCount, 1);
+    assert.equal(err.partialCommit, true);
+    assert.equal(err.executionUncertain, false);
+    assert.equal(err.ledger[1].status, 'not_run');
+    return true;
+  });
+});

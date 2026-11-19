@@ -1,5 +1,7 @@
 # Ma trận kiểm thử SqlPro — cập nhật 19/11/2026
 
+> **Review sau commit:** [Review sau commit 8ee4c3f](CODE_REVIEW_GEMINI_2026_11_19_R3.md). Các suite hiện có chạy lại đạt cùng số liệu bên dưới; probe mới vẫn tái hiện E01–E04. Không suy pass suite là nghiệm thu hết lỗi. Public Apply tiếp tục khóa.
+
 ## Mốc mới nhất — sửa D01–D09
 
 [Bản sửa D01–D09 và giới hạn](CODE_REVIEW_GEMINI_2026_11_19_R2_FIXES.md): Node **1.263 tổng / 1.243 pass / 0 fail / 20 opt-in skip**; regression mới **11/11** (baseline 2489b3a: 11 fail), renderer **103/103**, website **14/14**, server check đạt và tests **17/17**. Hai suite DB regression N/D chạy trên MySQL 8.4.13 và MariaDB 11.4.13 **17/17, 0 skip**. Các test DB opt-in vẫn skip trong lệnh Node mặc định; không cộng trùng số liệu. Chưa chạy lại toàn engine/installed/release matrix. Public Apply vẫn khóa, unsupported CHECK/SQL-mode literals bị chặn. [Evidence](review/gemini-2026-11-19/d-fixes/).

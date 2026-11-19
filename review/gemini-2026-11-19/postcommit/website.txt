@@ -1,0 +1,22 @@
+npm notice run sqlpro-desktop@0.3.12 test:website
+npm notice run node test/run-website-smoke.cjs
+(node:53570) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+Website smoke: starting Chromium
+Website smoke: loading local website
+Website smoke: website loaded
+PASS mobile navigation supports keyboard, Escape and focus leaving the menu
+PASS closing a navigation link does not leave focus in a hidden menu
+PASS crossing the desktop breakpoint resets menu state and preserves usable focus
+PASS navigation remains reachable in a short landscape viewport
+PASS clipboard permission failure falls back and restores focus and selection
+PASS clipboard failure is announced; modern clipboard succeeds and feedback resets
+PASS responsive layout, focus indicators and reduced motion work
+PASS downloads show real response metadata and copy the provided checksum
+PASS overview video decodes, plays and provides localized captions
+PASS hosting form validates, invalidates stale results, copies and downloads configuration
+PASS documentation search supports accents, error codes, no results and language switching
+PASS changelog renders safe notes and excludes draft and external releases
+PASS all six localized pages fit mobile and desktop with no broken loaded images
+PASS mobile navigation and download fallbacks remain usable without JavaScript
+Website smoke: 14/14 passed

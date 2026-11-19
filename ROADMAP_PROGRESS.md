@@ -1,5 +1,11 @@
 # Tiến độ roadmap SqlPro
 
+## 19/11 — Commit D01–D09 và review lại
+
+- Commit runtime/test/bằng chứng: **8ee4c3f**. [Review sau commit 8ee4c3f](CODE_REVIEW_GEMINI_2026_11_19_R3.md): còn **E01–E04, 2 P1/2 P2**, chưa sửa thêm runtime.
+- Node **1.243 pass/0 fail/20 skip**, renderer **103/103**, website **14/14**, server **17/17**. Ba tình huống dữ liệu tái hiện trên cả MySQL 8.4.13/MariaDB 11.4.13; suite xanh chưa phủ các findings này.
+- Public Apply tiếp tục khóa; không đổi checklist nghiệm thu.
+
 ## 19/11 — Sửa D01–D09 theo review sâu
 
 - [Bản sửa D01–D09 và giới hạn](CODE_REVIEW_GEMINI_2026_11_19_R2_FIXES.md): giữ schema literals/case, chặn CHECK/COMMENT chưa hỗ trợ, exact Sync guard, fatal error privacy/terminal, replica metadata pair, UI revision và connection owner.

@@ -1,0 +1,45 @@
+{
+  "connectionMetadata": {
+    "before": "8.4-new",
+    "after": "5.7-old",
+    "currentConnectionUnchanged": true,
+    "staleConnectResolved": true
+  },
+  "database": {
+    "engineVersion": "11.4.13-MariaDB-ubu2404",
+    "columnOrder": {
+      "success": true,
+      "sql": "ALTER TABLE `column_order` ADD COLUMN `added` INT(11) NULL DEFAULT NULL;",
+      "source": [
+        "id",
+        "added",
+        "tail"
+      ],
+      "target": [
+        "id",
+        "tail",
+        "added"
+      ]
+    },
+    "enumDrift": {
+      "success": true,
+      "requested": "pending",
+      "stored": "PENDING"
+    },
+    "pkRace": {
+      "success": true,
+      "committedCount": 1,
+      "affectedRows": 2,
+      "rows": [
+        {
+          "id": 1,
+          "v": "new"
+        },
+        {
+          "id": 1,
+          "v": "new"
+        }
+      ]
+    }
+  }
+}

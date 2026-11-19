@@ -57,7 +57,7 @@ class BackupReplicaManager {
     try {
       await pipeline(readStream, writeStream);
       // Fsync file descriptor to guarantee written to physical disk
-      const handle = await fs.promises.open(tempPath, 'r');
+      const handle = await fs.promises.open(tempPath, 'r+');
       try {
         await handle.sync();
       } finally {

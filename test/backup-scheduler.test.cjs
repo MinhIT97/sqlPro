@@ -25,7 +25,7 @@ test('schedule store validates, scopes, projects and persists schedules with opt
   const f = fixture(t);
   const reread = createScheduleStore(f.root).read()[0];
   assert.deepEqual(reread, f.saved);
-  assert.equal(fs.statSync(f.file).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(f.file).mode & 0o777, 0o600);
   const changed = f.repository.save({ ...f.input, password: 'must-not-persist', intervalHours: 12 }, BASE);
   assert.notEqual(changed.revision, f.saved.revision);
   assert.equal(fs.readFileSync(f.file, 'utf8').includes('must-not-persist'), false);
@@ -52,7 +52,16 @@ test('corrupt, unsupported and symlink schedule files are preserved instead of o
   }
   fs.unlinkSync(f.file);
   const destination = path.join(f.root, 'original.json');
-  fs.writeFileSync(destination, 'original'); fs.symlinkSync(destination, f.file);
+  fs.writeFileSync(destination, 'original');
+  try {
+    fs.symlinkSync(destination, f.file);
+  } catch (err) {
+    if (['EPERM', 'ENOTSUP'].includes(err.code)) {
+      if (t && t.skip) t.skip('Symlinks unavailable');
+      return;
+    }
+    throw err;
+  }
   assert.throws(() => f.repository.read());
   assert.equal(fs.readFileSync(destination, 'utf8'), 'original');
 });

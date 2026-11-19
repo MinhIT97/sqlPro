@@ -23,7 +23,7 @@ function validateHeader(header, size) {
 }
 
 async function publishExclusive(tempPath, destinationPath) {
-  const handle = await fs.promises.open(tempPath, 'r');
+  const handle = await fs.promises.open(tempPath, 'r+');
   try { await handle.sync(); } finally { await handle.close(); }
   try { await fs.promises.link(tempPath, destinationPath); }
   catch (err) {

@@ -89,7 +89,16 @@ test('corrupt, future, mismatched, oversized and symlink files are preserved on 
     assert.equal(fs.readFileSync(file, 'utf8'), content);
   }
   fs.rmSync(file);
-  const target = path.join(root, 'preserve.json'); fs.writeFileSync(target, JSON.stringify(original)); fs.symlinkSync(target, file);
+  const target = path.join(root, 'preserve.json'); fs.writeFileSync(target, JSON.stringify(original));
+  try {
+    fs.symlinkSync(target, file);
+  } catch (err) {
+    if (['EPERM', 'ENOTSUP'].includes(err.code)) {
+      if (t && t.skip) t.skip('Symlinks unavailable');
+      return;
+    }
+    throw err;
+  }
   assert.throws(() => repository.save(scope, saved)); assert.throws(() => repository.remove(scope));
   assert.ok(fs.lstatSync(file).isSymbolicLink());
 });

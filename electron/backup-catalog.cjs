@@ -231,7 +231,7 @@ async function copyBackupFile(root, sourceProfileId, targetProfileId, sourceData
       targetChecksum = copiedChecksum;
     }
     await fs.chmod(temporaryFile, 0o600);
-    const handle = await fs.open(temporaryFile, 'r');
+    const handle = await fs.open(temporaryFile, 'r+');
     try {
       await handle.sync();
     } finally {

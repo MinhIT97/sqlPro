@@ -101,7 +101,7 @@ test('exclusive backup publishes a stable file identity and retains explicit ove
   } finally { await fs.rm(folder, { recursive: true, force: true }); }
 });
 
-test('oversized or symlink manifest remains untouched and returns an error', async () => {
+test('oversized or symlink manifest remains untouched and returns an error', async (t) => {
   const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlpro-backup-manifest-limit-'));
   const target = path.join(folder, 'sample.sql');
   try {
@@ -109,7 +109,16 @@ test('oversized or symlink manifest remains untouched and returns an error', asy
     assert.match((await readManifest(target)).error, /2 MiB/);
     await fs.unlink(`${target}.json`);
     const original = path.join(folder, 'original.json');
-    await fs.writeFile(original, 'original'); await fs.symlink(original, `${target}.json`);
+    await fs.writeFile(original, 'original');
+    try {
+      await fs.symlink(original, `${target}.json`);
+    } catch (err) {
+      if (['EPERM', 'ENOTSUP'].includes(err.code)) {
+        if (t && t.skip) t.skip('Symlinks unavailable');
+        return;
+      }
+      throw err;
+    }
     assert.match((await readManifest(target)).error, /tệp thường/);
     assert.equal(await fs.readFile(original, 'utf8'), 'original');
   } finally { await fs.rm(folder, { recursive: true, force: true }); }

@@ -1,0 +1,116 @@
+TAP version 13
+# Subtest: D01-D04/D06 MYSQL: schema fidelity and exact conflict guards
+    # Subtest: ENUM/SET retain literal case, case-only tables both migrate and safe comments round-trip
+    ok 1 - ENUM/SET retain literal case, case-only tables both migrate and safe comments round-trip
+      ---
+      duration_ms: 120.376607
+      type: 'test'
+      ...
+    # Subtest: CHECK inventory blocks before DDL; unsafe comments are rejected before execution
+    ok 2 - CHECK inventory blocks before DDL; unsafe comments are rejected before execution
+      ---
+      duration_ms: 72.087975
+      type: 'test'
+      ...
+    # Subtest: UPDATE/DELETE reject case/accent/trailing-space concurrent changes and preserve exact target bytes
+    ok 3 - UPDATE/DELETE reject case/accent/trailing-space concurrent changes and preserve exact target bytes
+      ---
+      duration_ms: 55.013516
+      type: 'test'
+      ...
+    1..3
+ok 1 - D01-D04/D06 MYSQL: schema fidelity and exact conflict guards
+  ---
+  duration_ms: 290.559195
+  type: 'test'
+  ...
+# Subtest: D01-D04/D06 MARIA: schema fidelity and exact conflict guards
+    # Subtest: ENUM/SET retain literal case, case-only tables both migrate and safe comments round-trip
+    ok 1 - ENUM/SET retain literal case, case-only tables both migrate and safe comments round-trip
+      ---
+      duration_ms: 170.933167
+      type: 'test'
+      ...
+    # Subtest: CHECK inventory blocks before DDL; unsafe comments are rejected before execution
+    ok 2 - CHECK inventory blocks before DDL; unsafe comments are rejected before execution
+      ---
+      duration_ms: 179.447228
+      type: 'test'
+      ...
+    # Subtest: UPDATE/DELETE reject case/accent/trailing-space concurrent changes and preserve exact target bytes
+    ok 3 - UPDATE/DELETE reject case/accent/trailing-space concurrent changes and preserve exact target bytes
+      ---
+      duration_ms: 42.969743
+      type: 'test'
+      ...
+    1..3
+ok 2 - D01-D04/D06 MARIA: schema fidelity and exact conflict guards
+  ---
+  duration_ms: 402.506826
+  type: 'test'
+  ...
+# Subtest: N01/N02/N05 real MYSQL: default fidelity, collation admission and conditional JSON
+    # Subtest: CREATE_TABLE and ADD_COLUMN preserve defaults with sql_mode=(empty)
+    ok 1 - CREATE_TABLE and ADD_COLUMN preserve defaults with sql_mode=(empty)
+      ---
+      duration_ms: 162.92979
+      type: 'test'
+      ...
+    # Subtest: CREATE_TABLE and ADD_COLUMN preserve defaults with sql_mode=NO_BACKSLASH_ESCAPES
+    ok 2 - CREATE_TABLE and ADD_COLUMN preserve defaults with sql_mode=NO_BACKSLASH_ESCAPES
+      ---
+      duration_ms: 130.997363
+      type: 'test'
+      ...
+    # Subtest: PAD SPACE is blocked; verified utf8mb4_0900_bin keeps trailing-space keys distinct across chunks
+    ok 3 - PAD SPACE is blocked; verified utf8mb4_0900_bin keeps trailing-space keys distinct across chunks
+      ---
+      duration_ms: 60.066117
+      type: 'test'
+      ...
+    # Subtest: N07 internal executor: metadata lock blocks concurrent engine change, MyISAM/triggers block writes
+    ok 4 - N07 internal executor: metadata lock blocks concurrent engine change, MyISAM/triggers block writes
+      ---
+      duration_ms: 1137.600222
+      type: 'test'
+      ...
+    1..4
+ok 3 - N01/N02/N05 real MYSQL: default fidelity, collation admission and conditional JSON
+  ---
+  duration_ms: 1579.330223
+  type: 'test'
+  ...
+# Subtest: N01/N02/N05 real MARIA: default fidelity, collation admission and conditional JSON
+    # Subtest: JSON alias is recognized but conditional LONGTEXT remains text
+    ok 1 - JSON alias is recognized but conditional LONGTEXT remains text
+      ---
+      duration_ms: 49.680407
+      type: 'test'
+      ...
+    # Subtest: MariaDB expression defaults remain blocked until dialect contract is implemented
+    ok 2 - MariaDB expression defaults remain blocked until dialect contract is implemented
+      ---
+      duration_ms: 178.313743
+      type: 'test'
+      ...
+    # Subtest: N07 internal executor: metadata lock blocks concurrent engine change, MyISAM/triggers block writes
+    ok 3 - N07 internal executor: metadata lock blocks concurrent engine change, MyISAM/triggers block writes
+      ---
+      duration_ms: 1137.975152
+      type: 'test'
+      ...
+    1..3
+ok 4 - N01/N02/N05 real MARIA: default fidelity, collation admission and conditional JSON
+  ---
+  duration_ms: 1391.505596
+  type: 'test'
+  ...
+1..4
+# tests 17
+# suites 0
+# pass 17
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3188.001182

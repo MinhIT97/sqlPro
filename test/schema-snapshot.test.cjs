@@ -925,7 +925,7 @@ test('B02.29 — Continuous timeout enforcement stops subsequent queries and mar
       return [];
     },
     async raw() {
-      rawCallsAfterTables++;
+      if (listTablesCount > 0) rawCallsAfterTables++;
       return { result: [] };
     }
   };

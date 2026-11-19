@@ -1,0 +1,76 @@
+TAP version 13
+# Subtest: D01: normalize/format preserve case and quotes of ENUM/SET members; type comparison sees changed members
+ok 1 - D01: normalize/format preserve case and quotes of ENUM/SET members; type comparison sees changed members
+  ---
+  duration_ms: 2.195066
+  type: 'test'
+  ...
+# Subtest: D02: schema diff retains both case-only table names and distinguishes case-only changes
+ok 2 - D02: schema diff retains both case-only table names and distinguishes case-only changes
+  ---
+  duration_ms: 2.109751
+  type: 'test'
+  ...
+# Subtest: D03: collector records CHECK inventory; unknown/denied/malformed CHECK metadata never admits migration
+ok 3 - D03: collector records CHECK inventory; unknown/denied/malformed CHECK metadata never admits migration
+  ---
+  duration_ms: 4.170637
+  type: 'test'
+  ...
+# Subtest: D04: text original guards use byte comparison and missing snapshots stop before UPDATE/DELETE
+ok 4 - D04: text original guards use byte comparison and missing snapshots stop before UPDATE/DELETE
+  ---
+  duration_ms: 3.328171
+  type: 'test'
+  ...
+# Subtest: D05: production fatal handlers log no arbitrary secret and exit before continuing
+ok 5 - D05: production fatal handlers log no arbitrary secret and exit before continuing
+  ---
+  duration_ms: 68.466287
+  type: 'test'
+  ...
+# Subtest: D06: comments requiring SQL-mode escaping block generation/preview instead of silently changing
+ok 6 - D06: comments requiring SQL-mode escaping block generation/preview instead of silently changing
+  ---
+  duration_ms: 0.51091
+  type: 'test'
+  ...
+# Subtest: D07: replica publishes the canonical manifest and annotations under the same nonconflicting basename
+ok 7 - D07: replica publishes the canonical manifest and annotations under the same nonconflicting basename
+  ---
+  duration_ms: 63.409093
+  type: 'test'
+  ...
+# Subtest: D07: metadata publication failure leaves no discoverable SQL; transient retry is confined to staging
+ok 8 - D07: metadata publication failure leaves no discoverable SQL; transient retry is confined to staging
+  ---
+  duration_ms: 51.382861
+  type: 'test'
+  ...
+# Subtest: D08: delayed replica/container results do not touch a new dialog or changed profile
+ok 9 - D08: delayed replica/container results do not touch a new dialog or changed profile
+  ---
+  duration_ms: 11.499685
+  type: 'test'
+  ...
+# Subtest: D09: actual connect listeners ignore old connection errors but current errors invalidate the session
+ok 10 - D09: actual connect listeners ignore old connection errors but current errors invalidate the session
+  ---
+  duration_ms: 1.438888
+  type: 'test'
+  ...
+# Subtest: D09: old SSH client/stream events never invalidate a replacement tunnel
+ok 11 - D09: old SSH client/stream events never invalidate a replacement tunnel
+  ---
+  duration_ms: 6.532522
+  type: 'test'
+  ...
+1..11
+# tests 11
+# suites 0
+# pass 11
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 418.047794

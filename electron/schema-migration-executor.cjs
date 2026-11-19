@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { normalizeColumnType } = require('../schema-diff.js');
 const { assertWritable } = require('./connection-policy.cjs');
 const { DatabaseSession } = require('./database.cjs');
 const { SchemaSnapshotCollector, computeSchemaFingerprint } = require('./schema-snapshot.cjs');
@@ -210,21 +211,22 @@ class SchemaMigrationExecutor {
               throw error('MIGRATION_POSTCONDITION_FAILED', `Hậu điều kiện migration không đạt cho statement ${entry.id} (kỳ vọng: ${expected}, thực tế: ${count}).`);
             }
             if (entry.postCondition.expectedColumns) {
-              const metadata = await query(`SELECT COLUMN_NAME AS name, LOWER(COLUMN_TYPE) AS type,
+              const metadata = await query(`SELECT COLUMN_NAME AS name, COLUMN_TYPE AS type,
                   IS_NULLABLE AS nullable, COLUMN_DEFAULT AS defaultValue, EXTRA AS extra,
-                  COLLATION_NAME AS collation
+                  COLLATION_NAME AS collation, COLUMN_COMMENT AS comment
                 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION`,
               [plan.targetScope.database, entry.postCondition.table]);
               const actual = metadata?.result || metadata?.rows;
               const expectedColumns = entry.postCondition.expectedColumns;
-              const fields = ['name', 'type', 'nullable', 'defaultValue', 'extra', 'collation'];
+              const fields = ['name', 'type', 'nullable', 'defaultValue', 'extra', 'collation', 'comment'];
               if (!Array.isArray(actual) || !Array.isArray(expectedColumns) || !expectedColumns.length
                   || entry.postCondition.exactColumns && actual.length !== expectedColumns.length
                   || expectedColumns.some(column => {
                     if (!column || typeof column.name !== 'string') return true;
                     const matches = actual.filter(item => item && item.name === column.name);
                     return matches.length !== 1 || !fields.every(key => Object.hasOwn(column, key)
-                      && Object.hasOwn(matches[0], key) && matches[0][key] === column[key]);
+                      && Object.hasOwn(matches[0], key) && (key === 'type'
+                        ? normalizeColumnType(matches[0][key]) === column[key] : matches[0][key] === column[key]));
                   })) {
                 throw error('MIGRATION_POSTCONDITION_FAILED', `Định nghĩa cột/default sau migration không khớp cho statement ${entry.id}.`);
               }

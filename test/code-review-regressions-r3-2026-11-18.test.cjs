@@ -312,19 +312,19 @@ test('T05: Replica publication no-replace preserves concurrent file without over
     fs.writeFileSync(src, 'NEW BACKUP DATA');
 
     const manager = new BackupReplicaManager({ maxRetries: 1 });
-    const copy = manager.copyAtomic.bind(manager);
-
-    // Simulate concurrent file appearing after target path calculation but before copyAtomic publication
-    manager.copyAtomic = async (s, d, exp, opts) => {
-      fs.writeFileSync(d, 'CONCURRENT VALUABLE BACKUP');
-      return copy(s, d, exp, opts);
+    const link = fs.promises.link;
+    let collided = false;
+    fs.promises.link = async (source, target) => {
+      if (target === dst && !collided) {
+        collided = true;
+        fs.writeFileSync(dst, 'CONCURRENT VALUABLE BACKUP');
+      }
+      return link.call(fs.promises, source, target);
     };
-
-    const replica = await manager.createReplica({
-      sourceFilePath: src,
-      destinationDir: dstDir,
-      overwrite: false
-    });
+    let replica;
+    try {
+      replica = await manager.createReplica({ sourceFilePath: src, destinationDir: dstDir, overwrite: false });
+    } finally { fs.promises.link = link; }
 
     assert.equal(replica.verified, true);
     // Original destination file must be completely preserved!

@@ -2,7 +2,7 @@
 
 const crypto = require('node:crypto');
 const SchemaDiff = require('../schema-diff.js');
-const { SchemaMigrationGenerator, defaultMetadataBlock } = require('./schema-migration-generator.cjs');
+const { SchemaMigrationGenerator, inspectSnapshotMetadata, caseMetadataBlock } = require('./schema-migration-generator.cjs');
 
 const DEFAULT_SERVICE_OPTIONS = Object.freeze({
   snapshotTtlMs: 10 * 60 * 1000, planTtlMs: 5 * 60 * 1000,
@@ -42,7 +42,7 @@ function metadataBlock(snapshot) {
           || index.visibilityKind === 'mariadb-ignored' && index.visibility !== 'NO') return 'INDEX_VISIBILITY_UNSUPPORTED';
     }
   }
-  return defaultMetadataBlock(snapshot);
+  return inspectSnapshotMetadata(snapshot);
 }
 
 class SchemaMigrationService {
@@ -99,6 +99,7 @@ class SchemaMigrationService {
     const target = this.getSnapshot(targetSnapshotId);
     if (!options || typeof options !== 'object' || Array.isArray(options)) throw error('INVALID_PLAN_OPTIONS', 'Tùy chọn migration không hợp lệ.');
     let blockReason = metadataBlock(source) || metadataBlock(target);
+    if (!blockReason) blockReason = caseMetadataBlock(source, target);
     if (source.scope.profileId === target.scope.profileId && source.database === target.database) blockReason = 'SAME_DATABASE';
     if (source.engine !== target.engine) blockReason = 'CROSS_ENGINE_MIGRATION_UNSUPPORTED';
     if (options.wrapForeignKeys === true) blockReason = 'FOREIGN_KEY_CHECKS_OVERRIDE_UNSUPPORTED';

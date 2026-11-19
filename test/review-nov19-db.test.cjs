@@ -101,6 +101,7 @@ for (const engine of ['MYSQL', 'MARIA']) {
           assert.throws(() => RowValues.normalizeValue(actual, 'plain'), /JSON/);
         });
         await t.test('MariaDB expression defaults remain blocked until dialect contract is implemented', async () => {
+          await admin.query('DROP TABLE optional_json, actual_json');
           await admin.query("CREATE TABLE defaults(id INT PRIMARY KEY, v VARCHAR(20) DEFAULT 'NULL') ENGINE=InnoDB");
           const source = await open(sourceDb, 'source'), targetDb = await createDb('target'), target = await open(targetDb, 'target');
           const plan = new SchemaMigrationGenerator().generateCandidatePlan({ sourceSnapshot: await source.collector.collect(sourceDb), targetSnapshot: await target.collector.collect(targetDb) });

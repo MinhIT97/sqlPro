@@ -139,7 +139,9 @@ function formatBytes(value) {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+let modalRevision = 0;
 function modal(html, wide = false) {
+  ++modalRevision;
   const dialog = $('#modal');
   if (!html.includes('data-transfer-running')) {
     clearTimeout(window.__sqlproTaskTimer);
@@ -151,6 +153,7 @@ function modal(html, wide = false) {
 }
 
 function closeModal() {
+  ++modalRevision;
   const dialog = $('#modal');
   if ($('#modal [data-transfer-running]')) {
     clearTimeout(window.__sqlproTaskTimer);
@@ -6993,9 +6996,12 @@ async function runBackupManagerAction(action) {
       </div>`);
     const input = $('#replicaDestDirInput');
     const button = $('#confirmCreateReplicaBtn');
+    const revision = modalRevision;
+    const matches = () => modalRevision === revision && $('#modal')?.open
+      && $('#replicaDestDirInput') === input && app.connection?.id === profileId && app.database === database;
     let running = false;
     button?.addEventListener('click', async () => {
-      if (running) return;
+      if (running || !matches()) return;
       const destinationDir = input?.value.trim();
       if (!destinationDir) return toast('Vui lòng nhập đường dẫn thư mục đích.', 'error');
       running = true; button.disabled = true;
@@ -7007,12 +7013,13 @@ async function runBackupManagerAction(action) {
           destinationDir,
           expectedFileChecksum: current.checksum || null
         }));
+        if (!matches()) return;
         closeModal();
         toast(`Đã tạo replica: ${result.replicaPath}`, 'success');
       } catch (error) {
-        toast(error.message, 'error');
+        if (matches()) toast(error.message, 'error');
       } finally {
-        running = false; button.disabled = false;
+        running = false; if (matches()) button.disabled = false;
       }
     });
     return;
@@ -7023,12 +7030,17 @@ async function runBackupManagerAction(action) {
     const profileId = app.connection?.id || null;
     const database = app.database;
     const id = current.id;
+    const revision = modalRevision;
+    const previousDialog = $('#modal'), wasOpen = previousDialog?.open;
+    const matches = () => modalRevision === revision && $('#modal') === previousDialog && previousDialog?.open === wasOpen
+      && app.connection?.id === profileId && app.database === database && app.selectedBackupId === id;
     try {
       const info = await call(desktop.db.inspectBackupContainer({
         profileId,
         database,
         id
       }));
+      if (!matches()) return;
       modal(`<h2>Thông tin Container Backup</h2>
         <dl class="backup-details-grid">
           <div><dt>Định dạng container</dt><dd>${esc(info.format || 'V1 / Raw SQL')}</dd></div>
@@ -7039,7 +7051,7 @@ async function runBackupManagerAction(action) {
         </dl>
         <div class="actions"><button data-click="close-modal">Đóng</button></div>`);
     } catch (error) {
-      toast(`Không kiểm tra được container: ${error.message}`, 'error');
+      if (matches()) toast(`Không kiểm tra được container: ${error.message}`, 'error');
     }
     return;
   }

@@ -29,6 +29,25 @@
     return JSON.parse(JSON.stringify(obj));
   }
 
+  // Change SQL keywords without touching quoted ENUM/SET members or escapes.
+  function normalizeColumnType(type, upper = false) {
+    const value = String(type).trim();
+    let output = '', quote = null;
+    for (let i = 0; i < value.length; i++) {
+      const char = value[i];
+      if (quote) {
+        output += char;
+        if (char === '\\' && i + 1 < value.length) output += value[++i];
+        else if (char === quote) {
+          if (value[i + 1] === quote) output += value[++i];
+          else quote = null;
+        }
+      } else if (["'", '"', '`'].includes(char)) { quote = char; output += char; }
+      else output += upper ? char.toUpperCase() : char.toLowerCase();
+    }
+    return output;
+  }
+
   /**
    * Normalizes a column definition into a canonical form
    */
@@ -37,7 +56,7 @@
     const name = String(col.name || '').trim();
     if (!name) return null;
 
-    const type = String(col.type || col.dataType || 'varchar(255)').trim().toLowerCase();
+    const type = normalizeColumnType(col.type || col.dataType || 'varchar(255)');
     const nullable = col.nullable === true || col.nullable === 'YES' || col.isNullable === true || col.isNullable === 'YES';
     
     let defaultValue = col.defaultValue !== undefined ? col.defaultValue : col.default;
@@ -49,7 +68,7 @@
 
     const extra = String(col.extra || '').trim().toLowerCase();
     const isAutoIncrement = extra.includes('auto_increment') || Boolean(col.autoIncrement || col.isAutoIncrement);
-    const comment = String(col.comment || '').trim();
+    const comment = String(col.comment || '');
     const charset = col.charset ? String(col.charset).trim().toLowerCase() : null;
     const collation = col.collation ? String(col.collation).trim().toLowerCase() : null;
 
@@ -153,14 +172,14 @@
     const engine = String(tbl.engine || 'InnoDB').trim();
     const charset = tbl.charset ? String(tbl.charset).trim().toLowerCase() : null;
     const collation = tbl.collation ? String(tbl.collation).trim().toLowerCase() : null;
-    const comment = String(tbl.comment || '').trim();
+    const comment = String(tbl.comment || '');
 
     const columns = [];
     const colMap = new Map();
     for (const c of Array.isArray(tbl.columns) ? tbl.columns : []) {
       const col = normalizeColumn(c, dialect);
-      if (col && !colMap.has(col.name.toLowerCase())) {
-        colMap.set(col.name.toLowerCase(), col);
+      if (col && !colMap.has(col.name)) {
+        colMap.set(col.name, col);
         columns.push(col);
       }
     }
@@ -169,8 +188,8 @@
     const idxMap = new Map();
     for (const i of Array.isArray(tbl.indexes) ? tbl.indexes : []) {
       const idx = normalizeIndex(i);
-      if (idx && !idxMap.has(idx.name.toLowerCase())) {
-        idxMap.set(idx.name.toLowerCase(), idx);
+      if (idx && !idxMap.has(idx.name)) {
+        idxMap.set(idx.name, idx);
         indexes.push(idx);
       }
     }
@@ -179,8 +198,8 @@
     const fkMap = new Map();
     for (const f of Array.isArray(tbl.foreignKeys) ? tbl.foreignKeys : []) {
       const fk = normalizeForeignKey(f);
-      if (fk && !fkMap.has(fk.name.toLowerCase())) {
-        fkMap.set(fk.name.toLowerCase(), fk);
+      if (fk && !fkMap.has(fk.name)) {
+        fkMap.set(fk.name, fk);
         foreignKeys.push(fk);
       }
     }
@@ -220,8 +239,8 @@
     const tableMap = new Map();
     for (const t of Array.isArray(raw.tables) ? raw.tables : []) {
       const tbl = normalizeTable(t, engine);
-      if (tbl && !tableMap.has(tbl.name.toLowerCase())) {
-        tableMap.set(tbl.name.toLowerCase(), tbl);
+      if (tbl && !tableMap.has(tbl.name)) {
+        tableMap.set(tbl.name, tbl);
         tables.push(tbl);
       }
     }
@@ -332,7 +351,7 @@
     for (let i = 0; i < srcIdx.columns.length; i++) {
       const sc = srcIdx.columns[i];
       const tc = tgtIdx.columns[i];
-      if (sc.name.toLowerCase() !== tc.name.toLowerCase()) return true;
+      if (sc.name !== tc.name) return true;
       if (sc.order !== tc.order) return true;
       if (sc.length !== tc.length) return true;
     }
@@ -344,14 +363,14 @@
    * Compares two foreign keys
    */
   function compareForeignKeys(srcFk, tgtFk) {
-    if (srcFk.referencedTable.toLowerCase() !== tgtFk.referencedTable.toLowerCase()) return true;
+    if (srcFk.referencedTable !== tgtFk.referencedTable) return true;
     if (srcFk.onDelete !== tgtFk.onDelete) return true;
     if (srcFk.onUpdate !== tgtFk.onUpdate) return true;
     if (srcFk.columns.length !== tgtFk.columns.length) return true;
 
     for (let i = 0; i < srcFk.columns.length; i++) {
-      if (srcFk.columns[i].toLowerCase() !== tgtFk.columns[i].toLowerCase()) return true;
-      if (srcFk.referencedColumns[i].toLowerCase() !== tgtFk.referencedColumns[i].toLowerCase()) return true;
+      if (srcFk.columns[i] !== tgtFk.columns[i]) return true;
+      if (srcFk.referencedColumns[i] !== tgtFk.referencedColumns[i]) return true;
     }
 
     return false;
@@ -407,17 +426,17 @@
 
     const targetTableMap = new Map();
     for (const t of target.tables) {
-      targetTableMap.set(t.name.toLowerCase(), t);
+      targetTableMap.set(t.name, t);
     }
 
     const sourceTableMap = new Map();
     for (const t of source.tables) {
-      sourceTableMap.set(t.name.toLowerCase(), t);
+      sourceTableMap.set(t.name, t);
     }
 
     // 1. Check added tables (in source, not in target)
     for (const srcTable of source.tables) {
-      const tgtTable = targetTableMap.get(srcTable.name.toLowerCase());
+      const tgtTable = targetTableMap.get(srcTable.name);
       if (!tgtTable) {
         diff.tables.added.push(deepClone(srcTable));
         diff.summary.safeCount++;
@@ -456,13 +475,13 @@
 
         // Compare columns
         const tgtColMap = new Map();
-        for (const c of tgtTable.columns) tgtColMap.set(c.name.toLowerCase(), c);
+        for (const c of tgtTable.columns) tgtColMap.set(c.name, c);
 
         const srcColMap = new Map();
-        for (const c of srcTable.columns) srcColMap.set(c.name.toLowerCase(), c);
+        for (const c of srcTable.columns) srcColMap.set(c.name, c);
 
         for (const sc of srcTable.columns) {
-          const tc = tgtColMap.get(sc.name.toLowerCase());
+          const tc = tgtColMap.get(sc.name);
           if (!tc) {
             tableDiff.columns.added.push(deepClone(sc));
             hasChanges = true;
@@ -490,7 +509,7 @@
         }
 
         for (const tc of tgtTable.columns) {
-          if (!srcColMap.has(tc.name.toLowerCase())) {
+          if (!srcColMap.has(tc.name)) {
             tableDiff.columns.dropped.push(deepClone(tc));
             hasChanges = true;
             diff.summary.destructiveCount++;
@@ -500,13 +519,13 @@
 
         // Compare indexes
         const tgtIdxMap = new Map();
-        for (const i of tgtTable.indexes) tgtIdxMap.set(i.name.toLowerCase(), i);
+        for (const i of tgtTable.indexes) tgtIdxMap.set(i.name, i);
 
         const srcIdxMap = new Map();
-        for (const i of srcTable.indexes) srcIdxMap.set(i.name.toLowerCase(), i);
+        for (const i of srcTable.indexes) srcIdxMap.set(i.name, i);
 
         for (const si of srcTable.indexes) {
-          const ti = tgtIdxMap.get(si.name.toLowerCase());
+          const ti = tgtIdxMap.get(si.name);
           if (!ti) {
             tableDiff.indexes.added.push(deepClone(si));
             hasChanges = true;
@@ -525,7 +544,7 @@
         }
 
         for (const ti of tgtTable.indexes) {
-          if (!srcIdxMap.has(ti.name.toLowerCase())) {
+          if (!srcIdxMap.has(ti.name)) {
             tableDiff.indexes.dropped.push(deepClone(ti));
             hasChanges = true;
             diff.summary.warningCount++;
@@ -535,13 +554,13 @@
 
         // Compare foreign keys
         const tgtFkMap = new Map();
-        for (const f of tgtTable.foreignKeys) tgtFkMap.set(f.name.toLowerCase(), f);
+        for (const f of tgtTable.foreignKeys) tgtFkMap.set(f.name, f);
 
         const srcFkMap = new Map();
-        for (const f of srcTable.foreignKeys) srcFkMap.set(f.name.toLowerCase(), f);
+        for (const f of srcTable.foreignKeys) srcFkMap.set(f.name, f);
 
         for (const sf of srcTable.foreignKeys) {
-          const tf = tgtFkMap.get(sf.name.toLowerCase());
+          const tf = tgtFkMap.get(sf.name);
           if (!tf) {
             tableDiff.foreignKeys.added.push(deepClone(sf));
             hasChanges = true;
@@ -560,7 +579,7 @@
         }
 
         for (const tf of tgtTable.foreignKeys) {
-          if (!srcFkMap.has(tf.name.toLowerCase())) {
+          if (!srcFkMap.has(tf.name)) {
             tableDiff.foreignKeys.dropped.push(deepClone(tf));
             hasChanges = true;
             diff.summary.safeCount++;
@@ -576,7 +595,7 @@
 
     // 2. Check dropped tables (in target, not in source)
     for (const tgtTable of target.tables) {
-      if (!sourceTableMap.has(tgtTable.name.toLowerCase())) {
+      if (!sourceTableMap.has(tgtTable.name)) {
         diff.tables.dropped.push(deepClone(tgtTable));
         diff.summary.destructiveCount++;
         diff.summary.totalChanges++;
@@ -584,11 +603,11 @@
     }
 
     // 3. Views
-    const tgtViewMap = new Map(target.views.map((v) => [v.name.toLowerCase(), v]));
-    const srcViewMap = new Map(source.views.map((v) => [v.name.toLowerCase(), v]));
+    const tgtViewMap = new Map(target.views.map((v) => [v.name, v]));
+    const srcViewMap = new Map(source.views.map((v) => [v.name, v]));
 
     for (const sv of source.views) {
-      const tv = tgtViewMap.get(sv.name.toLowerCase());
+      const tv = tgtViewMap.get(sv.name);
       if (!tv) {
         diff.views.added.push(deepClone(sv));
         diff.summary.safeCount++;
@@ -601,7 +620,7 @@
     }
 
     for (const tv of target.views) {
-      if (!srcViewMap.has(tv.name.toLowerCase())) {
+      if (!srcViewMap.has(tv.name)) {
         diff.views.dropped.push(deepClone(tv));
         diff.summary.destructiveCount++;
         diff.summary.totalChanges++;
@@ -609,11 +628,11 @@
     }
 
     // 4. Routines (Procedures / Functions)
-    const tgtRoutineMap = new Map(target.routines.map((r) => [r.name.toLowerCase(), r]));
-    const srcRoutineMap = new Map(source.routines.map((r) => [r.name.toLowerCase(), r]));
+    const tgtRoutineMap = new Map(target.routines.map((r) => [r.name, r]));
+    const srcRoutineMap = new Map(source.routines.map((r) => [r.name, r]));
 
     for (const sr of source.routines) {
-      const tr = tgtRoutineMap.get(sr.name.toLowerCase());
+      const tr = tgtRoutineMap.get(sr.name);
       if (!tr) {
         diff.routines.added.push(deepClone(sr));
         diff.summary.safeCount++;
@@ -626,7 +645,7 @@
     }
 
     for (const tr of target.routines) {
-      if (!srcRoutineMap.has(tr.name.toLowerCase())) {
+      if (!srcRoutineMap.has(tr.name)) {
         diff.routines.dropped.push(deepClone(tr));
         diff.summary.destructiveCount++;
         diff.summary.totalChanges++;
@@ -640,7 +659,7 @@
    * Generates a column definition clause (e.g. `col` VARCHAR(255) NOT NULL DEFAULT 'abc')
    */
   function formatColumnClause(col) {
-    let sql = `${escapeIdentifier(col.name)} ${col.type.toUpperCase()}`;
+    let sql = `${escapeIdentifier(col.name)} ${normalizeColumnType(col.type, true)}`;
 
     if (col.charset) {
       sql += ` CHARACTER SET ${col.charset}`;
@@ -678,6 +697,7 @@
     }
 
     if (col.comment) {
+      if (/[\\\x00-\x1f\x7f]/.test(col.comment)) throw new Error('COMMENT_LITERAL_UNSUPPORTED');
       sql += ` COMMENT '${col.comment.replace(/'/g, "''")}'`;
     }
 
@@ -735,7 +755,10 @@
     if (table.engine) tableOpts.push(`ENGINE=${table.engine}`);
     if (table.charset) tableOpts.push(`DEFAULT CHARSET=${table.charset}`);
     if (table.collation) tableOpts.push(`COLLATE=${table.collation}`);
-    if (table.comment) tableOpts.push(`COMMENT='${table.comment.replace(/'/g, "''")}'`);
+    if (table.comment) {
+      if (/[\\\x00-\x1f\x7f]/.test(table.comment)) throw new Error('COMMENT_LITERAL_UNSUPPORTED');
+      tableOpts.push(`COMMENT='${table.comment.replace(/'/g, "''")}'`);
+    }
 
     if (tableOpts.length) {
       sql += ' ' + tableOpts.join(' ');
@@ -1161,6 +1184,7 @@
     normalizeForeignKey,
     normalizeTable,
     normalizeSchemaSnapshot,
+    normalizeColumnType,
     compareColumns,
     compareIndexes,
     compareForeignKeys,

@@ -1,5 +1,7 @@
 # Sửa N01–N07 sau review — 19/11/2026
 
+> **Review tiếp theo:** [D01–D09 và tính năng còn thiếu](CODE_REVIEW_GEMINI_2026_11_19_R2.md), trên `c7df696` và `2489b3a`: còn 9 findings mới chưa sửa. Đóng N01–N07 bên dưới chỉ áp dụng phạm vi lượt sửa trước.
+
 Đã xử lý cả 7 findings trong [báo cáo review](CODE_REVIEW_GEMINI_2026_11_19.md), trên baseline `cf907bd`. Giữ nguyên khóa public Migration Apply/Data Sync Apply. Không thay đổi database người dùng; toàn bộ kiểm chứng DB dùng hai container tạm, schema riêng có tên ngẫu nhiên và đã dọn.
 
 ## Thay đổi và bằng chứng

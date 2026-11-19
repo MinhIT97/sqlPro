@@ -415,6 +415,15 @@ class SchemaSnapshotCollector {
       timedOut: false
     };
 
+    let lowerCaseTableNames = null;
+    try {
+      const response = await this.session.raw('SELECT @@lower_case_table_names AS lowerCaseTableNames', [], this._getRemainingTimeout(quotas, state));
+      const rows = response?.result || response?.rows;
+      if (Array.isArray(rows) && rows.length === 1 && [0, 1, 2, '0', '1', '2'].includes(rows[0]?.lowerCaseTableNames)) {
+        lowerCaseTableNames = Number(rows[0].lowerCaseTableNames);
+      }
+    } catch { /* Case-sensitive migration requires positive evidence below. */ }
+
     const context = {
       sessionId: options.sessionId || this.options.sessionId || this.session.sessionId || null,
       profileId: options.profileId || this.options.profileId || this.session.profile?.id || null,
@@ -490,12 +499,15 @@ class SchemaSnapshotCollector {
     const canonicalData = {
       database,
       engine,
+      lowerCaseTableNames,
       tables: tablesResult.items.map((t) => ({
         name: t.name,
         engine: t.engine,
         collation: t.collation || null,
         comment: t.comment,
         foreignKeysStatus: t.foreignKeysStatus || 'complete',
+        checkConstraintsStatus: t.checkConstraintsStatus,
+        checkConstraints: t.checkConstraints,
         columns: t.columns.map((c) => ({
           name: c.name,
           type: c.type,
@@ -594,7 +606,8 @@ class SchemaSnapshotCollector {
         profileFingerprint: context.profileFingerprint,
         database,
         engine,
-        serverVersion
+        serverVersion,
+        lowerCaseTableNames
       },
       snapshotIdentity,
       startedAt,
@@ -653,6 +666,24 @@ class SchemaSnapshotCollector {
     }
 
     const baseTables = (rawTables || []).filter((t) => t.type !== 'view');
+    let checkRows = null;
+    if (baseTables.length) {
+      try {
+        const response = await this.session.raw(`SELECT TABLE_NAME AS tableName, CONSTRAINT_NAME AS name
+          FROM information_schema.TABLE_CONSTRAINTS
+          WHERE CONSTRAINT_SCHEMA = ? AND CONSTRAINT_TYPE = 'CHECK'`,
+        [database], this._getRemainingTimeout(quotas, state), { prepared: true });
+        const rows = response?.result || response?.rows;
+        if (!Array.isArray(rows) || rows.length > quotas.maxObjects
+            || rows.some(row => !row || typeof row.tableName !== 'string' || typeof row.name !== 'string')) {
+          throw new Error('Invalid CHECK metadata');
+        }
+        checkRows = rows;
+      } catch {
+        coverage = 'partial';
+        warnings.push({ code: 'CHECK_METADATA_INCOMPLETE', category: 'tables', message: 'Không xác minh được ràng buộc CHECK; không cấp quyền migration.' });
+      }
+    }
     const fullTables = [];
 
     for (const t of baseTables) {
@@ -759,6 +790,8 @@ class SchemaSnapshotCollector {
           collation: t.collation || null,
           comment: t.comment || '',
           foreignKeysStatus: relsError ? 'unknown' : 'complete',
+          checkConstraintsStatus: checkRows ? 'complete' : 'unknown',
+          checkConstraints: (checkRows || []).filter(row => row.tableName === t.name).map(row => ({ name: row.name })),
           columns: (cols || []).map((c) => {
             const extra = c.extra || '';
             const isDefaultGenerated = Boolean(/\bDEFAULT_GENERATED\b/i.test(extra));

@@ -34,7 +34,7 @@ function fixture() {
         }
         return { result: allTables };
       }
-      if (sql.includes('LOWER(COLUMN_TYPE)')) return { result: [{ name: 'id', type: 'int', nullable: 'NO', defaultValue: null, extra: '', collation: null }] };
+      if (sql.includes('COLUMN_COMMENT AS comment')) return { result: [{ name: 'id', type: 'int', nullable: 'NO', defaultValue: null, extra: '', collation: null, comment: '' }] };
       if (sql.includes('information_schema.COLUMNS')) return { result: [{ name: 'id', type: 'int', nullable: 'NO', position: 1 }] };
       return { result: [] };
     }

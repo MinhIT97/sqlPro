@@ -946,6 +946,7 @@ class DatabaseSession {
     this.connection = null;
     this.ssh = null;
     this.dead = false;
+    this.connectionGeneration = 0;
     this.version = null;
     this.tls = null;
     this.cancelQuery = null;
@@ -984,6 +985,7 @@ class DatabaseSession {
 
   async openSshTunnel() {
     const ssh = this.profile.ssh;
+    const generation = this.connectionGeneration;
     return new Promise((resolve, reject) => {
       const client = new SshClient();
       let settled = false;
@@ -1004,28 +1006,29 @@ class DatabaseSession {
             failConnect(fail(`Không tạo được SSH tunnel: ${error.message}`, 'SSH_TUNNEL_FAILED'));
             return;
           }
-          if (settled) {
+          if (settled || generation !== this.connectionGeneration) {
             stream.destroy();
+            failConnect(fail('Phiên SSH đã thay đổi.', 'SESSION_CLOSED'));
             return;
           }
           settled = true;
           this.ssh = client;
           if (typeof stream?.on === 'function') {
             stream.on('error', () => {
-              this.dead = true;
+              if (this.connectionGeneration === generation && this.ssh === client) this.dead = true;
             });
           }
           resolve(stream);
         });
       });
       client.on('error', (error) => {
-        this.dead = true;
+        if (this.connectionGeneration === generation && this.ssh === client) this.dead = true;
         if (!settled) {
           failConnect(hostKeyFailure || fail(`SSH: ${error.message}`, sshErrorCode(error)));
         }
       });
       client.on('close', () => {
-        this.dead = true;
+        if (this.connectionGeneration === generation && this.ssh === client) this.dead = true;
       });
       const options = {
         host: ssh.host,
@@ -1137,6 +1140,7 @@ class DatabaseSession {
 
   async connect() {
     if (this.connection) await this.close();
+    const generation = ++this.connectionGeneration;
     this.dead = false;
     this.tls = null;
     let stream = null;
@@ -1146,6 +1150,7 @@ class DatabaseSession {
       connection = mysql.createConnection(this.buildMysqlOptions(stream));
       if (typeof connection?.on === 'function') {
         connection.on('error', (err) => {
+          if (this.connectionGeneration !== generation) return;
           this.dead = true;
           this.lastConnectionError = err;
           this.closeSsh();
@@ -1154,33 +1159,36 @@ class DatabaseSession {
       await new Promise((resolve, reject) => {
         connection.connect((error) => (error ? reject(error) : resolve()));
       });
+      if (this.connectionGeneration !== generation) throw fail('Phiên kết nối đã thay đổi.', 'SESSION_CLOSED');
       this.connection = connection;
       const result = await this.raw('SELECT VERSION() AS version');
       this.version = result.rows[0] ? result.rows[0].version : '';
       this.tls = await this.readTlsState();
     } catch (error) {
-      this.dead = true;
+      if (this.connectionGeneration === generation) this.dead = true;
       try {
         connection?.destroy();
       } catch {
         // ignore
       }
-      this.closeSsh();
+      if (this.connectionGeneration === generation) this.closeSsh();
       throw classifyConnectionError(error);
     }
   }
 
-  closeSsh() {
-    if (!this.ssh) return;
+  closeSsh(expected = this.ssh) {
+    if (!expected || this.ssh !== expected) return;
+    this.ssh = null;
     try {
-      this.ssh.end();
+      expected.end();
     } catch {
       // ignore
     }
-    this.ssh = null;
   }
 
   async close() {
+    ++this.connectionGeneration;
+    const closingSsh = this.ssh;
     if (this.cancelQuery) {
       try {
         this.cancelQuery();
@@ -1211,7 +1219,7 @@ class DatabaseSession {
         }
       });
     }
-    this.closeSsh();
+    this.closeSsh(closingSsh);
   }
 
   ensureOpen() {

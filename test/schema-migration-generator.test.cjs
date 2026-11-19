@@ -55,7 +55,7 @@ function makeTable(name, columns = [], indexes = [], foreignKeys = []) {
       { name: 'PRIMARY', isPrimary: true, isUnique: true, columns: [{ name: 'id' }] }
     ],
     foreignKeys,
-    foreignKeysStatus: 'complete',
+    checkConstraints: [], checkConstraintsStatus: 'complete', foreignKeysStatus: 'complete',
     status: 'complete',
     coverageStatus: 'complete'
   };
@@ -107,7 +107,7 @@ test('CREATE_TABLE generates executable statement with valid preCondition and po
     checkSql: 'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?',
     params: ['app_db', 'products'],
     expectedCount: 1,
-    expectedColumns: newTable.columns.map(column => ({ name: column.name, type: column.type, nullable: column.nullable ? 'YES' : 'NO', defaultValue: column.default, extra: column.isAutoIncrement ? 'auto_increment' : '', collation: null })),
+    expectedColumns: newTable.columns.map(column => ({ name: column.name, type: column.type, nullable: column.nullable ? 'YES' : 'NO', defaultValue: column.default, extra: column.isAutoIncrement ? 'auto_increment' : '', collation: null, comment: '' })),
     exactColumns: true
   });
 });

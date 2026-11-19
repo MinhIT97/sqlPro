@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { pipeline } = require('node:stream/promises');
+const { readManifest, fileIdentity, sameFileIdentity } = require('./backup-file.cjs');
+const { readAnnotations, withAnnotationLock } = require('./backup-annotations.cjs');
 
 function error(code, message) {
   return Object.assign(new Error(message), { code });
@@ -20,8 +22,24 @@ async function computeFileSha256(filePath) {
 
 class BackupReplicaManager {
   constructor(options = {}) {
-    this.maxRetries = Number(options.maxRetries) || 3;
-    this.retryDelayMs = Number(options.retryDelayMs) || 1000;
+    this.maxRetries = options.maxRetries ?? 3;
+    this.retryDelayMs = options.retryDelayMs ?? 1000;
+    if (!Number.isSafeInteger(this.maxRetries) || this.maxRetries < 1 || this.maxRetries > 5
+        || !Number.isSafeInteger(this.retryDelayMs) || this.retryDelayMs < 0 || this.retryDelayMs > 60000) {
+      throw error('INVALID_REPLICA_OPTIONS', 'Giới hạn retry replica không hợp lệ.');
+    }
+  }
+
+  async stageCopy(source, destination, checksum) {
+    for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+      try { return { file: (await this.copyAtomic(source, destination, checksum)).replicaPath, attempts: attempt }; }
+      catch (err) {
+        // Only unpublished staging may retry transient I/O. Verification,
+        // permissions, source changes and publication failures never retry.
+        if (attempt === this.maxRetries || !['EIO', 'EBUSY', 'ETIMEDOUT', 'ECONNRESET'].includes(err.code)) throw err;
+        await new Promise(resolve => setTimeout(resolve, this.retryDelayMs * attempt));
+      }
+    }
   }
 
   async copyAtomic(sourcePath, destinationPath, expectedChecksum = null, options = {}) {
@@ -31,7 +49,7 @@ class BackupReplicaManager {
 
     const tempPath = `${destinationPath}.${crypto.randomBytes(8).toString('hex')}.part`;
     const readStream = fs.createReadStream(sourcePath);
-    const writeStream = fs.createWriteStream(tempPath, { mode: 0o600 });
+    const writeStream = fs.createWriteStream(tempPath, { mode: 0o600, flags: 'wx' });
 
     const hash = crypto.createHash('sha256');
     readStream.on('data', chunk => hash.update(chunk));
@@ -89,95 +107,93 @@ class BackupReplicaManager {
     }
   }
 
-  async createReplica({
-    sourceFilePath,
-    destinationDir,
-    expectedFileChecksum = null,
-    overwrite = false
-  }) {
-    if (!sourceFilePath || typeof sourceFilePath !== 'string') {
-      throw error('INVALID_SOURCE_PATH', 'Đường dẫn tệp nguồn backup không hợp lệ.');
-    }
-    if (!destinationDir || typeof destinationDir !== 'string') {
-      throw error('INVALID_DESTINATION_DIR', 'Thư mục đích lưu bản sao replica không hợp lệ.');
-    }
+  async createReplica(options) {
+    return withAnnotationLock(options?.sourceFilePath, () => this.createReplicaFiles(options));
+  }
 
-    const sourceStat = await fs.promises.stat(sourceFilePath);
-    if (!sourceStat.isFile()) {
-      throw error('SOURCE_NOT_A_FILE', 'Tệp nguồn không tồn tại hoặc không phải là tệp thường.');
+  async createReplicaFiles({ sourceFilePath, destinationDir, expectedFileChecksum = null, overwrite = false } = {}) {
+    if (typeof sourceFilePath !== 'string' || !sourceFilePath) throw error('INVALID_SOURCE_PATH', 'Đường dẫn nguồn không hợp lệ.');
+    if (typeof destinationDir !== 'string' || !destinationDir) throw error('INVALID_DESTINATION_DIR', 'Thư mục đích không hợp lệ.');
+    if (overwrite) throw error('REPLICA_OVERWRITE_UNSUPPORTED', 'Replica chỉ công bố độc quyền, không ghi đè backup hoặc metadata.');
+    const sourceStat = await fs.promises.lstat(sourceFilePath);
+    if (!sourceStat.isFile()) throw error('SOURCE_NOT_A_FILE', 'Nguồn phải là tệp thường, không phải symlink.');
+    await fs.promises.mkdir(destinationDir, { recursive: true, mode: 0o700 });
+    if (path.dirname(await fs.promises.realpath(sourceFilePath)) === await fs.promises.realpath(destinationDir)) {
+      throw error('REPLICA_TARGET_CONFLICT', 'Thư mục đích không được trùng thư mục nguồn.');
     }
-
-    const baseName = path.basename(sourceFilePath);
-    let targetReplicaPath = path.join(destinationDir, baseName);
-
-    // If destination file already exists and overwrite is false:
-    // allocate a unique non-conflicting replica path to avoid destroying existing backup
-    if (!overwrite && fs.existsSync(targetReplicaPath)) {
-      const ext = path.extname(baseName);
-      const stem = path.basename(baseName, ext);
-      let counter = 1;
-      while (fs.existsSync(targetReplicaPath)) {
-        targetReplicaPath = path.join(destinationDir, `${stem}_replica_${counter}${ext}`);
-        counter++;
+    const sourceManifest = await readManifest(sourceFilePath);
+    if (sourceManifest.error) throw error('REPLICA_MANIFEST_INVALID', 'Manifest nguồn không hợp lệ; giữ nguyên nguồn và đích.');
+    const manifestChecksum = sourceManifest.manifest?.checksum.value.toLowerCase();
+    if (expectedFileChecksum != null && (typeof expectedFileChecksum !== 'string' || !/^[a-f0-9]{64}$/i.test(expectedFileChecksum))) {
+      throw error('INVALID_EXPECTED_CHECKSUM', 'Checksum đối chiếu không hợp lệ.');
+    }
+    if (manifestChecksum && expectedFileChecksum && manifestChecksum !== expectedFileChecksum.toLowerCase()) {
+      throw error('REPLICA_CHECKSUM_MISMATCH', 'Checksum yêu cầu không khớp manifest nguồn.');
+    }
+    const sourceChecksum = manifestChecksum || expectedFileChecksum?.toLowerCase() || await computeFileSha256(sourceFilePath);
+    // Stage the complete pair first. Missing sidecars are allowed; malformed,
+    // unreadable or changing sidecars fail instead of silently becoming absent.
+    const sidecars = [];
+    for (const suffix of ['.json', '.name.json', '.manifest.json']) {
+      let stat;
+      try { stat = await fs.promises.lstat(sourceFilePath + suffix); }
+      catch (err) { if (err.code === 'ENOENT') continue; throw err; }
+      if (!stat.isFile() || stat.size > (suffix === '.name.json' ? 16384 : 2 * 1024 * 1024)) throw error('REPLICA_MANIFEST_INVALID', 'Metadata nguồn không phải tệp thường hoặc vượt quota.');
+      if (suffix === '.name.json') await readAnnotations(sourceFilePath);
+      if (suffix === '.manifest.json') {
+        let legacy;
+        try { legacy = JSON.parse(await fs.promises.readFile(sourceFilePath + suffix, 'utf8')); }
+        catch { throw error('REPLICA_MANIFEST_INVALID', 'Sidecar legacy không hợp lệ.'); }
+        if (!legacy || typeof legacy !== 'object' || Array.isArray(legacy)) throw error('REPLICA_MANIFEST_INVALID', 'Sidecar legacy không hợp lệ.');
       }
+      sidecars.push({ suffix, identity: fileIdentity(stat), checksum: await computeFileSha256(sourceFilePath + suffix) });
     }
-
-    // Prevent overwriting or pointing to the same file
-    let realSource = null;
-    try { realSource = fs.realpathSync(sourceFilePath); } catch {}
-    let realTargetDir = null;
-    try { realTargetDir = fs.realpathSync(destinationDir); } catch {}
-    if (realSource && realTargetDir) {
-      const targetCanonical = path.join(realTargetDir, baseName);
-      if (realSource === targetCanonical) {
-        throw error('REPLICA_TARGET_CONFLICT', 'Thư mục đích không được trùng với vị trí tệp nguồn.');
+    const stagingDir = await fs.promises.mkdtemp(path.join(destinationDir, '.sqlpro-replica-'));
+    try {
+      const stagedSqlCopy = await this.stageCopy(sourceFilePath, path.join(stagingDir, 'backup.sql'), sourceChecksum);
+      const stagedSql = stagedSqlCopy.file;
+      let attempts = stagedSqlCopy.attempts;
+      const staged = [];
+      for (const item of sidecars) {
+        const copied = await this.stageCopy(sourceFilePath + item.suffix, path.join(stagingDir, 'backup.sql' + item.suffix), item.checksum);
+        attempts = Math.max(attempts, copied.attempts);
+        if (!sameFileIdentity(item.identity, fileIdentity(await fs.promises.lstat(sourceFilePath + item.suffix)))) throw error('REPLICA_SOURCE_CHANGED', 'Metadata nguồn đã thay đổi.');
+        staged.push({ suffix: item.suffix, file: copied.file });
       }
-    }
-
-    // Verify source checksum if expected checksum is provided
-    let sourceChecksum = expectedFileChecksum;
-    if (!sourceChecksum) {
-      sourceChecksum = await computeFileSha256(sourceFilePath);
-    }
-
-    let lastError = null;
-    for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
-      try {
-        const copyResult = await this.copyAtomic(sourceFilePath, targetReplicaPath, sourceChecksum, { overwrite });
-        const writtenChecksum = typeof copyResult === 'string' ? copyResult : (copyResult.checksum || String(copyResult));
-        const finalReplicaPath = (copyResult && copyResult.replicaPath) ? copyResult.replicaPath : targetReplicaPath;
-
-        // Copy sidecar manifest if exists
-        const sidecarManifest = `${sourceFilePath}.manifest.json`;
-        let manifestCopied = false;
+      if (!sameFileIdentity(fileIdentity(sourceStat), fileIdentity(await fs.promises.lstat(sourceFilePath)))) throw error('REPLICA_SOURCE_CHANGED', 'Backup nguồn đã thay đổi.');
+      const ext = path.extname(sourceFilePath), stem = path.basename(sourceFilePath, ext);
+      for (let collision = 0; collision < 1000; collision++) {
+        const finalPath = path.join(destinationDir, collision ? `${stem}_replica_${collision}${ext}` : path.basename(sourceFilePath));
+        // Sidecars precede SQL. SQL is the discovery/commit point; no partial
+        // pair appears as a usable backup. Never suffix a sidecar independently.
+        const published = [];
         try {
-          const sidecarStat = await fs.promises.stat(sidecarManifest);
-          if (sidecarStat.isFile()) {
-            const destManifest = `${finalReplicaPath}.manifest.json`;
-            await this.copyAtomic(sidecarManifest, destManifest, null, { overwrite });
-            manifestCopied = true;
+          for (const suffix of ['', '.json', '.name.json', '.manifest.json', '.trial.json']) {
+            try { await fs.promises.lstat(finalPath + suffix); }
+            catch (err) { if (err.code === 'ENOENT') continue; throw err; }
+            throw Object.assign(new Error('Replica name collision'), { code: 'EEXIST' });
           }
-        } catch {
-          // No sidecar manifest, that's fine
-        }
-
-        return {
-          replicaPath: finalReplicaPath,
-          fileChecksum: writtenChecksum,
-          verified: true,
-          verifiedAt: new Date().toISOString(),
-          attempts: attempt,
-          manifestCopied
-        };
-      } catch (err) {
-        lastError = err;
-        if (attempt < this.maxRetries) {
-          await new Promise(r => setTimeout(r, this.retryDelayMs * attempt));
+          for (const item of [...staged, { suffix: '', file: stagedSql }]) {
+            const target = finalPath + item.suffix;
+            await fs.promises.link(item.file, target);
+            published.push({ target, file: item.file });
+          }
+          return { replicaPath: finalPath, fileChecksum: sourceChecksum, verified: true,
+            verifiedAt: new Date().toISOString(), attempts,
+            manifestCopied: sidecars.some(item => item.suffix === '.json' || item.suffix === '.manifest.json'),
+            annotationsCopied: sidecars.some(item => item.suffix === '.name.json') };
+        } catch (err) {
+          // Only unlink names still referring to our staged inodes.
+          for (const item of published.reverse()) {
+            const current = await fs.promises.lstat(item.target).catch(() => null);
+            const own = await fs.promises.stat(item.file);
+            if (current?.ino === own.ino && current?.dev === own.dev) await fs.promises.unlink(item.target);
+          }
+          if (err.code !== 'EEXIST') throw err;
         }
       }
-    }
-
-    throw error('REPLICA_CREATION_FAILED', `Tạo bản sao ngoài máy thất bại sau ${this.maxRetries} lần thử: ${lastError?.message}`);
+      throw error('REPLICA_DESTINATION_BUSY', 'Không cấp được tên replica độc quyền.');
+    } finally { await fs.promises.rm(stagingDir, { recursive: true, force: true }); }
   }
 
   async verifyReplica({ replicaPath, expectedFileChecksum }) {

@@ -1,6 +1,10 @@
 # Ma trận kiểm thử SqlPro — cập nhật 19/11/2026
 
-## Mốc mới nhất — sửa N01–N07
+## Mốc mới nhất — sửa D01–D09
+
+[Bản sửa D01–D09 và giới hạn](CODE_REVIEW_GEMINI_2026_11_19_R2_FIXES.md): Node **1.263 tổng / 1.243 pass / 0 fail / 20 opt-in skip**; regression mới **11/11** (baseline 2489b3a: 11 fail), renderer **103/103**, website **14/14**, server check đạt và tests **17/17**. Hai suite DB regression N/D chạy trên MySQL 8.4.13 và MariaDB 11.4.13 **17/17, 0 skip**. Các test DB opt-in vẫn skip trong lệnh Node mặc định; không cộng trùng số liệu. Chưa chạy lại toàn engine/installed/release matrix. Public Apply vẫn khóa, unsupported CHECK/SQL-mode literals bị chặn. [Evidence](review/gemini-2026-11-19/d-fixes/).
+
+## Mốc trước — sửa N01–N07
 
 [Bản sửa và phạm vi nghiệm thu](CODE_REVIEW_GEMINI_2026_11_19_FIXES.md): Node **1.250 tổng / 1.232 pass / 0 fail / 18 opt-in skip**; renderer **101/101**, website **14/14**, server syntax đạt và server tests **17/17**. Bảy regression thuần thất bại trên baseline và đạt trên bản sửa. DB regression mới trên MySQL 8.4.13/MariaDB 11.4.13 **9/9**, có metadata-lock race, DEFAULT qua hai SQL mode, collation và JSON. Không chạy lại toàn matrix engine/bộ cài của baseline bên dưới. Hai public Apply vẫn khóa; không chứng nhận release-ready.
 

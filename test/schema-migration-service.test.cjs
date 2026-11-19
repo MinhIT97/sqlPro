@@ -7,7 +7,7 @@ const { computeSchemaFingerprint } = require('../electron/schema-snapshot.cjs');
 
 function snapshot(profileId, columns = [{ name: 'id', type: 'int', nullable: false }]) {
   const data = { database: 'sample', engine: 'MySQL', tables: [{ name: 'users', engine: 'InnoDB',
-    columns, indexes: [], foreignKeys: [], foreignKeysStatus: 'complete' }], views: [], routines: [], triggers: [], events: [] };
+    columns, indexes: [], foreignKeys: [], checkConstraints: [], checkConstraintsStatus: 'complete', foreignKeysStatus: 'complete' }], views: [], routines: [], triggers: [], events: [] };
   return { ...data, kind: 'sqlpro-schema-snapshot', version: 1,
     scope: { profileId, sessionId: `session-${profileId}`, generation: 0,
       profileFingerprint: 'a'.repeat(64), database: 'sample', engine: 'MySQL', serverVersion: '8.4.0' },

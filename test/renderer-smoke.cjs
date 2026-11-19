@@ -134,6 +134,10 @@ const routineEvents = [
 const backupCalls = [];
 let pendingBackup = null;
 let holdBackup = false;
+let pendingReplica = null;
+let pendingContainerInfo = null;
+handle('db:create-backup-replica', () => new Promise(resolve => { pendingReplica = resolve; }));
+handle('db:inspect-backup-container', () => new Promise(resolve => { pendingContainerInfo = resolve; }));
 handle('db:routines', () => ok(routines));
 handle('db:events', () => ok(routineEvents));
 handle('db:show-create', (payload) => ok({
@@ -3366,6 +3370,37 @@ app.whenReady().then(async () => {
     await evaluate("closeModal(); document.body.classList.remove('dark-theme'); document.body.classList.add('light-theme')");
     win.setContentSize(1344, 835);
     rowEditorColumns = columns;
+  });
+
+  await check('replica completion preserves a replacement dialog and ignores a detached button', async () => {
+    await evaluate("window.backupUiBefore={connection:app.connection,database:app.database,backups:app.backups,selectedBackupId:app.selectedBackupId}; app.connection={id:'replica-fixture'};app.database='fixture';app.backups=[{id:'b',checksum:'a'.repeat(64),bytes:10}];app.selectedBackupId='b';runBackupManagerAction('create-replica')");
+    await evaluate("document.querySelector('#replicaDestDirInput').value='/tmp/sqlpro-fixture';window.oldReplicaButton=document.querySelector('#confirmCreateReplicaBtn');oldReplicaButton.click()");
+    await untilNode(() => pendingReplica !== null);
+    await evaluate("closeModal();modal('<h2 id=keepReplicaDialog>Replacement</h2><button id=keepReplicaFocus>Keep focus</button>');document.querySelector('#keepReplicaFocus').focus()");
+    pendingReplica(ok({ replicaPath: '/tmp/sqlpro-fixture/result' })); pendingReplica = null;
+    await evaluate('new Promise(resolve=>setTimeout(resolve,80))');
+    assert.equal(await evaluate("document.querySelector('#modal').open && !!document.querySelector('#keepReplicaDialog') && document.activeElement.id==='keepReplicaFocus'"), true);
+    const count = calls.filter(call => call.name === 'db:create-backup-replica').length;
+    await evaluate('oldReplicaButton.click()');
+    await evaluate('new Promise(resolve=>setTimeout(resolve,30))');
+    assert.equal(calls.filter(call => call.name === 'db:create-backup-replica').length, count);
+    await evaluate('closeModal()');
+  });
+
+  await check('container info ignores a stale profile and does not reopen a canceled dialog', async () => {
+    await evaluate("window.containerAction=runBackupManagerAction('container-info');void 0");
+    await untilNode(() => pendingContainerInfo !== null);
+    await evaluate("app.connection={id:'changed-fixture'};modal('<h2 id=keepContainerDialog>Other profile</h2>')");
+    pendingContainerInfo(ok({ format: 'fixture' })); pendingContainerInfo = null;
+    await evaluate('window.containerAction');
+    assert.equal(await evaluate("!!document.querySelector('#keepContainerDialog')"), true);
+    await evaluate("window.containerAction=runBackupManagerAction('container-info');void 0");
+    await untilNode(() => pendingContainerInfo !== null);
+    await evaluate('closeModal()');
+    pendingContainerInfo(ok({ format: 'fixture' })); pendingContainerInfo = null;
+    await evaluate('window.containerAction');
+    assert.equal(await evaluate("document.querySelector('#modal').open"), false);
+    await evaluate('Object.assign(app,window.backupUiBefore);delete window.backupUiBefore;delete window.oldReplicaButton;delete window.containerAction');
   });
 
   await check('no renderer exceptions or unhandled rejections', async () => {

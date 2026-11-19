@@ -2,6 +2,7 @@
 
 const { DatabaseSession } = require('./database.cjs');
 const { quoteId } = require('./data-diff-reader.cjs');
+const RowValues = require('../row-values.js');
 
 function error(code, message) {
   return Object.assign(new Error(message), { code });
@@ -22,6 +23,33 @@ function assertWritable(profile) {
   if (profile?.readOnly === true) {
     throw error('CONNECTION_READ_ONLY', 'Kết nối đang ở chế độ Chỉ đọc (Read-only); thao tác đồng bộ bị từ chối.');
   }
+}
+
+function originalGuard(columns, values, names) {
+  if (!values || typeof values !== 'object' || Array.isArray(values)) throw error('SYNC_ORIGINAL_INCOMPLETE', 'Thiếu snapshot giá trị gốc.');
+  const parts = [], params = [];
+  for (const name of names) {
+    const column = columns.find(item => item.name === name);
+    if (!column || !Object.hasOwn(values, name) || values[name] === undefined) throw error('SYNC_ORIGINAL_INCOMPLETE', 'Snapshot giá trị gốc thiếu cột.');
+    const value = values[name], spec = RowValues.describe(column), kind = spec.kind;
+    if (spec.readOnly) throw error('SYNC_ORIGINAL_UNSUPPORTED', 'Cột generated/không gian chưa có contract đồng bộ.');
+    if (value === null) { parts.push(`${quoteId(name)} IS NULL`); continue; }
+    if (typeof value === 'object' || !['string', 'number', 'boolean', 'bigint'].includes(typeof value)
+        || typeof value === 'number' && !Number.isFinite(value)
+        || kind === 'binary' || !['json', 'text', 'enum', 'set', 'integer', 'decimal', 'float', 'boolean', 'bit', 'year', 'date', 'time', 'datetime'].includes(kind)) {
+      throw error('SYNC_ORIGINAL_UNSUPPORTED', 'Không có bằng chứng so sánh chính xác cho giá trị gốc.');
+    }
+    if (kind === 'json') {
+      if (typeof value !== 'string') throw error('SYNC_ORIGINAL_UNSUPPORTED', 'JSON gốc phải giữ dạng document text.');
+      try { JSON.parse(value); } catch { throw error('SYNC_ORIGINAL_UNSUPPORTED', 'JSON gốc không hợp lệ.'); }
+      parts.push(`CAST(JSON_EXTRACT(${quoteId(name)}, '$') AS BINARY) <=> CAST(JSON_EXTRACT(?, '$') AS BINARY)`);
+    } else if (['text', 'enum', 'set'].includes(kind)) {
+      if (typeof value !== 'string') throw error('SYNC_ORIGINAL_UNSUPPORTED', 'Text gốc phải là chuỗi đầy đủ.');
+      parts.push(`CAST(${quoteId(name)} AS BINARY) <=> CAST(? AS BINARY)`);
+    } else parts.push(`${quoteId(name)} = ?`);
+    params.push(value);
+  }
+  return { parts, params };
 }
 
 class DataSyncExecutor {
@@ -212,22 +240,10 @@ class DataSyncExecutor {
               const setClauses = updateCols.map(c => `${quoteId(c)} = ?`).join(', ');
               const setValues = updateCols.map(c => op.values[c]);
 
-              // Optimistic concurrency guard with PK
-              const whereParts = opPks.map(pk => `${quoteId(pk)} = ?`);
-              const whereValues = opPks.map((_, i) => op.pkValues[i]);
-
-              // Guard all original values to detect concurrent drift
-              if (op.originalValues && typeof op.originalValues === 'object') {
-                for (const [col, origVal] of Object.entries(op.originalValues)) {
-                  if (opPks.includes(col)) continue;
-                  if (origVal === null || origVal === undefined) {
-                    whereParts.push(`${quoteId(col)} IS NULL`);
-                  } else {
-                    whereParts.push(`${quoteId(col)} = ?`);
-                    whereValues.push(origVal);
-                  }
-                }
-              }
+              const opColumns = plan.tables ? plan.tables[opTable].columns : columns;
+              const original = originalGuard(opColumns, op.originalValues, opColumns.map(column => column.name));
+              const whereParts = original.parts;
+              const whereValues = original.params;
 
               const sql = `UPDATE ${opTableRef} SET ${setClauses} WHERE ${whereParts.join(' AND ')}`;
               const params = [...setValues, ...whereValues];
@@ -238,21 +254,10 @@ class DataSyncExecutor {
                 throw error('SYNC_CONFLICT_DETECTED', `Phát hiện xung đột: dòng khóa ${op.rowKey} bảng "${opTable}" đã bị sửa đổi hoặc xóa trên đích kể từ lúc so sánh.`);
               }
             } else if (op.type === 'DELETE') {
-              const whereParts = opPks.map(pk => `${quoteId(pk)} = ?`);
-              const whereValues = opPks.map((_, i) => op.pkValues[i]);
-
-              // Guard original values on DELETE to prevent deleting concurrently modified rows
-              if (op.originalValues && typeof op.originalValues === 'object') {
-                for (const [col, origVal] of Object.entries(op.originalValues)) {
-                  if (opPks.includes(col)) continue;
-                  if (origVal === null || origVal === undefined) {
-                    whereParts.push(`${quoteId(col)} IS NULL`);
-                  } else {
-                    whereParts.push(`${quoteId(col)} = ?`);
-                    whereValues.push(origVal);
-                  }
-                }
-              }
+              const opColumns = plan.tables ? plan.tables[opTable].columns : columns;
+              const original = originalGuard(opColumns, op.originalValues, opColumns.map(column => column.name));
+              const whereParts = original.parts;
+              const whereValues = original.params;
 
               const sql = `DELETE FROM ${opTableRef} WHERE ${whereParts.join(' AND ')}`;
               const res = await worker.raw(sql, whereValues, 30000, { prepared: true });

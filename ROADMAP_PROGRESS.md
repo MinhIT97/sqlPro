@@ -1,5 +1,17 @@
 # Tiến độ roadmap SqlPro
 
+## 19/11 — Sửa D01–D09 theo review sâu
+
+- [Bản sửa D01–D09 và giới hạn](CODE_REVIEW_GEMINI_2026_11_19_R2_FIXES.md): giữ schema literals/case, chặn CHECK/COMMENT chưa hỗ trợ, exact Sync guard, fatal error privacy/terminal, replica metadata pair, UI revision và connection owner.
+- Node **1.243 pass / 0 fail / 20 opt-in skip**, DB riêng hai suite **17/17**, renderer **103/103**, website **14/14**, server **17/17**.
+- Public Apply vẫn khóa; checklist **29/51 chưa tick**, không tự nghiệm thu tính năng mới từ các bản sửa. Findings và số liệu phía dưới giữ lịch sử trước sửa.
+
+## 19/11 — Rà sâu sau sửa và commit mất kết nối
+
+- [D01–D09 và phần còn thiếu](CODE_REVIEW_GEMINI_2026_11_19_R2.md): 5 P1/4 P2 mới đã tái hiện, chưa sửa runtime. Phạm vi `c7df696` và `2489b3a`.
+- Node **1.233 pass / 0 fail / 18 skip**, renderer **101/101**, website **14/14**, server **17/17**; probe DB/VM/tệp/child-process chỉ ra khoảng trống chưa được suite bắt.
+- Checklist còn 29/51 chưa tick; G6.1–G6.4 và G3.3 đang tick cần xét lại nghiệm thu. Không tự đổi checkbox hoặc mở public Apply.
+
 ## 19/11 — Sửa N01–N07 sau review hai commit Gemini
 
 - [Bản sửa và giới hạn](CODE_REVIEW_GEMINI_2026_11_19_FIXES.md): DEFAULT/hậu kiểm migration, collation proof, audit private key, Main-owned preview plan, JSON/browser contract và engine/trigger guards trong metadata lock.

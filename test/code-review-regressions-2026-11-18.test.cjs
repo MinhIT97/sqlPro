@@ -230,6 +230,8 @@ function makeTable(name, columns = [], indexes = [], foreignKeys = []) {
       }))
     })),
     foreignKeys,
+    checkConstraints: [],
+    checkConstraintsStatus: 'complete',
     coverageStatus: 'complete',
     foreignKeysStatus: 'complete',
     migrationStatus: 'executable'
@@ -317,7 +319,7 @@ test('R06: DataSyncExecutor guards originalValues on DELETE and UPDATE', async (
   // Assert DELETE query included both PK and originalValues
   const deleteQuery = queries.find(q => q.sql.startsWith('DELETE'));
   assert.ok(deleteQuery);
-  assert.strictEqual(deleteQuery.sql, 'DELETE FROM `sample`.`users` WHERE `id` = ? AND `value` = ?');
+  assert.strictEqual(deleteQuery.sql, 'DELETE FROM `sample`.`users` WHERE `id` = ? AND CAST(`value` AS BINARY) <=> CAST(? AS BINARY)');
   assert.deepStrictEqual(deleteQuery.params, [1, 'old_value']);
 });
 

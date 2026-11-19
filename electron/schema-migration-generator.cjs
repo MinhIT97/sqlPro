@@ -23,11 +23,12 @@ function freeze(value) {
 
 function columnProof(column) {
   return {
-    name: column.name, type: column.type.toLowerCase(),
+    name: column.name, type: SchemaDiff.normalizeColumnType(column.type),
     nullable: column.nullable === true || column.nullable === 'YES' ? 'YES' : 'NO',
     defaultValue: column.defaultValue !== undefined ? column.defaultValue : column.default ?? null,
     extra: column.extra || (column.isAutoIncrement || column.autoIncrement ? 'auto_increment' : ''),
-    collation: column.collation || null
+    collation: column.collation || null,
+    comment: column.comment || ''
   };
 }
 
@@ -40,6 +41,18 @@ function defaultMetadataBlock(snapshot) {
     const value = column.defaultValue !== undefined ? column.defaultValue : column.default;
     return value != null && String(value).toUpperCase() !== 'NULL';
   })) ? 'MARIADB_DEFAULT_REVIEW_REQUIRED' : null;
+}
+
+function caseMetadataBlock(source, target) {
+  const names = new Map();
+  for (const table of [...source.tables, ...target.tables]) {
+    const folded = table.name.toLowerCase();
+    if (names.has(folded) && names.get(folded) !== table.name && target.scope?.lowerCaseTableNames !== 0) {
+      return 'TABLE_NAME_CASE_UNVERIFIED';
+    }
+    names.set(folded, table.name);
+  }
+  return null;
 }
 
 function inspectSnapshotMetadata(snapshot) {
@@ -60,11 +73,16 @@ function inspectSnapshotMetadata(snapshot) {
       return 'TABLE_METADATA_INCOMPLETE';
     }
     if (table.foreignKeys.length) return 'FOREIGN_KEY_DEPENDENCY_REVIEW_REQUIRED';
+    if (table.checkConstraintsStatus !== 'complete' || !Array.isArray(table.checkConstraints)) return 'CHECK_METADATA_INCOMPLETE';
+    if (table.checkConstraints.length) return 'CHECK_CONSTRAINT_REVIEW_REQUIRED';
+    if (/[\\\x00-\x1f\x7f]/.test(table.comment || '')) return 'COMMENT_LITERAL_UNSUPPORTED';
     for (const column of table.columns) {
       if (blocked(column)) return column.migrationBlockReason || 'COLUMN_METADATA_INCOMPLETE';
       if (column.isGenerated || column.generationExpression || /generated|virtual|stored|persistent/i.test(column.extra || '')) {
         return 'COLUMN_EXPRESSION_UNSUPPORTED';
       }
+      if (/[\\\x00-\x1f\x7f]/.test(column.comment || '')) return 'COMMENT_LITERAL_UNSUPPORTED';
+      if (/^(?:enum|set)\b/i.test(column.type || '') && /\\/.test(column.type)) return 'COLUMN_TYPE_SQL_MODE_UNSUPPORTED';
     }
     for (const index of table.indexes) {
       if (blocked(index)) return index.migrationBlockReason || 'INDEX_METADATA_INCOMPLETE';
@@ -121,6 +139,7 @@ class SchemaMigrationGenerator {
 
     let blockReason = inspectSnapshotMetadata(sourceSnapshot) || inspectSnapshotMetadata(targetSnapshot);
     if (!blockReason) blockReason = defaultMetadataBlock(sourceSnapshot) || defaultMetadataBlock(targetSnapshot);
+    if (!blockReason) blockReason = caseMetadataBlock(sourceSnapshot, targetSnapshot);
     if (!blockReason) {
       if (sourceSnapshot.scope?.profileId === targetSnapshot.scope?.profileId && sourceSnapshot.database === targetSnapshot.database) {
         blockReason = 'SAME_DATABASE';
@@ -422,6 +441,7 @@ module.exports = {
   generateSafeMigrationPlan,
   inspectSnapshotMetadata,
   defaultMetadataBlock,
+  caseMetadataBlock,
   ALLOWLIST_STATEMENT_TYPES,
   DEFAULT_GENERATOR_OPTIONS
 };

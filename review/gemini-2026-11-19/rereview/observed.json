@@ -1,0 +1,155 @@
+{
+  "connectionLifecycle": {
+    "oldAndCurrentAreDistinct": true,
+    "currentConnectionStillInstalled": true,
+    "deadBeforeOldError": false,
+    "deadAfterOldError": true,
+    "nextQueryError": "SESSION_CLOSED"
+  },
+  "globalErrors": {
+    "exitStatus": 0,
+    "rawSqlSecretMarkerLogged": true,
+    "continuedAfterUnrecognizedException": true
+  },
+  "replica": {
+    "sourceManifestExists": true,
+    "result": {
+      "replicaPath": "/tmp/sqlpro-deep-replica-R6Va3a/dest/source.sql",
+      "fileChecksum": "b4e0497804e46e0a0b0b8c31975b062152d551bac49c3c2e80932567b4085dcd",
+      "verified": true,
+      "verifiedAt": "2026-11-19T03:17:21.896Z",
+      "attempts": 1,
+      "manifestCopied": false
+    },
+    "destinationCanonicalManifestExists": false,
+    "destinationRead": {
+      "manifest": null,
+      "error": null,
+      "path": "/tmp/sqlpro-deep-replica-R6Va3a/dest/source.sql.json"
+    },
+    "legacyCollision": {
+      "result": {
+        "replicaPath": "/tmp/sqlpro-deep-replica-R6Va3a/dest2/source.sql",
+        "fileChecksum": "b4e0497804e46e0a0b0b8c31975b062152d551bac49c3c2e80932567b4085dcd",
+        "verified": true,
+        "verifiedAt": "2026-11-19T03:17:21.906Z",
+        "attempts": 1,
+        "manifestCopied": true
+      },
+      "pairedManifest": {
+        "tag": "unrelated"
+      },
+      "publishedFiles": [
+        "source.sql",
+        "source.sql.manifest.json",
+        "source.sql.manifest_replica_1.json"
+      ]
+    }
+  },
+  "renderer": {
+    "replicaCompletionClosedNewDialog": true,
+    "containerInfoReplacedNewDialog": true
+  },
+  "server": "8.4.13",
+  "migration": {
+    "sourceCoverage": "complete",
+    "candidate": "ready",
+    "success": true,
+    "executedCount": 2,
+    "sourceTables": [
+      "edge",
+      "twin",
+      "Twin"
+    ],
+    "tableNames": [
+      {
+        "db": "sqlpro_deep_0f42aebb77e5",
+        "name": "Twin"
+      },
+      {
+        "db": "sqlpro_deep_0f42aebb77e5",
+        "name": "edge"
+      },
+      {
+        "db": "sqlpro_deep_0f42aebb77e5",
+        "name": "twin"
+      },
+      {
+        "db": "sqlpro_deep_0f42aebb77e5_target",
+        "name": "edge"
+      },
+      {
+        "db": "sqlpro_deep_0f42aebb77e5_target",
+        "name": "twin"
+      }
+    ],
+    "generatedSql": [
+      "CREATE TABLE `edge` (\n  `id` INT NOT NULL,\n  `state` ENUM('PENDING','DONE') COLLATE utf8mb4_bin NULL DEFAULT NULL,\n  `qty` INT NULL DEFAULT NULL,\n  `note` VARCHAR(30) COLLATE utf8mb4_bin NULL DEFAULT NULL COMMENT 'C:\\new',\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB COLLATE=utf8mb4_bin;",
+      "CREATE TABLE `twin` (\n  `other_id` INT NOT NULL,\n  PRIMARY KEY (`other_id`)\n) ENGINE=InnoDB COLLATE=utf8mb4_0900_ai_ci;"
+    ],
+    "metadata": [
+      {
+        "db": "sqlpro_deep_0f42aebb77e5",
+        "name": "note",
+        "type": "varchar(30)",
+        "comment": "C:\\new"
+      },
+      {
+        "db": "sqlpro_deep_0f42aebb77e5",
+        "name": "state",
+        "type": "enum('pending','Done')",
+        "comment": ""
+      },
+      {
+        "db": "sqlpro_deep_0f42aebb77e5_target",
+        "name": "note",
+        "type": "varchar(30)",
+        "comment": "C:\new"
+      },
+      {
+        "db": "sqlpro_deep_0f42aebb77e5_target",
+        "name": "state",
+        "type": "enum('PENDING','DONE')",
+        "comment": ""
+      }
+    ],
+    "checks": [
+      {
+        "db": "sqlpro_deep_0f42aebb77e5",
+        "count": 1
+      }
+    ],
+    "enumInsert": {
+      "source": {
+        "accepted": true
+      },
+      "target": {
+        "accepted": false,
+        "code": "WARN_DATA_TRUNCATED"
+      }
+    },
+    "negativeQuantity": {
+      "source": {
+        "accepted": false,
+        "code": "ER_CHECK_CONSTRAINT_VIOLATED"
+      },
+      "target": {
+        "accepted": true
+      }
+    }
+  },
+  "syncGuard": {
+    "originalAtPreview": "old",
+    "concurrentValueBeforeApply": "OLD",
+    "execution": {
+      "success": true,
+      "committedCount": 1,
+      "totalCount": 1,
+      "partialCommit": false,
+      "durationMs": 9
+    },
+    "target": {
+      "val": "new"
+    }
+  }
+}

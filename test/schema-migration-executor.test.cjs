@@ -340,11 +340,11 @@ test('N01: acknowledged DDL with a wrong default fails semantic postcondition an
   const r = fixture(), raw = r.worker.raw;
   r.plan.statements[0].postCondition = {
     table: 'users', checkSql: 'SELECT existence_marker', expectedCount: 1, exactColumns: true,
-    expectedColumns: [{ name: 'v', type: 'varchar(100)', nullable: 'YES', defaultValue: 'C:\\new', extra: '', collation: 'utf8mb4_bin' }]
+    expectedColumns: [{ name: 'v', type: 'varchar(100)', nullable: 'YES', defaultValue: 'C:\\new', extra: '', collation: 'utf8mb4_bin', comment: '' }]
   };
   r.worker.raw = async sql => {
     if (sql.includes('existence_marker')) return { result: [{}] };
-    if (sql.includes('LOWER(COLUMN_TYPE)')) return { result: [{ name: 'v', type: 'varchar(100)', nullable: 'YES', defaultValue: 'C:\new', extra: '', collation: 'utf8mb4_bin' }] };
+    if (sql.includes('COLUMN_COMMENT AS comment')) return { result: [{ name: 'v', type: 'varchar(100)', nullable: 'YES', defaultValue: 'C:\new', extra: '', collation: 'utf8mb4_bin', comment: '' }] };
     return raw(sql);
   };
   await assert.rejects(r.run(), err => {

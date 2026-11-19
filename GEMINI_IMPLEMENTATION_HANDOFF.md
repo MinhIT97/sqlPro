@@ -1,6 +1,8 @@
 # Bàn giao triển khai SqlPro cho Gemini
 
-> **Mốc mới nhất 19/11:** [Đã xử lý N01–N07 và việc còn lại](CODE_REVIEW_GEMINI_2026_11_19_FIXES.md). Check 1.232 pass/0 fail/18 opt-in skip; DB regression mới 9/9. Hai public Apply vẫn khóa, MariaDB expression defaults và collation chưa chứng minh vẫn bị chặn. Các mốc review trước sửa bên dưới giữ lịch sử; không tự nghiệm thu toàn roadmap.
+> **Mốc mới nhất 19/11:** [Bản sửa D01–D09 và giới hạn](CODE_REVIEW_GEMINI_2026_11_19_R2_FIXES.md). Đã xử lý 9 nhóm findings; Node 1.243 pass/0 fail/20 opt-in skip, DB riêng 17/17, renderer 103/103. Public Apply tiếp tục khóa; CHECK/SQL-mode literals chưa hỗ trợ vẫn bị chặn. Tiếp tục các việc ở mục 3 báo cáo sửa; các mốc dưới đây là lịch sử.
+
+> **Mốc trước sửa D01–D09:** [Đã xử lý N01–N07 và việc còn lại](CODE_REVIEW_GEMINI_2026_11_19_FIXES.md). Check 1.232 pass/0 fail/18 opt-in skip; DB regression mới 9/9. Hai public Apply vẫn khóa, MariaDB expression defaults và collation chưa chứng minh vẫn bị chặn. Các mốc review trước sửa bên dưới giữ lịch sử; không tự nghiệm thu toàn roadmap.
 
 ## Bàn giao sau review cuối 18/11
 

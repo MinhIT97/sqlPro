@@ -1,16 +1,6 @@
 'use strict';
 
-process.on('uncaughtException', (err) => {
-  if (err?.code === 'PROTOCOL_CONNECTION_LOST' || /Connection lost: The server closed the connection/i.test(err?.message || '')) {
-    console.warn('[SqlPro] Handled background connection drop:', err.message);
-    return;
-  }
-  console.error('[SqlPro] Uncaught exception in main process:', err);
-});
-
-process.on('unhandledRejection', (reason) => {
-  console.warn('[SqlPro] Unhandled rejection in main process:', reason);
-});
+require('./main-errors.cjs').installMainErrorHandlers();
 
 const { app, BrowserWindow, Menu, dialog, ipcMain, screen, shell, clipboard } = require('electron');
 const fs = require('node:fs');

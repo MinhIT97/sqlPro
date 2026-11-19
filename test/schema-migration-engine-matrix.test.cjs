@@ -22,7 +22,7 @@ function makeTable(name, columns = [], indexes = []) {
       { name: 'PRIMARY', isPrimary: true, isUnique: true, columns: [{ name: 'id' }] }
     ],
     foreignKeys: [],
-    foreignKeysStatus: 'complete',
+    checkConstraints: [], checkConstraintsStatus: 'complete', foreignKeysStatus: 'complete',
     status: 'complete',
     coverageStatus: 'complete'
   };
@@ -177,7 +177,7 @@ test('Engine Matrix: executes CREATE_TABLE, ADD_COLUMN, ADD_INDEX with pre/post-
       if (sql.includes('SELECT @@SESSION.foreign_key_checks')) {
         return { result: [{ fkChecks: 1, autocommit: 1 }] };
       }
-      if (sql.includes('LOWER(COLUMN_TYPE)')) return { result: [{ name: 'email', type: 'varchar(255)', nullable: 'YES', defaultValue: null, extra: '', collation: null }] };
+      if (sql.includes('COLUMN_COMMENT AS comment')) return { result: [{ name: 'email', type: 'varchar(255)', nullable: 'YES', defaultValue: null, extra: '', collation: null, comment: '' }] };
       if (sql.includes('information_schema.COLUMNS')) {
         // Return 0 rows before DDL, 1 row after DDL
         return { rows: ddlRan ? [{ COLUMN_NAME: 'email' }] : [] };
@@ -318,7 +318,7 @@ test('Engine Matrix: multi-statement partial commit tracking upon mid-sequence f
       if (sql.includes('SELECT @@SESSION.foreign_key_checks')) {
         return { result: [{ fkChecks: 1, autocommit: 1 }] };
       }
-      if (sql.includes('LOWER(COLUMN_TYPE)')) return { result: [{ name: 'email', type: 'varchar(255)', nullable: 'YES', defaultValue: null, extra: '', collation: null }] };
+      if (sql.includes('COLUMN_COMMENT AS comment')) return { result: [{ name: 'email', type: 'varchar(255)', nullable: 'YES', defaultValue: null, extra: '', collation: null, comment: '' }] };
       if (sql.includes('information_schema.COLUMNS')) {
         const colName = params?.[2];
         if (colName === 'email') {
@@ -457,7 +457,7 @@ test('Engine Matrix: production approval flow verified with generator candidate 
       if (sql.includes('SELECT @@SESSION.foreign_key_checks')) {
         return { result: [{ fkChecks: 1, autocommit: 1 }] };
       }
-      if (sql.includes('LOWER(COLUMN_TYPE)')) return { result: [{ name: 'email', type: 'varchar(255)', nullable: 'YES', defaultValue: null, extra: '', collation: null }] };
+      if (sql.includes('COLUMN_COMMENT AS comment')) return { result: [{ name: 'email', type: 'varchar(255)', nullable: 'YES', defaultValue: null, extra: '', collation: null, comment: '' }] };
       if (sql.includes('information_schema.COLUMNS')) {
         return { rows: ddlRan ? [{ COLUMN_NAME: 'email' }] : [] };
       }

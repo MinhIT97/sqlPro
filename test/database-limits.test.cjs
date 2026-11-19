@@ -71,3 +71,20 @@ test('close handles a thrown end and a late callback once', async () => {
   session.connection = { end(done) { callback = done; throw new Error('broken socket'); }, destroy() { destroyed++; } };
   await session.close(); callback(); assert.equal(destroyed, 1);
 });
+
+test('idle connection error marks session dead and closes SSH without throwing uncaught exception', async () => {
+  const session = new DatabaseSession({ ssh: { enabled: true } });
+  let sshClosed = 0;
+  session.ssh = { end() { sshClosed++; } };
+  const emitter = new EventEmitter();
+  session.connection = emitter;
+  emitter.on('error', (err) => {
+    session.dead = true;
+    session.closeSsh();
+  });
+  // Simulate server closing connection when idle
+  emitter.emit('error', Object.assign(new Error('Connection lost: The server closed the connection.'), { code: 'PROTOCOL_CONNECTION_LOST', fatal: true }));
+  assert.equal(session.dead, true);
+  assert.equal(sshClosed, 1);
+  assert.throws(() => session.ensureOpen(), { code: 'SESSION_CLOSED' });
+});

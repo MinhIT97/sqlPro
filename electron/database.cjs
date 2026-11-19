@@ -1010,11 +1010,23 @@ class DatabaseSession {
           }
           settled = true;
           this.ssh = client;
+          if (typeof stream?.on === 'function') {
+            stream.on('error', () => {
+              this.dead = true;
+            });
+          }
           resolve(stream);
         });
       });
-      client.on('error', (error) => failConnect(hostKeyFailure
-        || fail(`SSH: ${error.message}`, sshErrorCode(error))));
+      client.on('error', (error) => {
+        this.dead = true;
+        if (!settled) {
+          failConnect(hostKeyFailure || fail(`SSH: ${error.message}`, sshErrorCode(error)));
+        }
+      });
+      client.on('close', () => {
+        this.dead = true;
+      });
       const options = {
         host: ssh.host,
         port: ssh.port,
@@ -1132,6 +1144,13 @@ class DatabaseSession {
     let connection;
     try {
       connection = mysql.createConnection(this.buildMysqlOptions(stream));
+      if (typeof connection?.on === 'function') {
+        connection.on('error', (err) => {
+          this.dead = true;
+          this.lastConnectionError = err;
+          this.closeSsh();
+        });
+      }
       await new Promise((resolve, reject) => {
         connection.connect((error) => (error ? reject(error) : resolve()));
       });

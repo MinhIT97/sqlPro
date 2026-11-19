@@ -1,0 +1,205 @@
+TAP version 13
+# Subtest: E01: schema/PK is revalidated after locks and before UPDATE/DELETE
+not ok 1 - E01: schema/PK is revalidated after locks and before UPDATE/DELETE
+  ---
+  duration_ms: 3.37225
+  type: 'test'
+  location: '/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:21:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    code: 'TARGET_SCHEMA_DRIFT'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:27:5)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: E01: schema is revalidated for every batch and reports earlier commits
+not ok 2 - E01: schema is revalidated for every batch and reports earlier commits
+  ---
+  duration_ms: 0.634755
+  type: 'test'
+  location: '/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:33:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  stack: |-
+    async TestContext.<anonymous> (/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:37:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: E01: multiple matched rows never count as one successful UPDATE/DELETE
+not ok 3 - E01: multiple matched rows never count as one successful UPDATE/DELETE
+  ---
+  duration_ms: 0.71346
+  type: 'test'
+  location: '/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:44:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    code: 'SYNC_ROW_COUNT_MISMATCH'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:48:5)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: E02: ENUM/SET literal changes are drift in single and multi-table plans
+not ok 4 - E02: ENUM/SET literal changes are drift in single and multi-table plans
+  ---
+  duration_ms: 0.505232
+  type: 'test'
+  location: '/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:53:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    code: 'TARGET_SCHEMA_DRIFT'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:59:7)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: E01/E02: column semantics changed after locking stop DML, while keyword case alone is allowed
+not ok 5 - E01/E02: column semantics changed after locking stop DML, while keyword case alone is allowed
+  ---
+  duration_ms: 0.650361
+  type: 'test'
+  location: '/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:65:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    code: 'TARGET_SCHEMA_DRIFT'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:71:5)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: E03: non-append additions and reordered existing columns block before DDL
+not ok 6 - E03: non-append additions and reordered existing columns block before DDL
+  ---
+  duration_ms: 2.336805
+  type: 'test'
+  location: '/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:84:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    'ready' !== 'blocked'
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'blocked'
+  actual: 'ready'
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:87:12)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: E03: append-only column plans bind expected order after every statement
+not ok 7 - E03: append-only column plans bind expected order after every statement
+  ---
+  duration_ms: 1.495402
+  type: 'test'
+  location: '/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:91:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+
+      [
+    +   undefined,
+    +   undefined
+    -   [
+    -     'id',
+    -     'a'
+    -   ],
+    -   [
+    -     'id',
+    -     'a',
+    -     'b'
+    -   ]
+      ]
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    0:
+      0: 'id'
+      1: 'a'
+    1:
+      0: 'id'
+      1: 'a'
+      2: 'b'
+  actual:
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:94:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: E04: stale VERSION/TLS completion rejects without publishing metadata on the new connection
+not ok 8 - E04: stale VERSION/TLS completion rejects without publishing metadata on the new connection
+  ---
+  duration_ms: 1.422052
+  type: 'test'
+  location: '/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:97:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    code: 'SESSION_CLOSED'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:117:7)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: E04: late raw command callback cannot publish transaction status on a replacement connection
+not ok 9 - E04: late raw command callback cannot publish transaction status on a replacement connection
+  ---
+  duration_ms: 1.80465
+  type: 'test'
+  location: '/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:126:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    code: 'SESSION_CLOSED'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (/tmp/sqlpro-e-baseline-ewrbmhdq/test/review-e-regressions.test.cjs:141:41)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..9
+# tests 9
+# suites 0
+# pass 0
+# fail 9
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 165.21722

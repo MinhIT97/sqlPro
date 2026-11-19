@@ -356,3 +356,22 @@ test('N01: acknowledged DDL with a wrong default fails semantic postcondition an
     return true;
   });
 });
+
+test('E03: wrong column order fails postcondition after acknowledged DDL and stops later statements', async () => {
+  const r = fixture(), raw = r.worker.raw;
+  const column = name => ({ name, type: 'int', nullable: 'YES', defaultValue: null, extra: '', collation: null, comment: '' });
+  r.plan.statements[0].postCondition = {
+    table: 'users', checkSql: 'SELECT existence_marker', expectedCount: 1,
+    expectedColumns: [column('v')], expectedColumnOrder: ['id', 'v'], exactColumns: false
+  };
+  r.worker.raw = async sql => {
+    if (sql.includes('existence_marker')) return { result: [{}] };
+    if (sql.includes('COLUMN_COMMENT AS comment')) return { result: [column('v'), column('id')] };
+    return raw(sql);
+  };
+  await assert.rejects(r.run(), err => {
+    assert.equal(err.code, 'MIGRATION_POSTCONDITION_FAILED'); assert.equal(err.executedCount, 1);
+    assert.equal(err.partialCommit, true); assert.equal(err.executionUncertain, false);
+    assert.equal(err.ledger[1].status, 'not_run'); return true;
+  });
+});

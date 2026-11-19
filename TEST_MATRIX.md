@@ -1,5 +1,9 @@
 # Ma trận kiểm thử SqlPro — cập nhật 19/11/2026
 
+## Mốc hiện tại — sửa E01–E04
+
+[Bản sửa E01–E04 và review tiếp](CODE_REVIEW_GEMINI_2026_11_19_R3_FIXES.md): Node **1.275 tổng / 1.253 pass / 0 fail / 22 opt-in skip**; unit E mới **9/9** (cùng test baseline a564507: 9 fail); DB N/D/E trên MySQL 8.4.13/MariaDB 11.4.13 **27/27, 0 skip**. Renderer **103/103**, website **14/14**, server syntax đạt và tests **17/17**. Hai root DB mới vẫn opt-in trong Node suite; không cộng trùng số liệu. Chưa full installed/release matrix, public Apply tiếp tục khóa. [Evidence](review/gemini-2026-11-19/e-fixes/). Các mốc dưới đây giữ lịch sử.
+
 > **Review sau commit:** [Review sau commit 8ee4c3f](CODE_REVIEW_GEMINI_2026_11_19_R3.md). Các suite hiện có chạy lại đạt cùng số liệu bên dưới; probe mới vẫn tái hiện E01–E04. Không suy pass suite là nghiệm thu hết lỗi. Public Apply tiếp tục khóa.
 
 ## Mốc mới nhất — sửa D01–D09

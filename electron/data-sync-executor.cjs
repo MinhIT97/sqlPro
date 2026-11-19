@@ -3,6 +3,7 @@
 const { DatabaseSession } = require('./database.cjs');
 const { quoteId } = require('./data-diff-reader.cjs');
 const RowValues = require('../row-values.js');
+const { normalizeColumnType } = require('../schema-diff.js');
 
 function error(code, message) {
   return Object.assign(new Error(message), { code });
@@ -50,6 +51,30 @@ function originalGuard(columns, values, names) {
     params.push(value);
   }
   return { parts, params };
+}
+
+async function verifyTableSchema(worker, database, table, metadata) {
+  const current = await worker.listColumns(database, table, { fresh: true });
+  const expected = metadata.columns;
+  const failDrift = () => { throw error('TARGET_SCHEMA_DRIFT', 'Cấu trúc/khóa chính của bảng đích đã thay đổi.'); };
+  if (!Array.isArray(current) || !Array.isArray(expected) || !expected.length
+      || current.length !== expected.length) failDrift();
+  for (let i = 0; i < expected.length; i++) {
+    const before = expected[i], after = current[i];
+    if (!before || !after || before.name !== after.name || typeof before.type !== 'string'
+        || typeof after.type !== 'string' || normalizeColumnType(before.type) !== normalizeColumnType(after.type)) failDrift();
+    if (/^(?:enum|set)\b/i.test(before.type) && /\\/.test(before.type)) {
+      throw error('SYNC_TYPE_SQL_MODE_UNSUPPORTED', 'ENUM/SET có escape chưa có contract SQL mode để đồng bộ.');
+    }
+    // Compare every semantic fact carried by the trusted plan, not just type.
+    // Bounded public previews remain blocked and do not supply write authority.
+    for (const field of ['nullable', 'default', 'defaultValue', 'extra', 'collation', 'charset', 'generationExpression', 'isJson', 'checkClause']) {
+      if (Object.hasOwn(before, field) && (!Object.hasOwn(after, field) || before[field] !== after[field])) failDrift();
+    }
+  }
+  const keys = current.filter(column => column.key === 'PRI').map(column => column.name);
+  if (!Array.isArray(metadata.primaryKeys) || !metadata.primaryKeys.length
+      || JSON.stringify(keys) !== JSON.stringify(metadata.primaryKeys)) failDrift();
 }
 
 class DataSyncExecutor {
@@ -117,44 +142,14 @@ class DataSyncExecutor {
       await worker.connect();
       await worker.useDatabase(database);
 
-      // 4. Pre-execution target schema drift verification
-      if (plan.tables) {
-        for (const [tblName, meta] of Object.entries(plan.tables)) {
-          const currentCols = await worker.listColumns(database, tblName, { fresh: true });
-          if (!Array.isArray(currentCols) || currentCols.length !== meta.columns.length) {
-            throw error('TARGET_SCHEMA_DRIFT', `Cấu trúc bảng đích "${tblName}" đã thay đổi kể từ lúc tạo kế hoạch đồng bộ.`);
-          }
-          for (let i = 0; i < meta.columns.length; i++) {
-            const expected = meta.columns[i];
-            const actual = currentCols.find(c => c.name === expected.name);
-            if (!actual || actual.type.toLowerCase() !== expected.type.toLowerCase()) {
-              throw error('TARGET_SCHEMA_DRIFT', `Cột "${expected.name}" trên bảng đích "${tblName}" đã bị thay đổi kiểu hoặc bị xóa.`);
-            }
-          }
-          const currentPks = currentCols.filter(c => c.key === 'PRI').map(c => c.name);
-          if (JSON.stringify(currentPks) !== JSON.stringify(meta.primaryKeys)) {
-            throw error('TARGET_SCHEMA_DRIFT', `Khóa chính trên bảng đích "${tblName}" đã thay đổi.`);
-          }
+      const targetTables = plan.tables ? Object.entries(plan.tables)
+        : [[table, { columns, primaryKeys }]];
+      const verifyTargetSchema = async () => {
+        for (const [name, metadata] of targetTables) {
+          await verifyTableSchema(worker, database, name, metadata);
         }
-      } else {
-        const currentColumns = await worker.listColumns(database, table, { fresh: true });
-        if (!Array.isArray(currentColumns) || currentColumns.length !== columns.length) {
-          throw error('TARGET_SCHEMA_DRIFT', 'Cấu trúc bảng đích đã thay đổi kể từ lúc tạo kế hoạch đồng bộ.');
-        }
-
-        for (let i = 0; i < columns.length; i++) {
-          const expected = columns[i];
-          const actual = currentColumns.find(c => c.name === expected.name);
-          if (!actual || actual.type.toLowerCase() !== expected.type.toLowerCase()) {
-            throw error('TARGET_SCHEMA_DRIFT', `Cột "${expected.name}" trên bảng đích đã bị thay đổi kiểu hoặc bị xóa.`);
-          }
-        }
-
-        const currentPks = currentColumns.filter(c => c.key === 'PRI').map(c => c.name);
-        if (JSON.stringify(currentPks) !== JSON.stringify(primaryKeys)) {
-          throw error('TARGET_SCHEMA_DRIFT', 'Khóa chính trên bảng đích đã thay đổi.');
-        }
-      }
+      };
+      await verifyTargetSchema();
 
       // 5. Engine and Trigger safety verification (must be InnoDB for rollback guarantees)
       if (typeof worker.raw !== 'function') throw error('SYNC_METADATA_UNVERIFIED', 'Worker thiếu API xác minh metadata.');
@@ -211,6 +206,7 @@ class DataSyncExecutor {
             await worker.raw(`SELECT 1 FROM ${quoteId(database)}.${quoteId(name)} LIMIT 0`);
           }
           await verifyTargetSafety();
+          await verifyTargetSchema();
           for (let opIdx = 0; opIdx < batch.length; opIdx++) {
             if (signal?.aborted) {
               throw error('SYNC_CANCELLED', 'Quá trình đồng bộ đã bị hủy bỏ bởi người dùng.');
@@ -250,6 +246,7 @@ class DataSyncExecutor {
 
               const res = await worker.raw(sql, params, 30000, { prepared: true });
               const affected = res.result?.affectedRows ?? 0;
+              if (affected !== 1 && affected !== 0) throw error('SYNC_ROW_COUNT_MISMATCH', 'Thao tác phải khớp đúng một dòng; dừng batch.');
               if (affected === 0) {
                 throw error('SYNC_CONFLICT_DETECTED', `Phát hiện xung đột: dòng khóa ${op.rowKey} bảng "${opTable}" đã bị sửa đổi hoặc xóa trên đích kể từ lúc so sánh.`);
               }
@@ -262,6 +259,7 @@ class DataSyncExecutor {
               const sql = `DELETE FROM ${opTableRef} WHERE ${whereParts.join(' AND ')}`;
               const res = await worker.raw(sql, whereValues, 30000, { prepared: true });
               const affected = res.result?.affectedRows ?? 0;
+              if (affected !== 1 && affected !== 0) throw error('SYNC_ROW_COUNT_MISMATCH', 'Thao tác phải khớp đúng một dòng; dừng batch.');
               if (affected === 0) {
                 throw error('SYNC_CONFLICT_DETECTED', `Phát hiện xung đột: dòng khóa ${op.rowKey} bảng "${opTable}" đã không còn khớp giá trị ban đầu trên đích.`);
               }

@@ -1,5 +1,11 @@
 # Tiến độ roadmap SqlPro
 
+## 19/11 — Sửa E01–E04 và rà lại ownership
+
+- [Bản sửa E01–E04 và review tiếp](CODE_REVIEW_GEMINI_2026_11_19_R3_FIXES.md): schema/PK proof trong metadata lock từng batch, exact row count, giữ ENUM/SET literals, chặn non-append/reorder và hậu kiểm order, VERSION/TLS/raw callback theo owner/generation.
+- **9 regression mới fail trên baseline/pass sau sửa**; Node **1.253 pass/0 fail/22 opt-in skip**, DB ba suite **27/27**, renderer **103/103**, website **14/14**, server **17/17**.
+- Không còn E01–E04 mở trong phạm vi kiểm chứng; public Apply vẫn khóa. Đếm lại **29/51 chưa tick**, không thay checklist nghiệm thu.
+
 ## 19/11 — Commit D01–D09 và review lại
 
 - Commit runtime/test/bằng chứng: **8ee4c3f**. [Review sau commit 8ee4c3f](CODE_REVIEW_GEMINI_2026_11_19_R3.md): còn **E01–E04, 2 P1/2 P2**, chưa sửa thêm runtime.

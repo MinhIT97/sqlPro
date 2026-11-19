@@ -108,6 +108,7 @@ test('CREATE_TABLE generates executable statement with valid preCondition and po
     params: ['app_db', 'products'],
     expectedCount: 1,
     expectedColumns: newTable.columns.map(column => ({ name: column.name, type: column.type, nullable: column.nullable ? 'YES' : 'NO', defaultValue: column.default, extra: column.isAutoIncrement ? 'auto_increment' : '', collation: null, comment: '' })),
+    expectedColumnOrder: newTable.columns.map(column => column.name),
     exactColumns: true
   });
 });

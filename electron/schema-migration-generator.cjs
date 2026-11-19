@@ -195,6 +195,21 @@ class SchemaMigrationGenerator {
     const statements = [];
     let statementIndex = 0;
 
+    // Only append-only additions are supported. Never claim a schema matches
+    // after silently moving columns or ignoring a reorder of existing columns.
+    for (const source of sourceSnapshot.tables) {
+      const target = targetSnapshot.tables.find(table => table.name === source.name);
+      if (!target) continue;
+      const current = target.columns.map(column => column.name);
+      // Preserve the existing destructive-DDL gate/reason for dropped columns.
+      if (current.some(name => !source.columns.some(column => column.name === name))) continue;
+      const appended = source.columns.filter(column => !current.includes(column.name)).map(column => column.name);
+      if (JSON.stringify([...current, ...appended]) !== JSON.stringify(source.columns.map(column => column.name))) {
+        return freeze({ status: 'blocked', blockReason: 'COLUMN_ORDER_REVIEW_REQUIRED', applySupported: false,
+          applyBlockReason: 'COLUMN_ORDER_REVIEW_REQUIRED', statements: [], summary: { total: 0, executable: 0, blocked: 0 } });
+      }
+    }
+
     // 1. Process added tables (CREATE TABLE)
     for (const newTable of diff.tables?.added || []) {
       if (newTable.foreignKeys && newTable.foreignKeys.length > 0) {
@@ -241,6 +256,7 @@ class SchemaMigrationGenerator {
           params: [targetDatabase, newTable.name],
           expectedCount: 1,
           expectedColumns: sourceSnapshot.tables.find(table => table.name === newTable.name).columns.map(columnProof),
+          expectedColumnOrder: newTable.columns.map(column => column.name),
           exactColumns: true
         }
       });
@@ -283,6 +299,7 @@ class SchemaMigrationGenerator {
         }
 
         // 2.1 Add columns
+        const expectedOrder = targetSnapshot.tables.find(table => table.name === tblName).columns.map(column => column.name);
         for (const newCol of tableDiff.columns?.added || []) {
           if (newCol.isGenerated || newCol.generationExpression || /generated|virtual|stored|persistent/i.test(newCol.extra || '')) {
             blockReason = 'COLUMN_EXPRESSION_UNSUPPORTED';
@@ -294,6 +311,7 @@ class SchemaMigrationGenerator {
           }
 
           statementIndex++;
+          expectedOrder.push(newCol.name);
           const sql = `ALTER TABLE ${SchemaDiff.escapeIdentifier(tblName)} ADD COLUMN ${SchemaDiff.formatColumnClause(newCol)};`;
           statements.push({
             id: `stmt_${statementIndex}`,
@@ -320,6 +338,7 @@ class SchemaMigrationGenerator {
               params: [targetDatabase, tblName, newCol.name],
               expectedCount: 1,
               expectedColumns: [columnProof(sourceSnapshot.tables.find(table => table.name === tblName).columns.find(column => column.name === newCol.name))],
+              expectedColumnOrder: [...expectedOrder],
               exactColumns: false
             }
           });

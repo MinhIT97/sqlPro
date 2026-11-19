@@ -1,5 +1,7 @@
 # Review sau commit 8ee4c3f — 19/11/2026
 
+> **Cập nhật sau sửa:** [Bản sửa E01–E04 và review tiếp](CODE_REVIEW_GEMINI_2026_11_19_R3_FIXES.md). Findings và bằng chứng bên dưới giữ lịch sử trước sửa.
+
 **Còn 4 findings đã tái hiện: 2 P1, 2 P2.** Commit `8ee4c3f` đã lưu bản sửa D01–D09, test và báo cáo trước đó. Review này không sửa thêm runtime, không mở public Migration/Data Sync Apply. Không suy toàn repository hết lỗi từ suite xanh.
 
 ## E01 — P1: Sync kiểm tra PK trước metadata lock, rồi chấp nhận UPDATE nhiều dòng

@@ -1142,11 +1142,13 @@ class DatabaseSession {
     if (this.connection) await this.close();
     const generation = ++this.connectionGeneration;
     this.dead = false;
+    this.version = null;
     this.tls = null;
     let stream = null;
     if (this.profile.ssh && this.profile.ssh.enabled) stream = await this.openSshTunnel();
     let connection;
     try {
+      if (this.connectionGeneration !== generation) throw fail('Phiên kết nối đã thay đổi.', 'SESSION_CLOSED');
       connection = mysql.createConnection(this.buildMysqlOptions(stream));
       if (typeof connection?.on === 'function') {
         connection.on('error', (err) => {
@@ -1161,9 +1163,18 @@ class DatabaseSession {
       });
       if (this.connectionGeneration !== generation) throw fail('Phiên kết nối đã thay đổi.', 'SESSION_CLOSED');
       this.connection = connection;
+      const assertCurrent = () => {
+        if (this.connectionGeneration !== generation || this.connection !== connection || this.dead) {
+          throw fail('Phiên kết nối đã thay đổi.', 'SESSION_CLOSED');
+        }
+      };
       const result = await this.raw('SELECT VERSION() AS version');
-      this.version = result.rows[0] ? result.rows[0].version : '';
-      this.tls = await this.readTlsState();
+      assertCurrent();
+      const version = result.rows[0] ? result.rows[0].version : '';
+      const tls = await this.readTlsState();
+      assertCurrent();
+      this.version = version;
+      this.tls = tls;
     } catch (error) {
       if (this.connectionGeneration === generation) this.dead = true;
       try {
@@ -1241,11 +1252,16 @@ class DatabaseSession {
 
   raw(sql, params = [], timeoutMs = null, { prepared = false } = {}) {
     this.ensureOpen();
+    const connection = this.connection, generation = this.connectionGeneration;
     this.transactionRevision = (this.transactionRevision || 0) + 1;
     return new Promise((resolve, reject) => {
       const command = Number.isFinite(timeoutMs) && timeoutMs > 0 ? { sql, timeout: timeoutMs } : sql;
       const method = prepared ? 'execute' : 'query';
-      this.connection[method](command, params, (error, result, fields) => {
+      connection[method](command, params, (error, result, fields) => {
+        if (this.connection !== connection || this.connectionGeneration !== generation) {
+          reject(fail('Phiên kết nối đã thay đổi.', 'SESSION_CLOSED'));
+          return;
+        }
         if (error) {
           reject(error);
           return;

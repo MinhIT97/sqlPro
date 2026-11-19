@@ -221,6 +221,7 @@ class SchemaMigrationExecutor {
               const fields = ['name', 'type', 'nullable', 'defaultValue', 'extra', 'collation', 'comment'];
               if (!Array.isArray(actual) || !Array.isArray(expectedColumns) || !expectedColumns.length
                   || entry.postCondition.exactColumns && actual.length !== expectedColumns.length
+                  || entry.postCondition.expectedColumnOrder && JSON.stringify(actual.map(column => column?.name)) !== JSON.stringify(entry.postCondition.expectedColumnOrder)
                   || expectedColumns.some(column => {
                     if (!column || typeof column.name !== 'string') return true;
                     const matches = actual.filter(item => item && item.name === column.name);

@@ -1,5 +1,9 @@
 # Review, sửa lỗi và chốt commit — 18/11/2026
 
+> **Mốc mới nhất 19/11:** [Đã sửa F01–F06 và giới hạn](CODE_REVIEW_FEATURES_2026_11_19_FIXES.md). Schema Diff UI đã dùng Main snapshot/plan; script giữ settings; Sync chặn inbound FK/metadata thiếu proof và đối chiếu lại quyền/context. Node **1.263 pass/0 fail/24 skip**, DB **43/43**, renderer **105/105**, website **14/14**, server **17/17**. Public Apply vẫn khóa; các dòng F01–F06 còn mở phía dưới giữ lịch sử trước sửa.
+
+> **Review mới nhất 19/11:** [Rà tính năng và bugs tại 60cdb20](CODE_REVIEW_FEATURES_2026_11_19.md): còn **F01–F06 (5 P1/1 P2)** đã tái hiện, chưa sửa runtime. Schema Diff UI chưa dùng Main collector/service; public Apply khóa không bảo vệ toàn bộ SQL xuất/mở Editor. Các mốc sửa lỗi phía dưới giữ lịch sử; không tự tick roadmap.
+
 > Review và bản sửa tiếp theo cho hai commit sau baseline: [N01–N07 đã xử lý](CODE_REVIEW_GEMINI_2026_11_19_FIXES.md), [bằng chứng review trước sửa](CODE_REVIEW_GEMINI_2026_11_19.md). Kết quả 18/11 bên dưới không bao phủ các thay đổi mới đó.
 
 Đối chiếu working tree trên `7ede1a6`, package 0.3.12. Người dùng yêu cầu rà soát, sửa lỗi, báo cáo phần còn lại và commit. Commit này gom triển khai Gemini đang có, các bản sửa từ review R1–R5 và bản sửa bổ sung dưới đây. Không mở khóa public Migration/Data Sync Apply và không chứng nhận toàn bộ sản phẩm hết lỗi.

@@ -1,5 +1,9 @@
 # Bàn giao triển khai SqlPro cho Gemini
 
+> **Mốc mới nhất 19/11:** [Đã sửa F01–F06 và giới hạn](CODE_REVIEW_FEATURES_2026_11_19_FIXES.md). Schema Diff UI đã dùng Main snapshot/plan; script giữ settings; Sync chặn inbound FK/metadata thiếu proof và đối chiếu lại quyền/context. Node **1.263 pass/0 fail/24 skip**, DB **43/43**, renderer **105/105**, website **14/14**, server **17/17**. Public Apply vẫn khóa; các dòng F01–F06 còn mở phía dưới giữ lịch sử trước sửa.
+
+> **Review mới nhất 19/11:** [Rà tính năng và bugs tại 60cdb20](CODE_REVIEW_FEATURES_2026_11_19.md): còn **F01–F06 (5 P1/1 P2)** đã tái hiện, chưa sửa runtime. Schema Diff UI chưa dùng Main collector/service; public Apply khóa không bảo vệ toàn bộ SQL xuất/mở Editor. Các mốc sửa lỗi phía dưới giữ lịch sử; không tự tick roadmap.
+
 > **Mốc hiện tại:** [Bản sửa E01–E04 và review tiếp](CODE_REVIEW_GEMINI_2026_11_19_R3_FIXES.md). E01–E04 đã xử lý; Node 1.253 pass/0 fail/22 skip, DB N/D/E 27/27, renderer 103/103. Public Apply vẫn khóa; còn các gói tính năng/release ở mục 3 báo cáo. Các dòng ghi còn E01–E04 phía dưới là lịch sử trước sửa.
 
 > **Review hiện tại:** [Review sau commit 8ee4c3f](CODE_REVIEW_GEMINI_2026_11_19_R3.md): còn E01–E04 (2 P1/2 P2), tái hiện schema/Sync trên cả hai engine và connection metadata bằng driver giả. Chưa sửa runtime sau review. Ưu tiên PK/schema dưới lock và exact affectedRows, ENUM/SET drift, column order rồi connect metadata generation. Public Apply vẫn khóa; các mốc dưới đây giữ lịch sử.

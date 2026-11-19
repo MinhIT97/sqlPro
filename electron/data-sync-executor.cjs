@@ -4,6 +4,8 @@ const { DatabaseSession } = require('./database.cjs');
 const { quoteId } = require('./data-diff-reader.cjs');
 const RowValues = require('../row-values.js');
 const { normalizeColumnType } = require('../schema-diff.js');
+const { computeSchemaFingerprint } = require('./schema-snapshot.cjs');
+const { provesMetadataVisibility } = require('./sync-metadata-visibility.cjs');
 
 function error(code, message) {
   return Object.assign(new Error(message), { code });
@@ -84,6 +86,7 @@ class DataSyncExecutor {
     this.createSession = options.createSession || (profile => new DatabaseSession(profile));
     this.authorizeProduction = options.authorizeProduction;
     this.fingerprintProfile = options.fingerprintProfile;
+    this.getGeneration = options.getGeneration || (() => 0);
   }
 
   async executeSyncPlan({
@@ -103,12 +106,37 @@ class DataSyncExecutor {
 
     // 2. Resolve target profile and verify writable
     const targetProfileId = plan.targetScope.profileId;
-    const targetProfile = this.getProfileWithSecrets ? this.getProfileWithSecrets(targetProfileId) : null;
+    const targetProfile = structuredClone(this.getProfileWithSecrets ? this.getProfileWithSecrets(targetProfileId) : null);
     if (!targetProfile) {
       throw error('TARGET_PROFILE_NOT_FOUND', `Không tìm thấy profile đích ${targetProfileId}.`);
     }
 
     assertWritable(targetProfile);
+    const generation = this.getGeneration();
+    const fullFingerprint = computeSchemaFingerprint(targetProfile);
+    const policyFingerprint = this.fingerprintProfile ? this.fingerprintProfile(targetProfile) : fullFingerprint;
+    const expiresAt = plan.expiresAt ?? Date.now() + 300000;
+    let approval = null;
+    const guard = (checkApproval = true) => {
+      if (signal?.aborted) throw error('SYNC_CANCELLED', 'Quá trình đồng bộ đã bị hủy bỏ.');
+      if (Date.now() >= expiresAt) throw error('SYNC_PLAN_EXPIRED', 'Kế hoạch đồng bộ đã hết hạn.');
+      const current = this.getProfileWithSecrets?.(targetProfileId);
+      if (!current) throw error('TARGET_PROFILE_NOT_FOUND', 'Profile đích không còn tồn tại.');
+      assertWritable(current);
+      if (this.getGeneration() !== generation || computeSchemaFingerprint(current) !== fullFingerprint
+          || (this.fingerprintProfile ? this.fingerprintProfile(current) : computeSchemaFingerprint(current)) !== policyFingerprint
+          || plan.targetScope.profileFingerprint && plan.targetScope.profileFingerprint !== policyFingerprint) {
+        throw error('SYNC_CONTEXT_CHANGED', 'Cấu hình hoặc context đồng bộ đã thay đổi; hãy tạo kế hoạch mới.');
+      }
+      if (checkApproval && current.environment === 'production'
+          && (!approval || approval.planToken !== plan.planToken || approval.planDigest !== plan.planDigest
+            || approval.targetProfileFingerprint !== policyFingerprint || !Number.isSafeInteger(approval.expiresAt)
+            || approval.expiresAt <= Date.now() || approval.expiresAt > expiresAt)) {
+        throw error('PRODUCTION_APPROVAL_REQUIRED', 'Phê duyệt Production thiếu, hết hạn hoặc không khớp kế hoạch/đích.');
+      }
+    };
+    const checked = async operation => { guard(); const result = await operation(); guard(); return result; };
+    guard(false);
 
     // 3. Authorize Production if target is production environment
     if (targetProfile.environment === 'production') {
@@ -117,7 +145,8 @@ class DataSyncExecutor {
       }
       let receipt;
       try {
-        receipt = await this.authorizeProduction({ plan, approvalToken });
+        receipt = await this.authorizeProduction({ plan, approvalToken, targetProfileFingerprint: policyFingerprint });
+        guard(false);
       } catch (err) {
         if (err && err.code && err.code.startsWith('PRODUCTION_APPROVAL_')) throw err;
         throw error('PRODUCTION_APPROVAL_REQUIRED', err?.message || 'Xác thực phê duyệt Production thất bại.');
@@ -125,7 +154,9 @@ class DataSyncExecutor {
       if (!receipt || typeof receipt !== 'object' || receipt.planToken !== plan.planToken) {
         throw error('PRODUCTION_APPROVAL_REQUIRED', 'Phê duyệt Production không hợp lệ hoặc thiếu chứng thực.');
       }
+      approval = structuredClone(receipt);
     }
+    guard();
 
     const { database, table } = plan.targetScope;
     const targetTableRef = `${quoteId(database)}.${quoteId(table)}`;
@@ -139,14 +170,15 @@ class DataSyncExecutor {
 
     try {
       worker = this.createSession(runtimeProfile(targetProfile));
-      await worker.connect();
-      await worker.useDatabase(database);
+      await checked(() => worker.connect());
+      await checked(() => worker.useDatabase(database));
+      const query = (...args) => checked(() => worker.raw(...args));
 
       const targetTables = plan.tables ? Object.entries(plan.tables)
         : [[table, { columns, primaryKeys }]];
       const verifyTargetSchema = async () => {
         for (const [name, metadata] of targetTables) {
-          await verifyTableSchema(worker, database, name, metadata);
+          await checked(() => verifyTableSchema(worker, database, name, metadata));
         }
       };
       await verifyTargetSchema();
@@ -154,9 +186,18 @@ class DataSyncExecutor {
       // 5. Engine and Trigger safety verification (must be InnoDB for rollback guarantees)
       if (typeof worker.raw !== 'function') throw error('SYNC_METADATA_UNVERIFIED', 'Worker thiếu API xác minh metadata.');
       const verifyTargetSafety = async () => {
+        let grants;
+        try { grants = await query('SHOW GRANTS'); }
+        catch (err) {
+          if (['SYNC_CONTEXT_CHANGED', 'CONNECTION_READ_ONLY', 'SYNC_CANCELLED', 'SYNC_PLAN_EXPIRED', 'TARGET_PROFILE_NOT_FOUND', 'PRODUCTION_APPROVAL_REQUIRED'].includes(err.code)) throw err;
+          throw error('SYNC_METADATA_VISIBILITY_UNVERIFIED', 'Chưa xác minh được quyền đọc dependency/trigger metadata.');
+        }
+        if (!provesMetadataVisibility(grants?.result)) {
+          throw error('SYNC_METADATA_VISIBILITY_UNVERIFIED', 'Cần quyền SELECT và TRIGGER toàn server trực tiếp để xác minh đầy đủ metadata; chưa hỗ trợ quyền qua role/giới hạn.');
+        }
         const tablesToCheck = plan.tables ? Object.keys(plan.tables) : [table];
         for (const tName of tablesToCheck) {
-          const engineRes = await worker.raw(
+          const engineRes = await query(
             'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?',
             [database, tName], 30000, { prepared: true }
           );
@@ -171,7 +212,7 @@ class DataSyncExecutor {
             throw error('UNSUPPORTED_TABLE_ENGINE', `Chỉ hỗ trợ đồng bộ dữ liệu an toàn với bảng engine InnoDB (bảng "${tName}" sử dụng ${engine}).`);
           }
 
-          const triggerRes = await worker.raw(
+          const triggerRes = await query(
             'SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ?',
             [database, tName], 30000, { prepared: true }
           );
@@ -180,6 +221,19 @@ class DataSyncExecutor {
             const names = triggerRes.result.map(t => t.TRIGGER_NAME || t.trigger_name).filter(Boolean).join(', ');
             throw error('TARGET_TABLE_TRIGGERS_DETECTED', `Bảng đích "${tName}" có triggers (${names}). Tác vụ đồng bộ bị chặn để ngăn tác dụng phụ ngoài ý muốn.`);
           }
+          // Until dependency closure is part of the authorized plan, any
+          // inbound FK is unsupported, even if its child is also selected.
+          let relationRes;
+          try {
+            relationRes = await query(`SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS
+              WHERE UNIQUE_CONSTRAINT_SCHEMA = ? AND REFERENCED_TABLE_NAME = ? LIMIT 1`,
+            [database, tName], 30000, { prepared: true });
+          } catch (err) {
+            if (['SYNC_CONTEXT_CHANGED', 'CONNECTION_READ_ONLY', 'SYNC_CANCELLED', 'SYNC_PLAN_EXPIRED', 'TARGET_PROFILE_NOT_FOUND', 'PRODUCTION_APPROVAL_REQUIRED'].includes(err.code)) throw err;
+            throw error('SYNC_METADATA_UNVERIFIED', 'Không xác minh được phụ thuộc FK của bảng đích.');
+          }
+          if (!Array.isArray(relationRes?.result)) throw error('SYNC_METADATA_UNVERIFIED', 'Metadata FK chưa đầy đủ.');
+          if (relationRes.result.length) throw error('SYNC_FOREIGN_KEY_DEPENDENCY_UNSUPPORTED', 'Bảng có FK tham chiếu tới; chưa có kế hoạch kiểm chứng tác động dependency.');
         }
       };
 
@@ -196,14 +250,14 @@ class DataSyncExecutor {
         }
 
         const batch = batches[b];
-        await worker.raw('START TRANSACTION');
+        await query('START TRANSACTION');
 
         try {
           // Open every target table inside this transaction before inspecting
           // engine/triggers, retaining metadata locks until COMMIT/ROLLBACK.
           const tablesToLock = plan.tables ? Object.keys(plan.tables) : [table];
           for (const name of tablesToLock) {
-            await worker.raw(`SELECT 1 FROM ${quoteId(database)}.${quoteId(name)} LIMIT 0`);
+            await query(`SELECT 1 FROM ${quoteId(database)}.${quoteId(name)} LIMIT 0`);
           }
           await verifyTargetSafety();
           await verifyTargetSchema();
@@ -225,7 +279,7 @@ class DataSyncExecutor {
               const values = colNames.map(c => op.values[c]);
               const sql = `INSERT INTO ${opTableRef} (${colList}) VALUES (${placeholders})`;
 
-              await worker.raw(sql, values, 30000, { prepared: true });
+              await query(sql, values, 30000, { prepared: true });
             } else if (op.type === 'UPDATE') {
               const updateCols = op.changedColumns && op.changedColumns.length > 0
                 ? op.changedColumns
@@ -244,7 +298,7 @@ class DataSyncExecutor {
               const sql = `UPDATE ${opTableRef} SET ${setClauses} WHERE ${whereParts.join(' AND ')}`;
               const params = [...setValues, ...whereValues];
 
-              const res = await worker.raw(sql, params, 30000, { prepared: true });
+              const res = await query(sql, params, 30000, { prepared: true });
               const affected = res.result?.affectedRows ?? 0;
               if (affected !== 1 && affected !== 0) throw error('SYNC_ROW_COUNT_MISMATCH', 'Thao tác phải khớp đúng một dòng; dừng batch.');
               if (affected === 0) {
@@ -257,7 +311,7 @@ class DataSyncExecutor {
               const whereValues = original.params;
 
               const sql = `DELETE FROM ${opTableRef} WHERE ${whereParts.join(' AND ')}`;
-              const res = await worker.raw(sql, whereValues, 30000, { prepared: true });
+              const res = await query(sql, whereValues, 30000, { prepared: true });
               const affected = res.result?.affectedRows ?? 0;
               if (affected !== 1 && affected !== 0) throw error('SYNC_ROW_COUNT_MISMATCH', 'Thao tác phải khớp đúng một dòng; dừng batch.');
               if (affected === 0) {
@@ -266,6 +320,8 @@ class DataSyncExecutor {
             }
           }
 
+          await verifyTargetSafety(); // Recheck dependencies after DML while its locks are still held.
+          guard();
           try {
             await worker.raw('COMMIT');
             committedCount += batch.length;
@@ -280,6 +336,7 @@ class DataSyncExecutor {
             throw uncertainErr;
           }
 
+          guard();
           if (typeof onProgress === 'function') {
             try {
               const p = onProgress({
@@ -310,7 +367,7 @@ class DataSyncExecutor {
         durationMs: Date.now() - startedAt
       };
     } catch (err) {
-      const isPartial = Boolean(err.partialCommit) || (committedCount > 0 && committedCount < totalCount);
+      const isPartial = Boolean(err.partialCommit) || committedCount > 0;
       const enhancedError = Object.assign(new Error(err.message), {
         code: err.code || 'SYNC_EXECUTION_FAILED',
         partialCommit: isPartial,

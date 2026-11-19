@@ -1135,23 +1135,18 @@
   /**
    * Formats a list of migration statements into a complete runnable script
    */
-  function formatMigrationScript(statements, { sourceName = 'Source', targetName = 'Target', wrapForeignKeys = true } = {}) {
+  function formatMigrationScript(statements, { sourceName = 'Source', targetName = 'Target', wrapForeignKeys = false } = {}) {
+    if (wrapForeignKeys) throw new Error('FOREIGN_KEY_CHECKS_OVERRIDE_UNSUPPORTED');
+    const commentName = value => String(value).replace(/[\r\n\u2028\u2029]/g, ' ');
     const lines = [];
     const timestamp = new Date().toISOString();
 
     lines.push('-- ====================================================================');
     lines.push(`-- SqlPro Schema Migration Script`);
     lines.push(`-- Generated: ${timestamp}`);
-    lines.push(`-- Target Database: ${targetName} -> Synchronizing with: ${sourceName}`);
+    lines.push(`-- Target Database: ${commentName(targetName)} -> Synchronizing with: ${commentName(sourceName)}`);
     lines.push('-- ====================================================================');
     lines.push('');
-
-    if (wrapForeignKeys) {
-      lines.push('SET @OLD_UNIQUE_CHECKS = @@UNIQUE_CHECKS, UNIQUE_CHECKS = 0;');
-      lines.push('SET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0;');
-      lines.push("SET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO';");
-      lines.push('');
-    }
 
     const enabledStatements = (statements || []).filter((s) => s && s.enabled !== false);
 
@@ -1165,13 +1160,6 @@
         lines.push(stmt.sql);
         lines.push('');
       }
-    }
-
-    if (wrapForeignKeys) {
-      lines.push('SET SQL_MODE = @OLD_SQL_MODE;');
-      lines.push('SET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;');
-      lines.push('SET UNIQUE_CHECKS = @OLD_UNIQUE_CHECKS;');
-      lines.push('');
     }
 
     return lines.join('\n');

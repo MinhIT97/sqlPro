@@ -81,7 +81,7 @@ test('D04: text original guards use byte comparison and missing snapshots stop b
     for (const complete of [true, false]) {
       const sql = [], columns = [{ name: 'id', type: 'int', key: 'PRI' }, { name: 'val', type: 'varchar(20)' }];
       const worker = { connect: async () => {}, close: async () => {}, useDatabase: async () => {}, listColumns: async () => columns,
-        raw: async query => { sql.push(query); return { result: query.includes('SELECT ENGINE') ? [{ ENGINE: 'InnoDB' }] : query.includes('SELECT TRIGGER_NAME') ? [] : { affectedRows: 0 } }; } };
+        raw: async query => { sql.push(query); return { result: query === 'SHOW GRANTS' ? [{ grants: "GRANT SELECT, TRIGGER ON *.* TO 'fixture'@'%'" }] : query.includes('SELECT ENGINE') ? [{ ENGINE: 'InnoDB' }] : (query.includes('SELECT TRIGGER_NAME') || query.includes('REFERENTIAL_CONSTRAINTS')) ? [] : { affectedRows: 0 } }; } };
       const executor = new DataSyncExecutor({ consumePlan: () => ({ targetScope: { profileId: 'p', database: 'd', table: 't' }, primaryKeys: ['id'], columns, operations: [{ type: operation, values: { id: 1, val: 'new' }, pkValues: [1], originalValues: complete ? { id: 1, val: 'old' } : { id: 1 } }] }), getProfileWithSecrets: () => ({}), createSession: () => worker });
       await assert.rejects(executor.executeSyncPlan({ planToken: 'fixture' }), { code: complete ? 'SYNC_CONFLICT_DETECTED' : 'SYNC_ORIGINAL_INCOMPLETE' });
       const write = sql.find(q => q.startsWith(operation));

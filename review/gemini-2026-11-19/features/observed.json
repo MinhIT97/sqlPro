@@ -1,0 +1,130 @@
+{
+  "policyDrift": {
+    "success": true,
+    "committedCount": 2,
+    "profileReads": 1,
+    "finalReadOnly": true,
+    "finalEnvironment": "production",
+    "insertCount": 2
+  },
+  "MYSQL": {
+    "version": "8.4.13",
+    "rendererFidelity": {
+      "schemaSnapshotCalls": 0,
+      "statements": [
+        {
+          "id": "stmt-1",
+          "sql": "CREATE TABLE `indexed` (\n  `id` INT NOT NULL,\n  `qty` INT NULL DEFAULT NULL,\n  `label` VARCHAR(30) NULL DEFAULT NULL,\n  UNIQUE KEY `idx_label` (`label`),\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;",
+          "type": "CREATE_TABLE",
+          "table": "indexed",
+          "severity": "safe",
+          "warning": null,
+          "enabled": true
+        }
+      ],
+      "sql": "-- ====================================================================\n-- SqlPro Schema Migration Script\n-- Generated: 2026-11-19T07:45:26.432Z\n-- Target Database: sqlpro_fr_c158e20128ba_dst -> Synchronizing with: sqlpro_fr_c158e20128ba_src\n-- ====================================================================\n\nSET @OLD_UNIQUE_CHECKS = @@UNIQUE_CHECKS, UNIQUE_CHECKS = 0;\nSET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0;\nSET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO';\n\nCREATE TABLE `indexed` (\n  `id` INT NOT NULL,\n  `qty` INT NULL DEFAULT NULL,\n  `label` VARCHAR(30) NULL DEFAULT NULL,\n  UNIQUE KEY `idx_label` (`label`),\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;\n\nSET SQL_MODE = @OLD_SQL_MODE;\nSET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;\nSET UNIQUE_CHECKS = @OLD_UNIQUE_CHECKS;\n",
+      "engineClaim": "MySQL",
+      "checkInventoryPresent": false,
+      "footerClaimsFkProtected": true,
+      "targetIndexUnique": true,
+      "duplicateCode": "ER_DUP_ENTRY",
+      "createError": null
+    },
+    "scriptSettings": {
+      "footerClaimsFkProtected": true,
+      "before": {
+        "fk": 1,
+        "uq": 1,
+        "sqlMode": "IGNORE_SPACE,ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION"
+      },
+      "afterDdlError": {
+        "fk": 0,
+        "uq": 0,
+        "sqlMode": "NO_AUTO_VALUE_ON_ZERO"
+      },
+      "errorCode": "ER_TABLE_EXISTS_ERROR"
+    },
+    "partialCapture": {
+      "schemaSnapshotCalls": 0,
+      "enabledDrops": [
+        "DROP TABLE IF EXISTS `indexed`;"
+      ]
+    },
+    "previewDefault": {
+      "previewStatus": "preview",
+      "candidateStatus": "ready",
+      "candidateBlock": null,
+      "sourceDefault": "pending",
+      "storedDefault": "pending",
+      "defaultError": null,
+      "sql": "CREATE TABLE `defaults` (\n  `id` INT NOT NULL,\n  `v` VARCHAR(30) COLLATE utf8mb4_0900_ai_ci NULL DEFAULT 'pending',\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB COLLATE=utf8mb4_0900_ai_ci;"
+    },
+    "cascade": {
+      "success": true,
+      "committedCount": 1,
+      "targetTable": "parent",
+      "outsidePlanBefore": 1,
+      "outsidePlanAfter": 0
+    }
+  },
+  "MARIA": {
+    "version": "11.4.13-MariaDB-ubu2404",
+    "rendererFidelity": {
+      "schemaSnapshotCalls": 0,
+      "statements": [
+        {
+          "id": "stmt-1",
+          "sql": "CREATE TABLE `indexed` (\n  `id` INT(11) NOT NULL,\n  `qty` INT(11) NULL DEFAULT 'NULL',\n  `label` VARCHAR(30) NULL DEFAULT 'NULL',\n  UNIQUE KEY `idx_label` (`label`),\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;",
+          "type": "CREATE_TABLE",
+          "table": "indexed",
+          "severity": "safe",
+          "warning": null,
+          "enabled": true
+        }
+      ],
+      "sql": "-- ====================================================================\n-- SqlPro Schema Migration Script\n-- Generated: 2026-11-19T07:45:26.532Z\n-- Target Database: sqlpro_fr_145ea482f7b6_dst -> Synchronizing with: sqlpro_fr_145ea482f7b6_src\n-- ====================================================================\n\nSET @OLD_UNIQUE_CHECKS = @@UNIQUE_CHECKS, UNIQUE_CHECKS = 0;\nSET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0;\nSET @OLD_SQL_MODE = @@SQL_MODE, SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO';\n\nCREATE TABLE `indexed` (\n  `id` INT(11) NOT NULL,\n  `qty` INT(11) NULL DEFAULT 'NULL',\n  `label` VARCHAR(30) NULL DEFAULT 'NULL',\n  UNIQUE KEY `idx_label` (`label`),\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;\n\nSET SQL_MODE = @OLD_SQL_MODE;\nSET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;\nSET UNIQUE_CHECKS = @OLD_UNIQUE_CHECKS;\n",
+      "engineClaim": "MySQL",
+      "checkInventoryPresent": false,
+      "footerClaimsFkProtected": true,
+      "targetIndexUnique": null,
+      "duplicateCode": null,
+      "createError": "ER_INVALID_DEFAULT"
+    },
+    "scriptSettings": {
+      "footerClaimsFkProtected": true,
+      "before": {
+        "fk": 1,
+        "uq": 1,
+        "sqlMode": "IGNORE_SPACE,STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION"
+      },
+      "afterDdlError": {
+        "fk": 0,
+        "uq": 0,
+        "sqlMode": "NO_AUTO_VALUE_ON_ZERO"
+      },
+      "errorCode": "ER_TABLE_EXISTS_ERROR"
+    },
+    "partialCapture": {
+      "schemaSnapshotCalls": 0,
+      "enabledDrops": [
+        "DROP TABLE IF EXISTS `indexed`;"
+      ]
+    },
+    "previewDefault": {
+      "previewStatus": "preview",
+      "candidateStatus": "blocked",
+      "candidateBlock": "MARIADB_DEFAULT_REVIEW_REQUIRED",
+      "sourceDefault": "'pending'",
+      "storedDefault": "'pending'",
+      "defaultError": null,
+      "sql": "CREATE TABLE `defaults` (\n  `id` INT(11) NOT NULL,\n  `v` VARCHAR(30) COLLATE utf8mb4_uca1400_ai_ci NULL DEFAULT '''pending''',\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB COLLATE=utf8mb4_uca1400_ai_ci;"
+    },
+    "cascade": {
+      "success": true,
+      "committedCount": 1,
+      "targetTable": "parent",
+      "outsidePlanBefore": 1,
+      "outsidePlanAfter": 0
+    }
+  }
+}

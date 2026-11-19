@@ -313,8 +313,9 @@ test('S08: DataSyncExecutor handles async onProgress rejections safely without u
         async useDatabase() {},
         async listColumns() { return [{ name: 'id', type: 'int', key: 'PRI' }]; },
         async raw(sql) {
+          if (sql === 'SHOW GRANTS') return { result: [{ grants: "GRANT SELECT, TRIGGER ON *.* TO 'fixture'@'%'" }] };
           if (sql.includes('SELECT ENGINE FROM')) return { result: [{ ENGINE: 'InnoDB' }] };
-          if (sql.includes('SELECT TRIGGER_NAME FROM')) return { result: [] };
+          if (sql.includes('SELECT TRIGGER_NAME FROM') || sql.includes('REFERENTIAL_CONSTRAINTS')) return { result: [] };
           return { result: { affectedRows: 1 } };
         },
         async close() {}

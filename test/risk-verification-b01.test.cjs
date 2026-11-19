@@ -20,7 +20,7 @@ const { loadRenderer } = require('./helpers/renderer.cjs');
    Calling actual application code, handlers and modules directly
    ========================================================================== */
 
-function setupDiffModalRenderer({ onQuery, onConfirm } = {}) {
+function setupDiffModalRenderer({ onQuery, onConfirm, onSnapshot } = {}) {
   const listeners = new Map();
   const elements = new Proxy(new Map(), {
     get(target, prop) {
@@ -64,8 +64,16 @@ function setupDiffModalRenderer({ onQuery, onConfirm } = {}) {
   dialog.showModal = function () { this.open = true; };
   dialog.close = function () { this.open = false; };
 
+  const service = new (require('../electron/schema-migration-service.cjs').SchemaMigrationService)();
   const desktop = {
     db: {
+      schemaSnapshot: async ({ database, profileId }) => {
+        const data = { database, engine: 'MySQL', tables: database === 'source_db' ? [{ name: 'users', engine: 'InnoDB', columns: [{ name: 'id', type: 'int', nullable: true, default: null }], indexes: [], foreignKeys: [], foreignKeysStatus: 'complete', checkConstraints: [], checkConstraintsStatus: 'complete' }] : [], views: [], routines: [], triggers: [], events: [] };
+        const snapshot = { ...data, kind: 'sqlpro-schema-snapshot', version: 1, coverage: 'complete', snapshotIdentity: require('../electron/schema-snapshot.cjs').computeSchemaFingerprint(data), scope: { profileId, sessionId: 'fixture', generation: 0, profileFingerprint: 'a'.repeat(64), database, engine: 'MySQL' } };
+        onSnapshot?.(snapshot);
+        return { ok: true, data: { snapshotId: service.storeSnapshot(snapshot), coverage: snapshot.coverage } };
+      },
+      createMigrationPlan: async payload => ({ ok: true, data: service.createMigrationPlan(payload) }),
       databases: async () => ({ ok: true, data: ['source_db', 'target_db'] }),
       tables: async (db) => ({ ok: true, data: db === 'source_db' ? [{ name: 'users', type: 'table' }] : [] }),
       columns: async () => ({ ok: true, data: [{ name: 'id', type: 'int' }] }),
@@ -83,7 +91,7 @@ function setupDiffModalRenderer({ onQuery, onConfirm } = {}) {
   r.context.window.SchemaDiff = SchemaDiff;
   r.context.SchemaDiff = SchemaDiff;
   r.context.document.querySelectorAll = (sel) => {
-    if (sel === '.diff-tab-btn') return tabButtons;
+    if (sel === '.diff-tab-btn' || sel === '[data-diff-tab]') return tabButtons;
     return [elements.get(sel)];
   };
 
@@ -164,70 +172,18 @@ test('B01.3 [CONFIRMED REMEDIATION] Migration apply in app.js does not call db.q
 // 2. P0 — G6.1/G6.2 Snapshot: captureFullSchema Blindness & SchemaDiff Gaps
 // --------------------------------------------------------------------------
 
-test('B01.4 [CONFIRMED BUG] captureFullSchema returns empty view definitions, routine SQL, triggers and events', async () => {
-  // Extract captureFullSchema strictly from app.js using exact function boundary (lines 3358-3431)
-  const appJsSource = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
-  const start = appJsSource.indexOf('async function captureFullSchema');
-  assert.ok(start > 0, 'Found captureFullSchema in app.js');
-
-  let depth = 0;
-  let end = -1;
-  for (let i = start; i < appJsSource.length; i++) {
-    if (appJsSource[i] === '{') depth++;
-    else if (appJsSource[i] === '}') {
-      depth--;
-      if (depth === 0) {
-        end = i + 1;
-        break;
-      }
-    }
-  }
-  assert.ok(end > start, 'Successfully determined exact end of captureFullSchema');
-  const captureFullSchemaCode = appJsSource.slice(start, end);
-
-  // Execute the exact function in the VM with realistic metadata fixtures:
-  const desktop = {
-    db: {
-      tables: async () => ({
-        ok: true,
-        data: [
-          { name: 'v_active_users', type: 'view' },
-          { name: 'orders', type: 'table', engine: 'InnoDB', comment: 'Orders table' }
-        ]
-      }),
-      columns: async () => ({
-        ok: true,
-        data: [{ name: 'id', type: 'int', nullable: false, defaultValue: null, extra: 'auto_increment', comment: '' }]
-      }),
-      indexes: async () => ({
-        ok: true,
-        data: [{ name: 'PRIMARY', nonUnique: 0, type: 'BTREE', columns: ['id'] }]
-      }),
-      relations: async () => ({
-        ok: true,
-        data: { outbound: [] }
-      }),
-      routines: async () => ({
-        ok: true,
-        data: [{ name: 'sp_calculate_total', type: 'PROCEDURE' }]
-      })
-    }
-  };
-
-  const r = loadRenderer({ desktop });
-  r.evaluate(`${captureFullSchemaCode}\nwindow.__testCapture = captureFullSchema;`);
-  const snapshot = await r.evaluate("window.__testCapture('sales_db', 'profile-1')");
-
-  assert.equal(snapshot.database, 'sales_db');
-  assert.equal(snapshot.engine, 'MySQL', 'DEFECT REPRODUCED: Engine is hardcoded to MySQL, ignoring MariaDB');
-  assert.equal(snapshot.views.length, 1);
-  assert.equal(snapshot.views[0].definition, '', 'DEFECT REPRODUCED: View definition is hardcoded to empty string ""');
-  assert.equal(snapshot.routines.length, 1);
-  assert.equal(snapshot.routines[0].sql, '', 'DEFECT REPRODUCED: Routine SQL is hardcoded to empty string ""');
-  assert.equal(Array.isArray(snapshot.triggers), true);
-  assert.equal(snapshot.triggers.length, 0, 'DEFECT REPRODUCED: Triggers array is hardcoded to empty []');
-  assert.equal(Array.isArray(snapshot.events), true);
-  assert.equal(snapshot.events.length, 0, 'DEFECT REPRODUCED: Events array is hardcoded to empty []');
+test('B01.4 [REMEDIATION] incomplete Main snapshot blocks Schema Diff SQL instead of omitting objects', async () => {
+  let queryCount = 0;
+  const { r, elements, listeners } = setupDiffModalRenderer({
+    onSnapshot: snapshot => { snapshot.coverage = 'partial'; },
+    onQuery: () => { queryCount++; return { ok: true, data: {} }; }
+  });
+  await r.evaluate("app.connection={id:'p'};app.connections=[app.connection];app.database='source_db';showSchemaDiffModal()");
+  await new Promise(resolve => setTimeout(resolve, 20));
+  await listeners.get('#diffRunCompareBtn:click')[0]();
+  assert.ok(elements.get('#diffTabContent').innerHTML.includes('Metadata nguồn chưa đầy đủ'));
+  assert.equal(listeners.has('#diffOpenEditorBtn:click'), false);
+  assert.equal(queryCount, 0);
 });
 
 test('B01.5 [CONFIRMED BUG] SchemaDiff.compareSchemas has no trigger or event comparison logic', () => {

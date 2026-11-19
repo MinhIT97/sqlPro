@@ -2,7 +2,7 @@
 
 const crypto = require('node:crypto');
 const SchemaDiff = require('../schema-diff.js');
-const { SchemaMigrationGenerator, inspectSnapshotMetadata, caseMetadataBlock } = require('./schema-migration-generator.cjs');
+const { SchemaMigrationGenerator } = require('./schema-migration-generator.cjs');
 
 const DEFAULT_SERVICE_OPTIONS = Object.freeze({
   snapshotTtlMs: 10 * 60 * 1000, planTtlMs: 5 * 60 * 1000,
@@ -18,31 +18,6 @@ function freeze(value) {
     Object.freeze(value);
   }
   return value;
-}
-
-// Inspect original metadata before SchemaDiff can discard unsupported attributes.
-function metadataBlock(snapshot) {
-  if (snapshot.coverage !== 'complete') return 'SCHEMA_COVERAGE_INCOMPLETE';
-  if (!['MySQL', 'MariaDB'].includes(snapshot.engine)) return 'ENGINE_UNSUPPORTED';
-  if (['views', 'routines', 'triggers', 'events'].some(kind => snapshot[kind].length)) return 'OBJECT_DEPENDENCY_REVIEW_REQUIRED';
-  const blocked = item => !item || typeof item !== 'object' || item.status === 'unknown' || item.coverageStatus === 'unknown' || item.migrationStatus === 'blocked';
-  for (const table of snapshot.tables) {
-    if (blocked(table) || table.foreignKeysStatus === 'unknown' || !Array.isArray(table.columns) || !table.columns.length
-        || !Array.isArray(table.indexes) || !Array.isArray(table.foreignKeys)) return 'TABLE_METADATA_INCOMPLETE';
-    if (table.foreignKeys.length) return 'FOREIGN_KEY_DEPENDENCY_REVIEW_REQUIRED';
-    for (const column of table.columns) {
-      if (blocked(column)) return column.migrationBlockReason || 'COLUMN_METADATA_INCOMPLETE';
-      if (column.isGenerated || column.generationExpression || /generated|virtual|stored|persistent/i.test(column.extra || '')) return 'COLUMN_EXPRESSION_UNSUPPORTED';
-    }
-    for (const index of table.indexes) {
-      if (blocked(index)) return index.migrationBlockReason || 'INDEX_METADATA_INCOMPLETE';
-      if (!Array.isArray(index.columns) || !index.columns.length || index.columns.some(column =>
-        !column || typeof column !== 'object' || !column.name || column.expression || column.subPart || column.direction === 'DESC')) return 'INDEX_DEFINITION_UNSUPPORTED';
-      if (index.visibilityKind === 'mysql-visible' && index.visibility !== 'YES'
-          || index.visibilityKind === 'mariadb-ignored' && index.visibility !== 'NO') return 'INDEX_VISIBILITY_UNSUPPORTED';
-    }
-  }
-  return inspectSnapshotMetadata(snapshot);
 }
 
 class SchemaMigrationService {
@@ -98,29 +73,25 @@ class SchemaMigrationService {
     const source = this.getSnapshot(sourceSnapshotId);
     const target = this.getSnapshot(targetSnapshotId);
     if (!options || typeof options !== 'object' || Array.isArray(options)) throw error('INVALID_PLAN_OPTIONS', 'Tùy chọn migration không hợp lệ.');
-    let blockReason = metadataBlock(source) || metadataBlock(target);
-    if (!blockReason) blockReason = caseMetadataBlock(source, target);
-    if (source.scope.profileId === target.scope.profileId && source.database === target.database) blockReason = 'SAME_DATABASE';
-    if (source.engine !== target.engine) blockReason = 'CROSS_ENGINE_MIGRATION_UNSUPPORTED';
-    if (options.wrapForeignKeys === true) blockReason = 'FOREIGN_KEY_CHECKS_OVERRIDE_UNSUPPORTED';
-    let statements = [];
-    if (!blockReason) {
-      const diff = SchemaDiff.compareSchemas(source, target, {
-        ignoreComments: options.ignoreComments === true, ignoreCollation: options.ignoreCollation === true
-      });
-      statements = SchemaDiff.generateMigrationSql(diff, {
-        allowDropTables: options.allowDropTables === true, allowDropColumns: options.allowDropColumns === true
-      });
-      if (statements.length > this.options.maxStatements || Buffer.byteLength(JSON.stringify(statements)) > this.options.maxPlanBytes) {
-        blockReason = 'MIGRATION_PLAN_QUOTA_EXCEEDED';
-        statements = [];
-      }
+    const generated = new SchemaMigrationGenerator(this.options).generateMigrationPlan({ sourceSnapshot: source, targetSnapshot: target, options });
+    let blockReason = generated.blockReason;
+    let statements = blockReason ? [] : generated.statements;
+    let comparison = blockReason ? null : SchemaDiff.compareSchemas(source, target, {
+      ignoreComments: options.ignoreComments === true, ignoreCollation: options.ignoreCollation === true
+    });
+    if (Buffer.byteLength(JSON.stringify({ statements, comparison })) > this.options.maxPlanBytes) {
+      blockReason = 'MIGRATION_PLAN_QUOTA_EXCEEDED'; statements = []; comparison = null;
     }
+    const sqlScript = blockReason ? '' : SchemaDiff.formatMigrationScript(statements, {
+      sourceName: `${source.database} (${source.scope.profileId})`,
+      targetName: `${target.database} (${target.scope.profileId})`
+    });
     const planToken = crypto.randomBytes(32).toString('hex');
     const plan = freeze({
       planId: `plan_${crypto.randomBytes(16).toString('hex')}`, planToken,
       createdAt: new Date().toISOString(), expiresAt: Date.now() + this.options.planTtlMs,
       sourceSnapshotId, targetSnapshotId, sourceScope: source.scope, targetScope: target.scope,
+      comparison, sqlScript, exportSupported: !blockReason,
       status: blockReason ? 'blocked' : 'preview', blockReason,
       applySupported: false, applyBlockReason: APPLY_BLOCK_REASON,
       statements: statements.map((statement, i) => ({ ...statement, id: `stmt_${i + 1}`, status: 'preview', enabled: false })),
@@ -141,7 +112,8 @@ class SchemaMigrationService {
       status: plan.status, blockReason: plan.blockReason,
       applySupported: false, applyBlockReason: APPLY_BLOCK_REASON,
       sourceScope: projectScope(plan.sourceScope), targetScope: projectScope(plan.targetScope),
-      statements: plan.statements, summary: plan.summary
+      statements: plan.statements, summary: plan.summary,
+      comparison: plan.comparison, sqlScript: plan.sqlScript, exportSupported: plan.exportSupported === true
     });
   }
 

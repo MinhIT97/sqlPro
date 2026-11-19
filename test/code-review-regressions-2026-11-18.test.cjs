@@ -300,8 +300,9 @@ test('R06: DataSyncExecutor guards originalValues on DELETE and UPDATE', async (
       async useDatabase() {},
       async listColumns() { return [{ name: 'id', type: 'int', key: 'PRI' }, { name: 'value', type: 'varchar(20)', key: '' }]; },
       async raw(sql, params) {
+        if (sql === 'SHOW GRANTS') return { result: [{ grants: "GRANT SELECT, TRIGGER ON *.* TO 'fixture'@'%'" }] };
         if (sql.includes('SELECT ENGINE FROM')) return { result: [{ ENGINE: 'InnoDB' }] };
-        if (sql.includes('SELECT TRIGGER_NAME FROM')) return { result: [] };
+        if (sql.includes('SELECT TRIGGER_NAME FROM') || sql.includes('REFERENTIAL_CONSTRAINTS')) return { result: [] };
         queries.push({ sql, params });
         // Return 0 affected rows to simulate row was modified concurrently
         if (sql.startsWith('DELETE')) return { result: { affectedRows: 0 } };
@@ -349,8 +350,9 @@ test('R07: DataSyncExecutor handles lost COMMIT ACK with partialCommit=true and 
       async useDatabase() {},
       async listColumns() { return [{ name: 'id', type: 'int', key: 'PRI' }]; },
       async raw(sql) {
+        if (sql === 'SHOW GRANTS') return { result: [{ grants: "GRANT SELECT, TRIGGER ON *.* TO 'fixture'@'%'" }] };
         if (sql.includes('SELECT ENGINE FROM')) return { result: [{ ENGINE: 'InnoDB' }] };
-        if (sql.includes('SELECT TRIGGER_NAME FROM')) return { result: [] };
+        if (sql.includes('SELECT TRIGGER_NAME FROM') || sql.includes('REFERENTIAL_CONSTRAINTS')) return { result: [] };
           if (sql.startsWith('SELECT @@SESSION.foreign_key_checks')) return { result: [{ foreignKeys: 1, sqlMode: '', autocommit: 1 }] };
         if (sql === 'COMMIT') throw Object.assign(new Error('commit acknowledgement lost'), { code: 'ECONNRESET' });
         return { result: { affectedRows: 1 } };
@@ -430,15 +432,16 @@ test('R12: Production approval requires valid approvalToken and matching planDig
       if (approvalToken !== 'valid_token' || p.planDigest !== 'digest_prod') {
         throw Object.assign(new Error('Phê duyệt Production không khớp với kế hoạch.'), { code: 'PRODUCTION_APPROVAL_MISMATCH' });
       }
-      return { planToken: p.planToken, planDigest: p.planDigest };
+      return { planToken: p.planToken, planDigest: p.planDigest, targetProfileFingerprint: 'fp_prod', expiresAt: p.expiresAt };
     },
     createSession: () => ({
       async connect() {},
       async useDatabase() {},
       async listColumns() { return [{ name: 'id', type: 'int', key: 'PRI' }]; },
       async raw(sql) {
+        if (sql === 'SHOW GRANTS') return { result: [{ grants: "GRANT SELECT, TRIGGER ON *.* TO 'fixture'@'%'" }] };
         if (sql.includes('SELECT ENGINE FROM')) return { result: [{ ENGINE: 'InnoDB' }] };
-        if (sql.includes('SELECT TRIGGER_NAME FROM')) return { result: [] };
+        if (sql.includes('SELECT TRIGGER_NAME FROM') || sql.includes('REFERENTIAL_CONSTRAINTS')) return { result: [] };
         return { result: { affectedRows: 1 } };
       },
       async close() {}

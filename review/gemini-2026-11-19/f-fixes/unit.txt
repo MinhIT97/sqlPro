@@ -1,0 +1,70 @@
+TAP version 13
+# Subtest: F01/F02: Schema Diff UI captures Main snapshots and exports the Main plan, preserving nonunique indexes
+ok 1 - F01/F02: Schema Diff UI captures Main snapshots and exports the Main plan, preserving nonunique indexes
+  ---
+  duration_ms: 21.482002
+  type: 'test'
+  ...
+# Subtest: F01: failed snapshot prevents plan and stale dialog results cannot touch a replacement
+ok 2 - F01: failed snapshot prevents plan and stale dialog results cannot touch a replacement
+  ---
+  duration_ms: 4.942071
+  type: 'test'
+  ...
+# Subtest: F01/F02/F06: partial coverage, CHECK and MariaDB defaults block both preview and candidate without SQL
+ok 3 - F01/F02/F06: partial coverage, CHECK and MariaDB defaults block both preview and candidate without SQL
+  ---
+  duration_ms: 2.361355
+  type: 'test'
+  ...
+# Subtest: F03: formatter preserves settings by default, rejects override and keeps header names on one comment line
+ok 4 - F03: formatter preserves settings by default, rejects override and keeps header names on one comment line
+  ---
+  duration_ms: 0.628125
+  type: 'test'
+  ...
+# Subtest: F04: inbound FK metadata missing or present blocks before any DML
+ok 5 - F04: inbound FK metadata missing or present blocks before any DML
+  ---
+  duration_ms: 4.855731
+  type: 'test'
+  ...
+# Subtest: F04: a dependency observed after DML rolls back instead of committing cascades
+ok 6 - F04: a dependency observed after DML rolls back instead of committing cascades
+  ---
+  duration_ms: 1.586197
+  type: 'test'
+  ...
+# Subtest: F05: policy, credentials and generation drift between batches never write the next batch
+ok 7 - F05: policy, credentials and generation drift between batches never write the next batch
+  ---
+  duration_ms: 7.276987
+  type: 'test'
+  ...
+# Subtest: F05: policy drift during DML rolls back the pending batch before COMMIT
+ok 8 - F05: policy drift during DML rolls back the pending batch before COMMIT
+  ---
+  duration_ms: 1.260608
+  type: 'test'
+  ...
+# Subtest: F05: Production receipts require matching digest, fingerprint and live bounded expiry
+ok 9 - F05: Production receipts require matching digest, fingerprint and live bounded expiry
+  ---
+  duration_ms: 2.328458
+  type: 'test'
+  ...
+# Subtest: F04: metadata visibility requires direct global SELECT/TRIGGER and rejects partial or role-only grants
+ok 10 - F04: metadata visibility requires direct global SELECT/TRIGGER and rejects partial or role-only grants
+  ---
+  duration_ms: 1.648985
+  type: 'test'
+  ...
+1..10
+# tests 10
+# suites 0
+# pass 10
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 216.16314

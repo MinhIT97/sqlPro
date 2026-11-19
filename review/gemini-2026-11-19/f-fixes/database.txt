@@ -1,0 +1,276 @@
+TAP version 13
+# Subtest: D01-D04/D06 MYSQL: schema fidelity and exact conflict guards
+    # Subtest: ENUM/SET retain literal case, case-only tables both migrate and safe comments round-trip
+    ok 1 - ENUM/SET retain literal case, case-only tables both migrate and safe comments round-trip
+      ---
+      duration_ms: 196.091999
+      type: 'test'
+      ...
+    # Subtest: CHECK inventory blocks before DDL; unsafe comments are rejected before execution
+    ok 2 - CHECK inventory blocks before DDL; unsafe comments are rejected before execution
+      ---
+      duration_ms: 123.63393
+      type: 'test'
+      ...
+    # Subtest: UPDATE/DELETE reject case/accent/trailing-space concurrent changes and preserve exact target bytes
+    ok 3 - UPDATE/DELETE reject case/accent/trailing-space concurrent changes and preserve exact target bytes
+      ---
+      duration_ms: 156.177139
+      type: 'test'
+      ...
+    1..3
+ok 1 - D01-D04/D06 MYSQL: schema fidelity and exact conflict guards
+  ---
+  duration_ms: 524.900337
+  type: 'test'
+  ...
+# Subtest: D01-D04/D06 MARIA: schema fidelity and exact conflict guards
+    # Subtest: ENUM/SET retain literal case, case-only tables both migrate and safe comments round-trip
+    ok 1 - ENUM/SET retain literal case, case-only tables both migrate and safe comments round-trip
+      ---
+      duration_ms: 196.623582
+      type: 'test'
+      ...
+    # Subtest: CHECK inventory blocks before DDL; unsafe comments are rejected before execution
+    ok 2 - CHECK inventory blocks before DDL; unsafe comments are rejected before execution
+      ---
+      duration_ms: 192.399323
+      type: 'test'
+      ...
+    # Subtest: UPDATE/DELETE reject case/accent/trailing-space concurrent changes and preserve exact target bytes
+    ok 3 - UPDATE/DELETE reject case/accent/trailing-space concurrent changes and preserve exact target bytes
+      ---
+      duration_ms: 90.049199
+      type: 'test'
+      ...
+    1..3
+ok 2 - D01-D04/D06 MARIA: schema fidelity and exact conflict guards
+  ---
+  duration_ms: 498.531353
+  type: 'test'
+  ...
+# Subtest: E01-E03 MYSQL: schema locks, exact writes and column order
+    # Subtest: PK drift before the first lock blocks UPDATE and DELETE without changing duplicates
+    ok 1 - PK drift before the first lock blocks UPDATE and DELETE without changing duplicates
+      ---
+      duration_ms: 81.070137
+      type: 'test'
+      ...
+    # Subtest: PK drift between batches preserves the first commit and never updates the second batch
+    ok 2 - PK drift between batches preserves the first commit and never updates the second batch
+      ---
+      duration_ms: 68.823694
+      type: 'test'
+      ...
+    # Subtest: ENUM and SET literal drift blocks INSERT before DML
+    ok 3 - ENUM and SET literal drift blocks INSERT before DML
+      ---
+      duration_ms: 41.329728
+      type: 'test'
+      ...
+    # Subtest: non-append addition is blocked; multiple append additions preserve verified order
+    ok 4 - non-append addition is blocked; multiple append additions preserve verified order
+      ---
+      duration_ms: 198.569123
+      type: 'test'
+      ...
+    1..4
+ok 3 - E01-E03 MYSQL: schema locks, exact writes and column order
+  ---
+  duration_ms: 437.73203
+  type: 'test'
+  ...
+# Subtest: E01-E03 MARIA: schema locks, exact writes and column order
+    # Subtest: PK drift before the first lock blocks UPDATE and DELETE without changing duplicates
+    ok 1 - PK drift before the first lock blocks UPDATE and DELETE without changing duplicates
+      ---
+      duration_ms: 86.504527
+      type: 'test'
+      ...
+    # Subtest: PK drift between batches preserves the first commit and never updates the second batch
+    ok 2 - PK drift between batches preserves the first commit and never updates the second batch
+      ---
+      duration_ms: 37.467719
+      type: 'test'
+      ...
+    # Subtest: ENUM and SET literal drift blocks INSERT before DML
+    ok 3 - ENUM and SET literal drift blocks INSERT before DML
+      ---
+      duration_ms: 18.660762
+      type: 'test'
+      ...
+    # Subtest: non-append addition is blocked; multiple append additions preserve verified order
+    ok 4 - non-append addition is blocked; multiple append additions preserve verified order
+      ---
+      duration_ms: 200.927796
+      type: 'test'
+      ...
+    1..4
+ok 4 - E01-E03 MARIA: schema locks, exact writes and column order
+  ---
+  duration_ms: 377.395176
+  type: 'test'
+  ...
+# Subtest: F01-F06 MYSQL: UI Main preview and sync dependency/policy safety
+    # Subtest: UI uses real Main collector/service, preserves nonunique indexes and settings on success or error
+    ok 1 - UI uses real Main collector/service, preserves nonunique indexes and settings on success or error
+      ---
+      duration_ms: 73.980667
+      type: 'test'
+      ...
+    # Subtest: unknown source columns blocks UI before plan and never produces destructive SQL
+    ok 2 - unknown source columns blocks UI before plan and never produces destructive SQL
+      ---
+      duration_ms: 11.242892
+      type: 'test'
+      ...
+    # Subtest: CHECK and MariaDB default unsupported gates agree across UI preview and candidate
+    ok 3 - CHECK and MariaDB default unsupported gates agree across UI preview and candidate
+      ---
+      duration_ms: 97.165336
+      type: 'test'
+      ...
+    # Subtest: CASCADE/SET NULL inbound FKs block parent DELETE and PK UPDATE, preserving outside rows
+    ok 4 - CASCADE/SET NULL inbound FKs block parent DELETE and PK UPDATE, preserving outside rows
+      ---
+      duration_ms: 129.890038
+      type: 'test'
+      ...
+    # Subtest: revoked profile stops the second batch and preserves the first acknowledged commit
+    ok 5 - revoked profile stops the second batch and preserves the first acknowledged commit
+      ---
+      duration_ms: 41.851162
+      type: 'test'
+      ...
+    # Subtest: FK added immediately before DELETE is either locked out or causes rollback before commit
+    ok 6 - FK added immediately before DELETE is either locked out or causes rollback before commit
+      ---
+      duration_ms: 1084.72572
+      type: 'test'
+      ...
+    # Subtest: limited account cannot infer no dependencies from hidden FK metadata
+    ok 7 - limited account cannot infer no dependencies from hidden FK metadata
+      ---
+      duration_ms: 39.954593
+      type: 'test'
+      ...
+    1..7
+ok 5 - F01-F06 MYSQL: UI Main preview and sync dependency/policy safety
+  ---
+  duration_ms: 1530.149877
+  type: 'test'
+  ...
+# Subtest: F01-F06 MARIA: UI Main preview and sync dependency/policy safety
+    # Subtest: UI uses real Main collector/service, preserves nonunique indexes and settings on success or error
+    ok 1 - UI uses real Main collector/service, preserves nonunique indexes and settings on success or error
+      ---
+      duration_ms: 41.70156
+      type: 'test'
+      ...
+    # Subtest: unknown source columns blocks UI before plan and never produces destructive SQL
+    ok 2 - unknown source columns blocks UI before plan and never produces destructive SQL
+      ---
+      duration_ms: 12.694283
+      type: 'test'
+      ...
+    # Subtest: CHECK and MariaDB default unsupported gates agree across UI preview and candidate
+    ok 3 - CHECK and MariaDB default unsupported gates agree across UI preview and candidate
+      ---
+      duration_ms: 87.289952
+      type: 'test'
+      ...
+    # Subtest: CASCADE/SET NULL inbound FKs block parent DELETE and PK UPDATE, preserving outside rows
+    ok 4 - CASCADE/SET NULL inbound FKs block parent DELETE and PK UPDATE, preserving outside rows
+      ---
+      duration_ms: 105.123458
+      type: 'test'
+      ...
+    # Subtest: revoked profile stops the second batch and preserves the first acknowledged commit
+    ok 5 - revoked profile stops the second batch and preserves the first acknowledged commit
+      ---
+      duration_ms: 41.595717
+      type: 'test'
+      ...
+    # Subtest: FK added immediately before DELETE is either locked out or causes rollback before commit
+    ok 6 - FK added immediately before DELETE is either locked out or causes rollback before commit
+      ---
+      duration_ms: 43.192097
+      type: 'test'
+      ...
+    # Subtest: limited account cannot infer no dependencies from hidden FK metadata
+    ok 7 - limited account cannot infer no dependencies from hidden FK metadata
+      ---
+      duration_ms: 12.667439
+      type: 'test'
+      ...
+    1..7
+ok 6 - F01-F06 MARIA: UI Main preview and sync dependency/policy safety
+  ---
+  duration_ms: 356.899325
+  type: 'test'
+  ...
+# Subtest: N01/N02/N05 real MYSQL: default fidelity, collation admission and conditional JSON
+    # Subtest: CREATE_TABLE and ADD_COLUMN preserve defaults with sql_mode=(empty)
+    ok 1 - CREATE_TABLE and ADD_COLUMN preserve defaults with sql_mode=(empty)
+      ---
+      duration_ms: 264.483526
+      type: 'test'
+      ...
+    # Subtest: CREATE_TABLE and ADD_COLUMN preserve defaults with sql_mode=NO_BACKSLASH_ESCAPES
+    ok 2 - CREATE_TABLE and ADD_COLUMN preserve defaults with sql_mode=NO_BACKSLASH_ESCAPES
+      ---
+      duration_ms: 243.933718
+      type: 'test'
+      ...
+    # Subtest: PAD SPACE is blocked; verified utf8mb4_0900_bin keeps trailing-space keys distinct across chunks
+    ok 3 - PAD SPACE is blocked; verified utf8mb4_0900_bin keeps trailing-space keys distinct across chunks
+      ---
+      duration_ms: 74.46846
+      type: 'test'
+      ...
+    # Subtest: N07 internal executor: metadata lock blocks concurrent engine change, MyISAM/triggers block writes
+    ok 4 - N07 internal executor: metadata lock blocks concurrent engine change, MyISAM/triggers block writes
+      ---
+      duration_ms: 1093.333595
+      type: 'test'
+      ...
+    1..4
+ok 7 - N01/N02/N05 real MYSQL: default fidelity, collation admission and conditional JSON
+  ---
+  duration_ms: 1741.888711
+  type: 'test'
+  ...
+# Subtest: N01/N02/N05 real MARIA: default fidelity, collation admission and conditional JSON
+    # Subtest: JSON alias is recognized but conditional LONGTEXT remains text
+    ok 1 - JSON alias is recognized but conditional LONGTEXT remains text
+      ---
+      duration_ms: 17.793508
+      type: 'test'
+      ...
+    # Subtest: MariaDB expression defaults remain blocked until dialect contract is implemented
+    ok 2 - MariaDB expression defaults remain blocked until dialect contract is implemented
+      ---
+      duration_ms: 59.342174
+      type: 'test'
+      ...
+    # Subtest: N07 internal executor: metadata lock blocks concurrent engine change, MyISAM/triggers block writes
+    ok 3 - N07 internal executor: metadata lock blocks concurrent engine change, MyISAM/triggers block writes
+      ---
+      duration_ms: 1079.284583
+      type: 'test'
+      ...
+    1..3
+ok 8 - N01/N02/N05 real MARIA: default fidelity, collation admission and conditional JSON
+  ---
+  duration_ms: 1167.243971
+  type: 'test'
+  ...
+1..8
+# tests 43
+# suites 0
+# pass 43
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3107.6861

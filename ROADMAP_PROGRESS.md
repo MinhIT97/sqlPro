@@ -1,5 +1,9 @@
 # Tiến độ roadmap SqlPro
 
+> **Mốc mới nhất 19/11:** [Đã sửa F01–F06 và giới hạn](CODE_REVIEW_FEATURES_2026_11_19_FIXES.md). Schema Diff UI đã dùng Main snapshot/plan; script giữ settings; Sync chặn inbound FK/metadata thiếu proof và đối chiếu lại quyền/context. Node **1.263 pass/0 fail/24 skip**, DB **43/43**, renderer **105/105**, website **14/14**, server **17/17**. Public Apply vẫn khóa; các dòng F01–F06 còn mở phía dưới giữ lịch sử trước sửa.
+
+> **Review mới nhất 19/11:** [Rà tính năng và bugs tại 60cdb20](CODE_REVIEW_FEATURES_2026_11_19.md): còn **F01–F06 (5 P1/1 P2)** đã tái hiện, chưa sửa runtime. Schema Diff UI chưa dùng Main collector/service; public Apply khóa không bảo vệ toàn bộ SQL xuất/mở Editor. Các mốc sửa lỗi phía dưới giữ lịch sử; không tự tick roadmap.
+
 ## 19/11 — Sửa E01–E04 và rà lại ownership
 
 - [Bản sửa E01–E04 và review tiếp](CODE_REVIEW_GEMINI_2026_11_19_R3_FIXES.md): schema/PK proof trong metadata lock từng batch, exact row count, giữ ENUM/SET literals, chặn non-append/reorder và hậu kiểm order, VERSION/TLS/raw callback theo owner/generation.

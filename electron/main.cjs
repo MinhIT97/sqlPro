@@ -230,6 +230,7 @@ class OperationApprovalManager {
       planToken: plan.planToken,
       planDigest: plan.planDigest,
       authorizedAt: this.now(),
+      targetProfileFingerprint: entry.targetProfileFingerprint,
       expiresAt: entry.expiresAt
     });
   }
@@ -270,6 +271,7 @@ const { DataSyncExecutor } = require('./data-sync-executor.cjs');
 
 const dataSyncPlanService = new DataSyncPlanService({ store, dataDiffService });
 const dataSyncExecutor = new DataSyncExecutor({
+  getGeneration: () => backupContextGeneration,
   consumePlan: (token) => dataSyncPlanService.consumePlan(token),
   getProfileWithSecrets: (id) => store.getWithSecrets(id),
   fingerprintProfile: (p) => productionProfileFingerprint(p),

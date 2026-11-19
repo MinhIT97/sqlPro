@@ -1,0 +1,201 @@
+TAP version 13
+# Subtest: F01/F02: Schema Diff UI captures Main snapshots and exports the Main plan, preserving nonunique indexes
+not ok 1 - F01/F02: Schema Diff UI captures Main snapshots and exports the Main plan, preserving nonunique indexes
+  ---
+  duration_ms: 18.104558
+  type: 'test'
+  location: '/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:46:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+
+    + []
+    - [
+    -   'snapshot',
+    -   'snapshot',
+    -   'plan'
+    - ]
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    0: 'snapshot'
+    1: 'snapshot'
+    2: 'plan'
+  actual:
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:49:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: F01: failed snapshot prevents plan and stale dialog results cannot touch a replacement
+not ok 2 - F01: failed snapshot prevents plan and stale dialog results cannot touch a replacement
+  ---
+  duration_ms: 7.872553
+  type: 'test'
+  location: '/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:56:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The expression evaluated to a falsy value:
+
+      assert.ok(failed.elements.get('#diffTabContent').innerHTML.includes('Metadata unavailable'))
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:60:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: F01/F02/F06: partial coverage, CHECK and MariaDB defaults block both preview and candidate without SQL
+not ok 3 - F01/F02/F06: partial coverage, CHECK and MariaDB defaults block both preview and candidate without SQL
+  ---
+  duration_ms: 4.904117
+  type: 'test'
+  location: '/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:69:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    undefined !== ''
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: ''
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:80:51)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: F03: formatter preserves settings by default, rejects override and keeps header names on one comment line
+not ok 4 - F03: formatter preserves settings by default, rejects override and keeps header names on one comment line
+  ---
+  duration_ms: 0.545937
+  type: 'test'
+  location: '/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:84:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    true !== false
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: false
+  actual: true
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:87:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: F04: inbound FK metadata missing or present blocks before any DML
+not ok 5 - F04: inbound FK metadata missing or present blocks before any DML
+  ---
+  duration_ms: 1.726105
+  type: 'test'
+  location: '/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:102:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    code: 'SYNC_FOREIGN_KEY_DEPENDENCY_UNSUPPORTED'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:112:5)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: F04: a dependency observed after DML rolls back instead of committing cascades
+not ok 6 - F04: a dependency observed after DML rolls back instead of committing cascades
+  ---
+  duration_ms: 0.501976
+  type: 'test'
+  location: '/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:117:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    code: 'SYNC_FOREIGN_KEY_DEPENDENCY_UNSUPPORTED'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:121:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: F05: policy, credentials and generation drift between batches never write the next batch
+not ok 7 - F05: policy, credentials and generation drift between batches never write the next batch
+  ---
+  duration_ms: 0.681834
+  type: 'test'
+  location: '/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:126:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  stack: |-
+    async TestContext.<anonymous> (/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:129:5)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: F05: policy drift during DML rolls back the pending batch before COMMIT
+not ok 8 - F05: policy drift during DML rolls back the pending batch before COMMIT
+  ---
+  duration_ms: 0.436201
+  type: 'test'
+  location: '/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:143:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    code: 'CONNECTION_READ_ONLY'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:150:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: F05: Production receipts require matching digest, fingerprint and live bounded expiry
+not ok 9 - F05: Production receipts require matching digest, fingerprint and live bounded expiry
+  ---
+  duration_ms: 0.902243
+  type: 'test'
+  location: '/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:154:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    code: 'PRODUCTION_APPROVAL_REQUIRED'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (/tmp/sqlpro-f-before-fi4rc_6z/test/review-f-regressions.test.cjs:170:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..9
+# tests 9
+# suites 0
+# pass 0
+# fail 9
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 193.609344

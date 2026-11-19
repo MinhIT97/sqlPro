@@ -99,8 +99,10 @@ test('N07: unknown/malformed engine or trigger metadata stops all DML and rolls 
       connect: async () => {}, useDatabase: async () => {}, close: async () => {}, listColumns: async () => columns,
       raw: async sql => {
         calls.push(sql);
+        if (sql === 'SHOW GRANTS') return { result: [{ grants: "GRANT SELECT, TRIGGER ON *.* TO 'fixture'@'%'" }] };
         if (sql.includes('SELECT ENGINE')) return { result: variant === 'empty-engine' ? [] : variant === 'malformed-engine' ? {} : variant === 'duplicate-engine' ? [{ ENGINE: 'InnoDB' }, { ENGINE: 'InnoDB' }] : [{ ENGINE: 'InnoDB' }] };
         if (sql.includes('SELECT TRIGGER_NAME')) return { result: variant === 'malformed-triggers' ? {} : [] };
+        if (sql.includes('REFERENTIAL_CONSTRAINTS')) return { result: [] };
         return { result: { affectedRows: 1 } };
       }
     };

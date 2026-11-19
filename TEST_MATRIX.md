@@ -1,5 +1,9 @@
 # Ma trận kiểm thử SqlPro — cập nhật 19/11/2026
 
+> **Mốc mới nhất 19/11:** [Đã sửa F01–F06 và giới hạn](CODE_REVIEW_FEATURES_2026_11_19_FIXES.md). Schema Diff UI đã dùng Main snapshot/plan; script giữ settings; Sync chặn inbound FK/metadata thiếu proof và đối chiếu lại quyền/context. Node **1.263 pass/0 fail/24 skip**, DB **43/43**, renderer **105/105**, website **14/14**, server **17/17**. Public Apply vẫn khóa; các dòng F01–F06 còn mở phía dưới giữ lịch sử trước sửa.
+
+> **Review mới nhất 19/11:** [Rà tính năng và bugs tại 60cdb20](CODE_REVIEW_FEATURES_2026_11_19.md): còn **F01–F06 (5 P1/1 P2)** đã tái hiện, chưa sửa runtime. Schema Diff UI chưa dùng Main collector/service; public Apply khóa không bảo vệ toàn bộ SQL xuất/mở Editor. Các mốc sửa lỗi phía dưới giữ lịch sử; không tự tick roadmap.
+
 ## Mốc hiện tại — sửa E01–E04
 
 [Bản sửa E01–E04 và review tiếp](CODE_REVIEW_GEMINI_2026_11_19_R3_FIXES.md): Node **1.275 tổng / 1.253 pass / 0 fail / 22 opt-in skip**; unit E mới **9/9** (cùng test baseline a564507: 9 fail); DB N/D/E trên MySQL 8.4.13/MariaDB 11.4.13 **27/27, 0 skip**. Renderer **103/103**, website **14/14**, server syntax đạt và tests **17/17**. Hai root DB mới vẫn opt-in trong Node suite; không cộng trùng số liệu. Chưa full installed/release matrix, public Apply tiếp tục khóa. [Evidence](review/gemini-2026-11-19/e-fixes/). Các mốc dưới đây giữ lịch sử.

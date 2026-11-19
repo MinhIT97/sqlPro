@@ -67,8 +67,9 @@ test('Main Data Sync: end-to-end plan creation and guarded execution with optimi
       ];
     },
     async raw(sql, params) {
+      if (sql === 'SHOW GRANTS') return { result: [{ grants: "GRANT SELECT, TRIGGER ON *.* TO 'fixture'@'%'" }] };
       if (sql.includes('SELECT ENGINE FROM')) return { result: [{ ENGINE: 'InnoDB' }] };
-      if (sql.includes('SELECT TRIGGER_NAME FROM')) return { result: [] };
+      if (sql.includes('SELECT TRIGGER_NAME FROM') || sql.includes('REFERENTIAL_CONSTRAINTS')) return { result: [] };
       executedSql.push({ sql, params });
       return { result: { affectedRows: 1 } };
     },
@@ -138,6 +139,7 @@ test('DataSyncExecutor rejects non-InnoDB table engines (e.g. MyISAM) to prevent
       return [{ name: 'id', type: 'int', key: 'PRI' }, { name: 'val', type: 'varchar(20)', key: '' }];
     },
     async raw(sql) {
+      if (sql === 'SHOW GRANTS') return { result: [{ grants: "GRANT SELECT, TRIGGER ON *.* TO 'fixture'@'%'" }] };
       if (sql.includes('SELECT ENGINE FROM information_schema.TABLES')) {
         return { result: [{ ENGINE: 'MyISAM' }] };
       }
@@ -192,6 +194,7 @@ test('DataSyncExecutor rejects tables with triggers to prevent unverified side-e
       return [{ name: 'id', type: 'int', key: 'PRI' }, { name: 'val', type: 'varchar(20)', key: '' }];
     },
     async raw(sql) {
+      if (sql === 'SHOW GRANTS') return { result: [{ grants: "GRANT SELECT, TRIGGER ON *.* TO 'fixture'@'%'" }] };
       if (sql.includes('SELECT ENGINE FROM information_schema.TABLES')) {
         return { result: [{ ENGINE: 'InnoDB' }] };
       }

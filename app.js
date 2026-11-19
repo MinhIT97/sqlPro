@@ -3190,6 +3190,10 @@ async function showSchemaDiffModal() {
     </div>
   `);
 
+  const openedRevision = modalRevision, dialog = $('#modal');
+  const current = () => modalRevision === openedRevision && $('#modal') === dialog && dialog.open
+    && app.connection?.id === currentProfileId && (app.database || '') === currentDb;
+  let revision = 0, isComparing = false, migrationPlan = null;
   let currentTab = 'config';
   let diffResult = null;
   let migrationStatements = [];
@@ -3201,11 +3205,8 @@ async function showSchemaDiffModal() {
   let targetProfileId = currentProfileId;
   let targetDb = '';
 
-  let allowDropTables = false;
-  let allowDropColumns = false;
   let ignoreComments = false;
   let ignoreCollation = false;
-  let wrapForeignKeys = true;
 
   let sourceDatabases = [];
   let targetDatabases = [];
@@ -3223,9 +3224,12 @@ async function showSchemaDiffModal() {
     const container = $('#diffTabContent');
     if (!container) return;
 
+    const version = revision;
     sourceDatabases = await loadDatabasesFor(sourceProfileId);
+    if (!current() || version !== revision) return;
     targetDatabases = sourceProfileId === targetProfileId ? sourceDatabases : await loadDatabasesFor(targetProfileId);
 
+    if (!current() || version !== revision) return;
     if (!targetDb && targetDatabases.length > 1) {
       targetDb = targetDatabases.find((d) => d !== sourceDb) || targetDatabases[0] || '';
     } else if (!targetDb && targetDatabases.length === 1) {
@@ -3235,7 +3239,13 @@ async function showSchemaDiffModal() {
     renderConfigView();
   }
 
+  function invalidateComparison() {
+    ++revision; isComparing = false; migrationPlan = null; diffResult = null; migrationStatements = [];
+    document.querySelectorAll('[data-diff-tab]').forEach(btn => { if (btn.dataset.diffTab !== 'config') btn.disabled = true; });
+  }
+
   function renderConfigView() {
+    if (!current()) return;
     const container = $('#diffTabContent');
     if (!container) return;
 
@@ -3279,14 +3289,7 @@ async function showSchemaDiffModal() {
         <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:14px;">
           <div style="font-weight:600; font-size:0.9em; margin-bottom:10px;">⚙️ Tùy chọn so sánh & an toàn:</div>
           <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; font-size:0.88em;">
-            <label style="display:flex; align-items:center; gap:6px;">
-              <input type="checkbox" id="diffAllowDropTables" ${allowDropTables ? 'checked' : ''}>
-              <span>Cho phép DROP TABLE (mặc định tắt vì an toàn)</span>
-            </label>
-            <label style="display:flex; align-items:center; gap:6px;">
-              <input type="checkbox" id="diffAllowDropColumns" ${allowDropColumns ? 'checked' : ''}>
-              <span>Cho phép DROP COLUMN (mặc định tắt)</span>
-            </label>
+            <p style="grid-column:1/-1; margin:0;">Xuất SQL chỉ hỗ trợ các thay đổi đã kiểm chứng. DROP và thay đổi chưa hỗ trợ sẽ bị chặn.</p>
             <label style="display:flex; align-items:center; gap:6px;">
               <input type="checkbox" id="diffIgnoreComments" ${ignoreComments ? 'checked' : ''}>
               <span>Bỏ qua khác biệt ghi chú (Comments)</span>
@@ -3307,28 +3310,44 @@ async function showSchemaDiffModal() {
     `;
 
     $('#diffSourceProfile')?.addEventListener('change', async (e) => {
+      if (!current()) return;
+      invalidateComparison();
       sourceProfileId = e.target.value;
-      sourceDatabases = await loadDatabasesFor(sourceProfileId);
-      sourceDb = sourceDatabases[0] || '';
+      const version = revision, profileId = sourceProfileId;
+      const databases = await loadDatabasesFor(profileId);
+      if (!current() || version !== revision || sourceProfileId !== profileId) return;
+      sourceDatabases = databases;
+      sourceDb = databases[0] || '';
       renderConfigView();
     });
 
     $('#diffSourceDb')?.addEventListener('change', (e) => {
+      if (!current()) return;
+      invalidateComparison();
       sourceDb = e.target.value;
     });
 
     $('#diffTargetProfile')?.addEventListener('change', async (e) => {
+      if (!current()) return;
+      invalidateComparison();
       targetProfileId = e.target.value;
-      targetDatabases = await loadDatabasesFor(targetProfileId);
-      targetDb = targetDatabases[0] || '';
+      const version = revision, profileId = targetProfileId;
+      const databases = await loadDatabasesFor(profileId);
+      if (!current() || version !== revision || targetProfileId !== profileId) return;
+      targetDatabases = databases;
+      targetDb = databases[0] || '';
       renderConfigView();
     });
 
     $('#diffTargetDb')?.addEventListener('change', (e) => {
+      if (!current()) return;
+      invalidateComparison();
       targetDb = e.target.value;
     });
 
     $('#diffSwapBtn')?.addEventListener('click', () => {
+      if (!current()) return;
+      invalidateComparison();
       const tempP = sourceProfileId;
       sourceProfileId = targetProfileId;
       targetProfileId = tempP;
@@ -3344,98 +3363,22 @@ async function showSchemaDiffModal() {
       renderConfigView();
     });
 
-    $('#diffAllowDropTables')?.addEventListener('change', (e) => {
-      allowDropTables = e.target.checked;
-    });
-    $('#diffAllowDropColumns')?.addEventListener('change', (e) => {
-      allowDropColumns = e.target.checked;
-    });
     $('#diffIgnoreComments')?.addEventListener('change', (e) => {
+      if (!current()) return;
+      invalidateComparison();
       ignoreComments = e.target.checked;
     });
     $('#diffIgnoreCollation')?.addEventListener('change', (e) => {
+      if (!current()) return;
+      invalidateComparison();
       ignoreCollation = e.target.checked;
     });
 
     $('#diffRunCompareBtn')?.addEventListener('click', executeCompare);
   }
 
-  async function captureFullSchema(database, profileId) {
-    const rawTables = await call(desktop.db.tables(database, profileId));
-    const fullTables = [];
-
-    for (const t of rawTables) {
-      if (t.type === 'view') continue;
-      try {
-        const [cols, idxs, rels] = await Promise.all([
-          call(desktop.db.columns(database, t.name, profileId)),
-          call(desktop.db.indexes(database, t.name, profileId)),
-          call(desktop.db.relations(database, t.name, profileId))
-        ]);
-
-        const outbound = rels?.outbound || [];
-        const fkMap = new Map();
-        for (const r of outbound) {
-          if (!fkMap.has(r.name)) {
-            fkMap.set(r.name, {
-              name: r.name,
-              columns: [],
-              referencedTable: r.refTable,
-              referencedColumns: [],
-              onDelete: 'RESTRICT',
-              onUpdate: 'RESTRICT'
-            });
-          }
-          const fk = fkMap.get(r.name);
-          fk.columns.push(r.columnName);
-          fk.referencedColumns.push(r.refColumn);
-        }
-
-        fullTables.push({
-          name: t.name,
-          engine: t.engine || 'InnoDB',
-          comment: t.comment || '',
-          columns: (cols || []).map((c) => ({
-            name: c.name,
-            type: c.type,
-            nullable: c.nullable,
-            default: c.defaultValue,
-            extra: c.extra,
-            comment: c.comment
-          })),
-          indexes: (idxs || []).map((i) => ({
-            name: i.name,
-            isPrimary: i.name === 'PRIMARY',
-            isUnique: !i.nonUnique,
-            type: i.type,
-            columns: (i.columns || []).map((c) => ({ name: typeof c === 'string' ? c : c.name }))
-          })),
-          foreignKeys: [...fkMap.values()]
-        });
-      } catch (err) {
-        console.warn(`Lỗi khi đọc schema của bảng ${t.name}:`, err);
-      }
-    }
-
-    let routinesList = [];
-    try {
-      routinesList = await call(desktop.db.routines(database, profileId));
-    } catch {
-      routinesList = [];
-    }
-
-    return {
-      database,
-      engine: 'MySQL',
-      tables: fullTables,
-      views: rawTables.filter((t) => t.type === 'view').map((v) => ({ name: v.name, definition: '' })),
-      routines: (routinesList || []).map((r) => ({ name: r.name, type: r.type, sql: '' })),
-      triggers: [],
-      events: []
-    };
-  }
-
   async function executeCompare() {
+    if (!current() || isComparing) return;
     if (!sourceDb || !targetDb) {
       toast('Vui lòng chọn cả CSDL Nguồn và CSDL Đích.', 'error');
       return;
@@ -3445,6 +3388,10 @@ async function showSchemaDiffModal() {
       return;
     }
 
+    invalidateComparison();
+    const version = revision, scope = { sourceProfileId, sourceDb, targetProfileId, targetDb };
+    const valid = () => current() && revision === version;
+    isComparing = true;
     const container = $('#diffTabContent');
     container.innerHTML = `
       <div class="processlist-loading">
@@ -3454,35 +3401,45 @@ async function showSchemaDiffModal() {
     `;
 
     try {
-      sourceSnapshot = await captureFullSchema(sourceDb, sourceProfileId);
-      targetSnapshot = await captureFullSchema(targetDb, targetProfileId);
+      sourceSnapshot = await call(desktop.db.schemaSnapshot({ profileId: scope.sourceProfileId, database: scope.sourceDb }));
+      if (!valid()) return;
+      if (sourceSnapshot.coverage !== 'complete' || !sourceSnapshot.snapshotId) throw new Error('Metadata nguồn chưa đầy đủ; không xuất SQL.');
+      targetSnapshot = await call(desktop.db.schemaSnapshot({ profileId: scope.targetProfileId, database: scope.targetDb }));
+      if (!valid()) return;
+      if (targetSnapshot.coverage !== 'complete' || !targetSnapshot.snapshotId) throw new Error('Metadata đích chưa đầy đủ; không xuất SQL.');
+      const plan = await call(desktop.db.createMigrationPlan({ sourceSnapshotId: sourceSnapshot.snapshotId,
+        targetSnapshotId: targetSnapshot.snapshotId, options: { ignoreComments, ignoreCollation } }));
+      if (!valid()) return;
+      if (plan.status !== 'preview' || !plan.exportSupported || !plan.comparison || typeof plan.sqlScript !== 'string') {
+        const reasons = {
+          CHECK_CONSTRAINT_REVIEW_REQUIRED: 'Chưa hỗ trợ sinh SQL bảo toàn ràng buộc CHECK.',
+          MARIADB_DEFAULT_REVIEW_REQUIRED: 'Chưa hỗ trợ sinh SQL bảo toàn DEFAULT này trên MariaDB.',
+          FOREIGN_KEY_DEPENDENCY_REVIEW_REQUIRED: 'Cần kiểm chứng đầy đủ phụ thuộc khóa ngoại trước khi xuất SQL.',
+          COLUMN_ORDER_REVIEW_REQUIRED: 'Chưa hỗ trợ thay đổi vị trí cột hoặc thêm cột vào giữa bảng.',
+          DESTRUCTIVE_DDL_BLOCKED: 'Chưa hỗ trợ xuất SQL xóa bảng, cột hoặc chỉ mục trong luồng này.'
+        };
+        throw new Error(reasons[plan.blockReason] || `Không xuất SQL cho schema chưa được hỗ trợ: ${plan.blockReason || 'MIGRATION_PLAN_BLOCKED'}`);
+      }
+      migrationPlan = plan;
+      diffResult = plan.comparison;
+      migrationStatements = plan.statements;
 
-      const options = {
-        ignoreComments,
-        ignoreCollation,
-        ignoreAutoIncrement: true,
-        ignoreEngine: false
-      };
-
-      diffResult = window.SchemaDiff.compareSchemas(sourceSnapshot, targetSnapshot, options);
-      migrationStatements = window.SchemaDiff.generateMigrationSql(diffResult, {
-        allowDropTables,
-        allowDropColumns
-      });
-
-      document.querySelectorAll('.diff-tab-btn').forEach((btn) => {
+      document.querySelectorAll('[data-diff-tab]').forEach((btn) => {
         btn.disabled = false;
       });
 
       switchTab('summary');
     } catch (err) {
+      if (!valid()) return;
+      migrationPlan = null; diffResult = null; migrationStatements = [];
       container.innerHTML = `<div class="processlist-error">Lỗi khi so sánh schema: ${esc(err.message)}</div>`;
-    }
+    } finally { if (valid()) isComparing = false; }
   }
 
   function switchTab(tabName) {
+    if (!current()) return;
     currentTab = tabName;
-    document.querySelectorAll('.diff-tab-btn').forEach((btn) => {
+    document.querySelectorAll('[data-diff-tab]').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.diffTab === tabName);
     });
 
@@ -3628,15 +3585,18 @@ async function showSchemaDiffModal() {
 
   function renderMigrationTab() {
     const container = $('#diffTabContent');
-    if (!container || !diffResult) return;
-    const targetIsReadOnly = connectionIsReadOnly(targetProfileId);
+    if (!current() || !container || !diffResult || !migrationPlan?.exportSupported) return;
 
+    const version = revision, plan = migrationPlan;
+    const valid = () => current() && revision === version && migrationPlan === plan && plan.exportSupported
+      && Date.parse(plan.expiresAt) > Date.now();
+    if (!valid()) {
+      container.innerHTML = '<div class="processlist-error">Kết quả so sánh đã hết hạn. Hãy so sánh lại.</div>';
+      return;
+    }
     function getFormattedScript() {
-      return window.SchemaDiff.formatMigrationScript(migrationStatements, {
-        sourceName: `${sourceDb} (${sourceProfileId})`,
-        targetName: `${targetDb} (${targetProfileId})`,
-        wrapForeignKeys
-      });
+      if (!valid()) throw new Error('Kết quả so sánh đã thay đổi hoặc hết hạn. Hãy so sánh lại.');
+      return plan.sqlScript;
     }
 
     container.innerHTML = `
@@ -3644,10 +3604,9 @@ async function showSchemaDiffModal() {
         <div class="diff-options-bar">
           <div style="display:flex; align-items:center; gap:14px;">
             <label style="display:flex; align-items:center; gap:5px; font-weight:500;">
-              <input type="checkbox" id="diffSelectAllStmts" checked>
-              <span>Chọn tất cả (${migrationStatements.length} lệnh)</span>
+              <span>${migrationStatements.length} lệnh SQL để xem xét</span>
             </label>
-            <span style="font-size:0.85em; color:#64748b;">🔒 Ràng buộc khóa ngoại luôn được bảo vệ</span>
+            <span style="font-size:0.85em; color:#64748b;">🔒 Giữ nguyên thiết lập kiểm tra ràng buộc của phiên</span>
           </div>
           <div style="display:flex; gap:6px;">
             <button type="button" class="secondary" id="diffCopySqlBtn">📋 Sao chép</button>
@@ -3670,15 +3629,18 @@ async function showSchemaDiffModal() {
     `;
 
     $('#diffCopySqlBtn')?.addEventListener('click', async () => {
+      if (!valid()) return;
       try {
         await writeClipboardText(getFormattedScript());
+        if (!valid()) return;
         toast('Đã sao chép mã Migration SQL vào clipboard', 'success');
       } catch (err) {
-        toast(err.message, 'error');
+        if (current()) toast(err.message, 'error');
       }
     });
 
     $('#diffDownloadSqlBtn')?.addEventListener('click', () => {
+      if (!valid()) return;
       try {
         const text = getFormattedScript();
         const blob = new Blob([text], { type: 'text/sql;charset=utf-8' });
@@ -3690,11 +3652,12 @@ async function showSchemaDiffModal() {
         URL.revokeObjectURL(url);
         toast('Đã tải xuống tệp Migration SQL', 'success');
       } catch (err) {
-        toast(err.message, 'error');
+        if (current()) toast(err.message, 'error');
       }
     });
 
     $('#diffOpenEditorBtn')?.addEventListener('click', () => {
+      if (!valid()) return;
       const sql = getFormattedScript();
       closeModal();
       newQuery(sql, { profileId: targetProfileId, database: targetDb });
@@ -3706,7 +3669,7 @@ async function showSchemaDiffModal() {
     });
   }
 
-  document.querySelectorAll('.diff-tab-btn').forEach((btn) => {
+  document.querySelectorAll('[data-diff-tab]').forEach((btn) => {
     btn.addEventListener('click', () => {
       if (!btn.disabled) switchTab(btn.dataset.diffTab);
     });

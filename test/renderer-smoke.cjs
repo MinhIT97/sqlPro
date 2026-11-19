@@ -21,6 +21,9 @@ const columns = [
   { name: 'name', type: 'varchar(255)', key: '', extra: '', nullable: 'YES', defaultValue: null }
 ];
 let rowEditorColumns = columns;
+let schemaFixture = null;
+let pendingSchemaCapture = null;
+const schemaService = new (require(path.join(root, 'electron/schema-migration-service.cjs')).SchemaMigrationService)();
 let dataDiffQuery = null;
 let autocompleteColumns = null;
 let rowEditorFailure = false;
@@ -71,7 +74,21 @@ handle('account:resolve-conflicts', () => ok({ state: 'synced', conflicts: [], c
 handle('account:restore-recovery', (id) => ok({ restored: true, id }));
 handle('account:status', () => ok({ loggedIn: false }));
 handle('db:use-database', () => ok({}));
-handle('db:databases', () => ok(['test']));
+handle('db:databases', () => ok(schemaFixture ? ['source_schema', 'target_schema'] : ['test']));
+handle('db:schema-snapshot', async payload => {
+  if (pendingSchemaCapture) return pendingSchemaCapture(payload);
+  const source = payload.database === 'source_schema';
+  const data = { database: payload.database, engine: 'MySQL', tables: source ? [{ name: 'indexed', engine: 'InnoDB',
+    columns: [{ name: 'id', type: 'int', nullable: 'NO', default: null }, { name: 'label', type: 'varchar(30)', nullable: 'YES', default: null }],
+    indexes: [{ name: 'idx_label', isUnique: false, type: 'BTREE', columns: [{ name: 'label' }] }], foreignKeys: [], foreignKeysStatus: 'complete',
+    checkConstraintsStatus: 'complete', checkConstraints: schemaFixture === 'check' ? [{ name: 'positive' }] : [] }] : [],
+    views: [], routines: [], triggers: [], events: [] };
+  const snapshot = { ...data, kind: 'sqlpro-schema-snapshot', version: 1, coverage: source && schemaFixture === 'partial' ? 'partial' : 'complete',
+    snapshotIdentity: require(path.join(root, 'electron/schema-snapshot.cjs')).computeSchemaFingerprint(data),
+    scope: { profileId: payload.profileId, sessionId: 'schema-smoke', generation: 0, profileFingerprint: 'a'.repeat(64), database: payload.database, engine: 'MySQL', lowerCaseTableNames: 0 } };
+  return ok({ coverage: snapshot.coverage, snapshotId: schemaService.storeSnapshot(snapshot) });
+});
+handle('db:create-migration-plan', payload => ok(schemaService.createMigrationPlan(payload)));
 handle('db:tables', () => ok(tables));
 handle('db:columns', payload => ok(autocompleteColumns?.get(payload?.table) || rowEditorColumns));
 handle('db:indexes', () => ok([]));
@@ -1710,6 +1727,65 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate("Boolean($('#diffRunCompareBtn'))"), true);
 
     await evaluate('closeModal()');
+  });
+  await check('schema diff uses Main previews, preserves index uniqueness and session settings in copied/editor SQL', async () => {
+    await evaluate("window.__schemaState={connection:app.connection,connections:app.connections,database:app.database,queryTabs:[...queryTabs],activeQuery,queryId,query:app.query};app.connection={id:'schema-p',name:'Schema'};app.connections=[app.connection];app.database='source_schema'");
+    schemaFixture = 'simple'; schemaService.clear();
+    const before = calls.length;
+    try {
+      await evaluate('showSchemaDiffModal()'); await until("Boolean($('#diffRunCompareBtn'))");
+      await evaluate("$('#diffRunCompareBtn').click()"); await until("Boolean($('#diffGoMigrationBtn'))");
+      const used = calls.slice(before);
+      assert.equal(used.filter(c => c.name === 'db:schema-snapshot').length, 2);
+      assert.equal(used.filter(c => c.name === 'db:create-migration-plan').length, 1);
+      assert.equal(used.some(c => ['db:query','db:tables','db:columns','db:indexes','db:relations'].includes(c.name)), false);
+      await evaluate("$('#diffGoMigrationBtn').click()");
+      const sql = await evaluate("$('#diffSqlScriptArea').value");
+      assert.match(sql, /KEY `idx_label`/); assert.doesNotMatch(sql, /UNIQUE KEY|SET .*CHECKS|SET .*SQL_MODE/);
+      assert.equal(await evaluate("$('#diffApplyTargetBtn').disabled"), true);
+      await evaluate("$('#diffCopySqlBtn').focus();$('#diffCopySqlBtn').click()");
+      await untilNode(() => calls.slice(before).some(c => c.name === 'clipboard:write-text'));
+      assert.equal(await clipboard.readText(), sql);
+      win.setContentSize(940, 700);
+      await until("innerWidth===940 && innerHeight===700");
+      assert.equal(await evaluate("$('#diffSqlScriptArea').getBoundingClientRect().right<=innerWidth"), true);
+      await evaluate("$('#diffOpenEditorBtn').focus()");
+      win.webContents.focus();
+      for (const type of ['keyDown', 'char', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'Return' });
+      await until("!$('#modal').open");
+      assert.equal(await evaluate('app.query.sql'), sql);
+      assert.equal(await evaluate('app.query.database'), 'target_schema');
+      assert.equal(await evaluate('app.query.profileId'), 'schema-p');
+    } finally {
+      schemaFixture = null; schemaService.clear();
+      await evaluate("closeModal();app.connection=window.__schemaState.connection;app.connections=window.__schemaState.connections;app.database=window.__schemaState.database;queryTabs=window.__schemaState.queryTabs;activeQuery=window.__schemaState.activeQuery;queryId=window.__schemaState.queryId;app.query=window.__schemaState.query;delete window.__schemaState");
+      win.setContentSize(1280, 900);
+    }
+  });
+  await check('schema diff blocks partial/CHECK snapshots and ignores a late result after modal replacement', async () => {
+    await evaluate("window.__schemaState={connection:app.connection,connections:app.connections,database:app.database,queryTabs:[...queryTabs],activeQuery,queryId,query:app.query};app.connection={id:'schema-p'};app.connections=[app.connection];app.database='source_schema'");
+    try {
+      for (const mode of ['partial', 'check']) {
+        schemaFixture = mode; schemaService.clear();
+        const before = calls.length;
+        await evaluate('showSchemaDiffModal()'); await until("Boolean($('#diffRunCompareBtn'))");
+        await evaluate("$('#diffRunCompareBtn').click()"); await until("Boolean($('#diffTabContent .processlist-error'))");
+        assert.equal(await evaluate("Boolean($('#diffOpenEditorBtn')||$('#diffCopySqlBtn')||$('#diffSqlScriptArea'))"), false);
+        assert.equal(calls.slice(before).some(c => c.name === 'db:create-migration-plan'), mode === 'check');
+        await evaluate('closeModal()');
+      }
+      schemaFixture = 'simple'; let resolve;
+      pendingSchemaCapture = () => new Promise(done => { resolve = done; });
+      await evaluate('showSchemaDiffModal()'); await until("Boolean($('#diffRunCompareBtn'))");
+      await evaluate("$('#diffRunCompareBtn').click()"); await untilNode(() => Boolean(resolve));
+      await evaluate("closeModal();modal('<div id=\"schemaReplacement\"><button id=\"schemaReplacementFocus\">Giữ focus</button></div>');$('#schemaReplacementFocus').focus()");
+      resolve(ok({ coverage: 'complete', snapshotId: 'stale' }));
+      await new Promise(done => setTimeout(done, 30));
+      assert.equal(await evaluate("Boolean($('#schemaReplacement'))&&document.activeElement.id==='schemaReplacementFocus'"), true);
+    } finally {
+      schemaFixture = null; pendingSchemaCapture = null; schemaService.clear();
+      await evaluate("closeModal();app.connection=window.__schemaState.connection;app.connections=window.__schemaState.connections;app.database=window.__schemaState.database;queryTabs=window.__schemaState.queryTabs;activeQuery=window.__schemaState.activeQuery;queryId=window.__schemaState.queryId;app.query=window.__schemaState.query;delete window.__schemaState");
+    }
   });
   await check('data diff modal opens, configures source/target tables, and navigates tabs', async () => {
     await evaluate('showDataDiffModal()');

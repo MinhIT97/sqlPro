@@ -100,8 +100,9 @@ test('DataSyncExecutor executes transactional batches with optimistic concurrenc
       ];
     },
     async raw(sql, params) {
+      if (sql === 'SHOW GRANTS') return { result: [{ grants: "GRANT SELECT, TRIGGER ON *.* TO 'fixture'@'%'" }] };
       if (sql.includes('SELECT ENGINE FROM')) return { result: [{ ENGINE: 'InnoDB' }] };
-      if (sql.includes('SELECT TRIGGER_NAME FROM')) return { result: [] };
+      if (sql.includes('SELECT TRIGGER_NAME FROM') || sql.includes('REFERENTIAL_CONSTRAINTS')) return { result: [] };
       executedQueries.push({ sql, params });
       return { result: { affectedRows: 1 } };
     },
@@ -202,8 +203,9 @@ test('DataSyncExecutor detects optimistic concurrency conflict and rolls back ac
       ];
     },
     async raw(sql, params) {
+      if (sql === 'SHOW GRANTS') return { result: [{ grants: "GRANT SELECT, TRIGGER ON *.* TO 'fixture'@'%'" }] };
       if (sql.includes('SELECT ENGINE FROM')) return { result: [{ ENGINE: 'InnoDB' }] };
-      if (sql.includes('SELECT TRIGGER_NAME FROM')) return { result: [] };
+      if (sql.includes('SELECT TRIGGER_NAME FROM') || sql.includes('REFERENTIAL_CONSTRAINTS')) return { result: [] };
       queries.push(sql);
       if (sql.startsWith('UPDATE')) {
         // 0 rows affected: row was modified concurrently on target!
@@ -345,8 +347,9 @@ test('DataSyncExecutor executes multi-table plan with correct per-table schema c
       return [{ name: 'id', type: 'int', key: 'PRI' }, { name: 'author_id', type: 'int', key: '' }];
     },
     async raw(sql, params) {
+      if (sql === 'SHOW GRANTS') return { result: [{ grants: "GRANT SELECT, TRIGGER ON *.* TO 'fixture'@'%'" }] };
       if (sql.includes('SELECT ENGINE FROM')) return { result: [{ ENGINE: 'InnoDB' }] };
-      if (sql.includes('SELECT TRIGGER_NAME FROM')) return { result: [] };
+      if (sql.includes('SELECT TRIGGER_NAME FROM') || sql.includes('REFERENTIAL_CONSTRAINTS')) return { result: [] };
       executedQueries.push({ sql, params });
       return { result: { affectedRows: 1 } };
     },

@@ -1,0 +1,2 @@
+npm notice run sqlpro-server@0.1.0 check
+npm notice run node --check src/index.cjs && node --check src/app.cjs && node --check src/db.cjs && node --check src/auth.cjs && node --check src/vault.cjs && node --check src/ratelimit.cjs && node --check src/errors.cjs

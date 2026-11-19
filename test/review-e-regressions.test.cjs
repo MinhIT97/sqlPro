@@ -13,7 +13,7 @@ function syncFixture(type = 'UPDATE') {
   const calls = [], meta = columns();
   const plan = { targetScope: { profileId: 'p', database: 'd', table: 't' }, primaryKeys: ['id'], columns: meta, operations: [operation(type)] };
   const worker = { connect: async () => {}, useDatabase: async () => {}, close: async () => {}, listColumns: async () => meta,
-    raw: async sql => { calls.push(sql); return { result: sql.includes('SELECT ENGINE') ? [{ ENGINE: 'InnoDB' }] : sql.includes('SELECT TRIGGER_NAME') ? [] : { affectedRows: 1 } }; } };
+    raw: async sql => { calls.push(sql); return { result: sql === 'SHOW GRANTS' ? [{ grants: "GRANT SELECT, TRIGGER ON *.* TO 'fixture'@'%'" }] : sql.includes('SELECT ENGINE') ? [{ ENGINE: 'InnoDB' }] : (sql.includes('SELECT TRIGGER_NAME') || sql.includes('REFERENTIAL_CONSTRAINTS')) ? [] : { affectedRows: 1 } }; } };
   const executor = new DataSyncExecutor({ consumePlan: () => plan, getProfileWithSecrets: () => ({ id: 'p' }), createSession: () => worker });
   return { plan, worker, calls, run: args => executor.executeSyncPlan({ planToken: 'internal', ...args }) };
 }

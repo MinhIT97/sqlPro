@@ -274,7 +274,7 @@ test('generateMigrationSql creates statements with topological ordering and safe
   assert.match(addColStmt.sql, /ALTER TABLE `items` ADD COLUMN `category_id` INT NOT NULL/);
 });
 
-test('formatMigrationScript generates clean script with foreign key checks wrappers', () => {
+test('formatMigrationScript preserves session settings and excludes disabled statements', () => {
   const statements = [
     {
       id: 'stmt-1',
@@ -294,12 +294,12 @@ test('formatMigrationScript generates clean script with foreign key checks wrapp
   const script = SchemaDiff.formatMigrationScript(statements, {
     sourceName: 'Staging',
     targetName: 'Production',
-    wrapForeignKeys: true
+    wrapForeignKeys: false
   });
 
   assert.match(script, /SqlPro Schema Migration Script/);
-  assert.match(script, /SET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS = 0;/);
+  assert.doesNotMatch(script, /SET.*(?:FOREIGN_KEY_CHECKS|UNIQUE_CHECKS|SQL_MODE)/);
   assert.match(script, /CREATE TABLE `posts`/);
   assert.ok(!script.includes('DROP COLUMN `secret`'), 'Disabled statements should not appear in final output');
-  assert.match(script, /SET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;/);
+  assert.throws(() => SchemaDiff.formatMigrationScript(statements, { wrapForeignKeys: true }), /FOREIGN_KEY_CHECKS_OVERRIDE_UNSUPPORTED/);
 });

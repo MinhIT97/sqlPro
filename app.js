@@ -678,7 +678,9 @@ function queryTargetLabel(tab, includeEnvironment = true) {
   const name = connection && connection.name
     ? connection.name
     : (tab && tab.profileId ? 'kết nối không còn tồn tại' : 'chưa gắn kết nối');
-  return `${name} · ${(tab && tab.database) || 'không chọn database'}${connection && includeEnvironment ? ` · ${connectionEnvironment(connection).label}${connection.readOnly ? ' · CHỈ ĐỌC' : ''}` : ''}`;
+  const env = connection ? connectionEnvironment(connection) : null;
+  const envLabel = env && env.value !== 'unclassified' ? ` · ${env.label}` : '';
+  return `${name} · ${(tab && tab.database) || 'không chọn database'}${connection && includeEnvironment ? `${envLabel}${connection.readOnly ? ' · CHỈ ĐỌC' : ''}` : ''}`;
 }
 
 async function ensureQueryTarget(tab) {
@@ -1347,6 +1349,7 @@ async function init() {
     }
   });
   $('#tabs').addEventListener('click', onTabClick);
+  $('#tabs').addEventListener('dblclick', onTabDblClick);
 
   if (!desktop) {
     ensureDefaultWorkspace();
@@ -1419,6 +1422,12 @@ async function init() {
         : (typeof saved.database === 'string' ? saved.database : null),
       taskId: null
     }));
+    const allDefault = queryTabs.every((tab) => /^Query\s+\d+$/i.test(tab.title));
+    if (allDefault && queryTabs.length > 0) {
+      queryTabs.forEach((tab, i) => {
+        tab.title = `Query ${i + 1}`;
+      });
+    }
     queryId = queryTabs.reduce((max, tab) => {
       const match = /(\d+)\s*$/.exec(tab.title);
       return Math.max(max, match ? Number(match[1]) : 0);
@@ -1970,6 +1979,8 @@ function saveQuery() {
       savedQueries.unshift(entry);
       app.query.savedQueryId = entry.id;
     }
+    app.query.title = name.slice(0, 40);
+    renderQueryTabs();
     savedQueries = savedQueries.slice(0, 200);
     openTreeGroups.add('queries');
     persistState();
@@ -5117,6 +5128,36 @@ function setupContextMenu() {
       }
       return;
     }
+
+    const tabBtn = event.target.closest('#tabs [data-query-tab]');
+    if (tabBtn) {
+      event.preventDefault();
+      const tabIndex = Number(tabBtn.dataset.queryTab);
+      if (tabIndex < 0 || tabIndex >= queryTabs.length) return;
+      menu.innerHTML = `
+        <div class="context-menu-item" data-tab-action="rename"><span class="c-icon">✎</span> Đổi tên tab…</div>
+        <div class="context-menu-item" data-tab-action="reindex"><span class="c-icon">🔢</span> Đánh số lại các tab (Query 1, 2…)</div>
+        <div class="context-menu-item" data-tab-action="duplicate"><span class="c-icon">⎘</span> Nhân bản tab</div>
+        <div class="context-menu-divider"></div>
+        <div class="context-menu-item" data-tab-action="close"><span class="c-icon">✕</span> Đóng tab</div>
+        <div class="context-menu-item" data-tab-action="close-others"><span class="c-icon">✕</span> Đóng các tab khác</div>
+        <div class="context-menu-item" data-tab-action="close-right"><span class="c-icon">⇥</span> Đóng các tab bên phải</div>
+      `;
+      positionMenu(event.clientX, event.clientY);
+      menu.querySelectorAll('.context-menu-item').forEach((item) => {
+        item.addEventListener('click', () => {
+          const act = item.dataset.tabAction;
+          closeMenu();
+          if (act === 'rename') promptRenameQueryTab(tabIndex);
+          else if (act === 'reindex') reindexQueryTabs();
+          else if (act === 'duplicate') duplicateQueryTab(tabIndex);
+          else if (act === 'close') closeQueryTab(tabIndex);
+          else if (act === 'close-others') closeOtherQueryTabs(tabIndex);
+          else if (act === 'close-right') closeQueryTabsToRight(tabIndex);
+        });
+      });
+      return;
+    }
   });
 
   const sidebar = $('.sidebar');
@@ -7203,9 +7244,11 @@ function renderQueryTabs() {
   host.innerHTML = queryTabs.map((tab, index) => {
     const target = queryTargetLabel(tab, false);
     return `
-    <button class="querytab${mode === 'query' && index === activeQuery ? ' selected' : ''}" data-query-tab="${index}" title="${esc(`${tab.title} · ${target}`)}">
-      ⌑ &nbsp; ${esc(tab.title)}${tab.running ? ' <span class="tabrunning">…</span>' : ''} &nbsp; <span class="tabclose" data-close-query="${index}" title="Đóng tab">×</span>
+    <button class="querytab${mode === 'query' && index === activeQuery ? ' selected' : ''}" data-query-tab="${index}" title="${esc(`${tab.title} · ${target} (Nhấp đúp hoặc chuột phải để đổi tên)`)}">
+      <span class="tab-icon"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5l4 3-4 3"></path><line x1="9" y1="11" x2="13" y2="11"></line></svg></span>
+      <span class="tab-title-text">${esc(tab.title)}</span>${tab.running ? ' <span class="tabrunning">…</span>' : ''}
       <span class="querytab-target">${queryTargetConnection(tab) ? connectionEnvironmentBadge(queryTargetConnection(tab)) : ''} ${esc(target)}</span>
+      <span class="tabclose" data-close-query="${index}" title="Đóng tab" aria-label="Đóng tab"><svg class="tab-close-icon" width="8" height="8" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><line x1="2" y1="2" x2="8" y2="8"></line><line x1="8" y1="2" x2="2" y2="8"></line></svg></span>
     </button>`;
   }).join('');
 }
@@ -7222,7 +7265,127 @@ function onTabClick(event) {
   if (tab) selectQueryTab(Number(tab.dataset.queryTab));
 }
 
-function newQuery(sql = '', target = null) {
+function onTabDblClick(event) {
+  const close = event.target.closest('[data-close-query]');
+  if (close) return;
+  const tab = event.target.closest('[data-query-tab]');
+  if (tab) promptRenameQueryTab(Number(tab.dataset.queryTab));
+}
+
+function nextAvailableQueryTitle(sql = '', target = null, customTitle = null) {
+  if (typeof customTitle === 'string' && customTitle.trim()) {
+    return customTitle.trim().slice(0, 40);
+  }
+  if (typeof sql === 'string' && sql.trim()) {
+    const fromMatch = /\bFROM\s+[`"']?(?:[a-zA-Z0-9_]+[.`"'])*([a-zA-Z0-9_]+)[`"']?/i.exec(sql);
+    if (fromMatch && fromMatch[1]) {
+      const candidate = fromMatch[1].trim();
+      const exists = queryTabs.some((t) => t.title?.toLowerCase() === candidate.toLowerCase());
+      if (!exists) return candidate.slice(0, 30);
+    }
+  }
+  const usedNumbers = new Set();
+  for (const tab of queryTabs) {
+    const match = /(?:Query|\b)\s*(\d+)$/i.exec(tab.title?.trim() || '');
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (Number.isInteger(num) && num > 0) {
+        usedNumbers.add(num);
+      }
+    }
+  }
+  let n = 1;
+  while (usedNumbers.has(n)) {
+    n += 1;
+  }
+  return `Query ${n}`;
+}
+
+function promptRenameQueryTab(index) {
+  if (index < 0 || index >= queryTabs.length) return;
+  const tab = queryTabs[index];
+  modal(`
+    <h2>Đổi tên tab truy vấn</h2>
+    <p class="hint">Nhập tên mới để phân biệt nội dung hoặc bảng bạn đang làm việc.</p>
+    <label for="renameQueryTabInput">Tên tab</label>
+    <input id="renameQueryTabInput" type="text" maxlength="40" value="${esc(tab.title)}" placeholder="Ví dụ: Báo cáo, Test API...">
+    <div class="actions">
+      <button data-click="close-modal">Hủy</button>
+      <button class="primary" id="confirmRenameTabBtn">Lưu</button>
+    </div>
+  `);
+  const input = $('#renameQueryTabInput');
+  input?.focus();
+  input?.select();
+  const save = () => {
+    const val = input.value.trim();
+    if (val) {
+      tab.title = val.slice(0, 40);
+      renderQueryTabs();
+      persistState();
+    }
+    closeModal();
+  };
+  $('#confirmRenameTabBtn')?.addEventListener('click', save);
+  input?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      save();
+    }
+  });
+}
+
+function reindexQueryTabs() {
+  let counter = 1;
+  for (const tab of queryTabs) {
+    if (/^Query\s+\d+$/i.test(tab.title?.trim() || '')) {
+      tab.title = `Query ${counter}`;
+      counter += 1;
+    }
+  }
+  renderQueryTabs();
+  persistState();
+  toast('Đã đánh số lại các tab truy vấn bắt đầu từ 1.', 'info');
+}
+
+function duplicateQueryTab(index) {
+  if (index < 0 || index >= queryTabs.length) return;
+  const source = queryTabs[index];
+  newQuery(source.sql || '', { profileId: source.profileId, database: source.database }, `${source.title} (bản sao)`);
+}
+
+function closeOtherQueryTabs(index) {
+  if (index < 0 || index >= queryTabs.length) return;
+  const kept = queryTabs[index];
+  const running = queryTabs.filter((t, i) => i !== index && t.running);
+  if (running.length) {
+    toast('Không thể đóng các tab đang chạy truy vấn.', 'error');
+  }
+  queryTabs = queryTabs.filter((t, i) => i === index || t.running);
+  activeQuery = queryTabs.indexOf(kept);
+  if (activeQuery < 0) activeQuery = 0;
+  app.query = queryTabs[activeQuery];
+  updateChrome();
+  persistState();
+}
+
+function closeQueryTabsToRight(index) {
+  if (index < 0 || index >= queryTabs.length) return;
+  const running = queryTabs.slice(index + 1).filter((t) => t.running);
+  if (running.length) {
+    toast('Không thể đóng các tab bên phải đang chạy truy vấn.', 'error');
+  }
+  const toKeep = queryTabs.slice(0, index + 1).concat(running);
+  queryTabs = toKeep;
+  if (activeQuery >= queryTabs.length) {
+    activeQuery = index;
+  }
+  app.query = queryTabs[activeQuery];
+  updateChrome();
+  persistState();
+}
+
+function newQuery(sql = '', target = null, options = null) {
   const profileId = target && target.profileId !== undefined
     ? target.profileId
     : (app.connection ? app.connection.id : null);
@@ -7244,9 +7407,11 @@ function newQuery(sql = '', target = null) {
   }
   syncActiveQuery();
   queryId += 1;
+  const customTitle = typeof options === 'string' ? options : options?.title;
+  const title = nextAvailableQueryTitle(sql, target, customTitle);
   const tab = {
     id: queryId,
-    title: `Query ${queryId}`,
+    title,
     sql: String(sql ?? ''),
     result: null,
     error: null,
@@ -7254,7 +7419,7 @@ function newQuery(sql = '', target = null) {
     profileId: profileId || null,
     database: database || null,
     taskId: null,
-    savedQueryId: null
+    savedQueryId: typeof options === 'object' && options?.savedQueryId ? options.savedQueryId : null
   };
   queryTabs.push(tab);
   activeQuery = queryTabs.length - 1;
@@ -7295,10 +7460,11 @@ function closeQueryTab(index) {
   if (mode === 'query' && wasActive) syncActiveQuery();
   queryTabs.splice(index, 1);
   if (!queryTabs.length) {
+    const title = nextAvailableQueryTitle();
     queryId += 1;
     queryTabs.push({
       id: queryId,
-      title: `Query ${queryId}`,
+      title,
       sql: '',
       result: null,
       error: null,

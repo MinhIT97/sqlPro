@@ -777,10 +777,60 @@ function buildMenu() {
       ]
     }
   ];
+  if (!app.isPackaged) {
+    template.push({
+      label: 'Phát triển',
+      submenu: [
+        {
+          label: 'Tải lại giao diện',
+          accelerator: 'Ctrl+Shift+R',
+          click: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.reloadIgnoringCache();
+            }
+          }
+        },
+        {
+          label: 'Mở DevTools',
+          accelerator: 'F12',
+          click: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.toggleDevTools();
+            }
+          }
+        }
+      ]
+    });
+  }
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+let devWatcher = null;
+function setupDevFileWatcher() {
+  if (devWatcher || app.isPackaged || process.env.NODE_ENV === 'test') return;
+  const rootDir = path.join(__dirname, '..');
+  const watchedExts = new Set(['.js', '.css', '.html']);
+  let debounceTimer = null;
+  try {
+    devWatcher = fs.watch(rootDir, { recursive: false }, (_eventType, filename) => {
+      if (!filename) return;
+      const ext = path.extname(filename).toLowerCase();
+      if (watchedExts.has(ext)) {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          if (mainWindow && typeof mainWindow.isDestroyed === 'function' && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.reload();
+          }
+        }, 250);
+        if (debounceTimer && typeof debounceTimer.unref === 'function') debounceTimer.unref();
+      }
+    });
+    if (devWatcher && typeof devWatcher.unref === 'function') devWatcher.unref();
+  } catch (_err) {}
+}
+
 function createWindow() {
+  setupDevFileWatcher();
   const options = getWindowOptions();
   const appPage = path.join(__dirname, '..', 'index.html');
   const appUrl = pathToFileURL(appPage).href;
@@ -807,9 +857,20 @@ function createWindow() {
 
   mainWindow.loadFile(appPage);
   mainWindow.once('ready-to-show', () => {
-    if (options.maximized) mainWindow.maximize();
-    mainWindow.show();
+    if (options.maximized && typeof mainWindow.maximize === 'function') mainWindow.maximize();
+    if (typeof mainWindow.show === 'function') mainWindow.show();
+    if (typeof mainWindow.focus === 'function') mainWindow.focus();
   });
+  if (typeof mainWindow.show === 'function') {
+    const fallbackTimer = setTimeout(() => {
+      if (mainWindow && typeof mainWindow.isDestroyed === 'function' && !mainWindow.isDestroyed() && typeof mainWindow.isVisible === 'function' && !mainWindow.isVisible()) {
+        if (options.maximized && typeof mainWindow.maximize === 'function') mainWindow.maximize();
+        mainWindow.show();
+        if (typeof mainWindow.focus === 'function') mainWindow.focus();
+      }
+    }, 1000);
+    if (fallbackTimer && typeof fallbackTimer.unref === 'function') fallbackTimer.unref();
+  }
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, url) => {
     if (url !== appUrl) event.preventDefault();
@@ -2753,6 +2814,7 @@ app.on('before-quit', (event) => {
     return;
   }
   isQuitting = true;
+  if (devWatcher) { try { devWatcher.close(); } catch {} devWatcher = null; }
   stopBackupSchedules();
   sync.shutdown();
   sessionRegistry.closeAll().catch(() => undefined);

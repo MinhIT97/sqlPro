@@ -779,8 +779,8 @@ body.env-local header {
 .transfer-mode .transfer-result input{width:100%;margin:5px 0 12px}
 .querytab-target{display:block;max-width:190px;overflow:hidden;text-overflow:ellipsis;font-size:10px;opacity:.62;font-weight:400}
 .query-target-label{max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tabs .tabclose{display:inline-block;margin-left:4px;padding:0 2px;border-radius:3px;color:#a5afb9}
-.tabs .tabclose:hover{background:#f4e9e9;color:#c24b4b}
+.tabs .tabclose{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;min-width:20px;min-height:20px;margin-left:5px;border-radius:4px;color:#64748b;font-size:12px;font-weight:700;line-height:1;background:transparent;cursor:pointer;flex-shrink:0;transition:all .15s ease}
+.tabs .tabclose:hover{background:#fee2e2;color:#dc2626;border-color:#fca5a5}
 .tabs .tabrunning{color:#b58a2d}
 
 /* SQL editor, autocomplete and multi-statement results */
@@ -3344,4 +3344,942 @@ body.dark-theme .production-risk-banner.risk-warning {
   background: #451a03;
   border-color: #d97706;
   color: #fcd34d;
+}
+
+/* ==========================================================================
+   UI Redesign: Modern Buttons, Sleek Tabs & Clean Badges
+   ========================================================================== */
+
+/* 1. Global Buttons */
+button {
+  cursor: pointer;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #334155;
+  border-radius: 6px;
+  padding: 6px 13px;
+  font-size: 12px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  line-height: 1.4;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
+}
+button:hover {
+  background: #f8fafc;
+  color: #0f172a;
+  border-color: #94a3b8;
+  box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.07);
+}
+button:active {
+  transform: translateY(0.5px);
+  box-shadow: none;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+button.primary,
+button[type="submit"].primary,
+.modal-footer button.primary,
+.actions button.primary {
+  background: #087f72 !important;
+  border-color: #06695e !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+  box-shadow: 0 1px 2px 0 rgba(8, 127, 114, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
+}
+button.primary:hover,
+button[type="submit"].primary:hover,
+.modal-footer button.primary:hover,
+.actions button.primary:hover {
+  background: #06695e !important;
+  border-color: #045249 !important;
+  color: #ffffff !important;
+  box-shadow: 0 2px 5px 0 rgba(8, 127, 114, 0.4) !important;
+}
+button.primary:active,
+button[type="submit"].primary:active {
+  background: #045249 !important;
+  transform: translateY(0.5px);
+}
+
+button.danger,
+.actions button.danger {
+  background: #ffffff;
+  border-color: #fca5a5 !important;
+  color: #dc2626 !important;
+  font-weight: 500;
+}
+button.danger:hover,
+.actions button.danger:hover {
+  background: #fef2f2 !important;
+  border-color: #ef4444 !important;
+  color: #b91c1c !important;
+}
+
+button.secondary {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+  color: #475569;
+}
+button.secondary:hover {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #1e293b;
+}
+
+/* 2. Header Buttons */
+header button:not(.avatar) {
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  color: #475569 !important;
+  background: #ffffff !important;
+  border: 1px solid #e2e8f0 !important;
+  border-radius: 6px !important;
+  padding: 5px 10px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03) !important;
+  transition: all 0.15s ease !important;
+  cursor: pointer !important;
+}
+header button:not(.avatar):hover {
+  background: #edf6f5 !important;
+  color: #087f72 !important;
+  border-color: #bce6db !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06) !important;
+}
+
+/* 3. Sidebar Action & Icon Buttons */
+.workspacebar {
+  display: flex !important;
+  gap: 5px !important;
+  align-items: center !important;
+  margin-bottom: 14px !important;
+  padding: 0 !important;
+}
+.workspacebar select {
+  flex: 1 !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  padding: 6px 10px !important;
+  border: 1px solid #cbd5e1 !important;
+  border-radius: 6px !important;
+  background: #ffffff !important;
+  color: #1e293b !important;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03) !important;
+}
+.workspacebar button {
+  width: 28px !important;
+  height: 28px !important;
+  min-width: 28px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border: 1px solid #cbd5e1 !important;
+  background: #ffffff !important;
+  color: #475569 !important;
+  border-radius: 6px !important;
+  font-size: 13px !important;
+  padding: 0 !important;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03) !important;
+  transition: all 0.15s ease !important;
+}
+.workspacebar button:hover {
+  background: #edf6f5 !important;
+  color: #087f72 !important;
+  border-color: #087f72 !important;
+}
+
+.headingactions {
+  display: inline-flex !important;
+  gap: 4px !important;
+  align-items: center !important;
+}
+.headingactions button {
+  width: 22px !important;
+  height: 22px !important;
+  min-width: 22px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border: 1px solid #cbd5e1 !important;
+  background: #ffffff !important;
+  color: #64748b !important;
+  border-radius: 5px !important;
+  font-size: 11px !important;
+  padding: 0 !important;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03) !important;
+  transition: all 0.15s ease !important;
+}
+.headingactions button:hover {
+  background: #edf6f5 !important;
+  color: #087f72 !important;
+  border-color: #087f72 !important;
+}
+
+/* 4. Sub-Navigation View Tabs */
+nav {
+  display: flex !important;
+  gap: 4px !important;
+  border-bottom: 1px solid #e2e8f0 !important;
+  margin-top: 10px !important;
+  padding-bottom: 0 !important;
+}
+nav button {
+  border: 0 !important;
+  background: transparent !important;
+  padding: 8px 14px !important;
+  color: #64748b !important;
+  font-size: 12.5px !important;
+  font-weight: 500 !important;
+  border-radius: 6px 6px 0 0 !important;
+  position: relative !important;
+  cursor: pointer !important;
+  box-shadow: none !important;
+  transition: all 0.15s ease !important;
+}
+nav button:hover {
+  color: #0f172a !important;
+  background: rgba(0, 0, 0, 0.04) !important;
+  border-color: transparent !important;
+}
+nav button.current {
+  color: #087f72 !important;
+  font-weight: 600 !important;
+  background: #ffffff !important;
+  border-bottom: 2px solid #087f72 !important;
+  margin-bottom: -1px !important;
+  border-radius: 6px 6px 0 0 !important;
+}
+
+/* 5. Environment & Status Badges */
+.connection-environment {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 3px;
+  font-size: 9.5px !important;
+  font-weight: 600 !important;
+  line-height: 1 !important;
+  padding: 2px 7px !important;
+  border-radius: 9999px !important;
+  white-space: nowrap;
+  vertical-align: middle;
+  letter-spacing: 0.3px;
+  border: none !important;
+}
+
+/* Hide unclassified environment badge to eliminate visual clutter */
+.environment-unclassified {
+  display: none !important;
+}
+
+.environment-local {
+  color: #059669 !important;
+  background: #ecfdf5 !important;
+  border: 1px solid #a7f3d0 !important;
+}
+.environment-staging {
+  color: #d97706 !important;
+  background: #fffbeb !important;
+  border: 1px solid #fde68a !important;
+}
+.environment-production {
+  color: #dc2626 !important;
+  background: #fef2f2 !important;
+  border: 1px solid #fecaca !important;
+  font-weight: 700 !important;
+}
+.connection-readonly {
+  color: #2563eb !important;
+  background: #eff6ff !important;
+  border: 1px solid #bfdbfe !important;
+}
+
+h1 span {
+  font-size: 9.5px !important;
+  font-weight: 600 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.5px !important;
+  background: #f1f5f9 !important;
+  color: #475569 !important;
+  border: 1px solid #cbd5e1 !important;
+  border-radius: 5px !important;
+  padding: 2.5px 7px !important;
+  vertical-align: middle !important;
+  margin-left: 8px !important;
+}
+
+.badge.type {
+  font-size: 8.5px !important;
+  font-weight: 600 !important;
+  padding: 2px 6px !important;
+  border-radius: 4px !important;
+  background: #f1f5f9 !important;
+  color: #64748b !important;
+  letter-spacing: 0.5px !important;
+}
+.connitem.active .badge.type {
+  background: #cce7e1 !important;
+  color: #087f72 !important;
+}
+
+/* 6. Dark Theme Buttons & Tabs */
+body.dark-theme button {
+  background: #1e293b;
+  border-color: #334155;
+  color: #cbd5e1;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+body.dark-theme button:hover {
+  background: #283548;
+  border-color: #475569;
+  color: #f8fafc;
+}
+body.dark-theme button.primary,
+body.dark-theme button[type="submit"].primary,
+body.dark-theme .modal-footer button.primary,
+body.dark-theme .actions button.primary {
+  background: #0d9488 !important;
+  border-color: #0f766e !important;
+  color: #ffffff !important;
+}
+body.dark-theme button.primary:hover,
+body.dark-theme button[type="submit"].primary:hover,
+body.dark-theme .modal-footer button.primary:hover,
+body.dark-theme .actions button.primary:hover {
+  background: #0f766e !important;
+  border-color: #115e59 !important;
+}
+body.dark-theme button.danger,
+body.dark-theme .actions button.danger {
+  background: #1e293b;
+  border-color: #7f1d1d !important;
+  color: #f87171 !important;
+}
+body.dark-theme button.danger:hover,
+body.dark-theme .actions button.danger:hover {
+  background: #450a0a !important;
+  border-color: #dc2626 !important;
+  color: #fca5a5 !important;
+}
+body.dark-theme header button:not(.avatar) {
+  background: #1e293b !important;
+  border-color: #334155 !important;
+  color: #94a3b8 !important;
+}
+body.dark-theme header button:not(.avatar):hover {
+  background: #283548 !important;
+  border-color: #475569 !important;
+  color: #f1f5f9 !important;
+}
+body.dark-theme .workspacebar select {
+  background: #1e293b !important;
+  border-color: #334155 !important;
+  color: #e2e8f0 !important;
+}
+body.dark-theme .workspacebar button,
+body.dark-theme .headingactions button {
+  background: #1e293b !important;
+  border-color: #334155 !important;
+  color: #94a3b8 !important;
+}
+body.dark-theme .workspacebar button:hover,
+body.dark-theme .headingactions button:hover {
+  background: #283548 !important;
+  color: #5eead4 !important;
+  border-color: #0d9488 !important;
+}
+body.dark-theme nav {
+  border-bottom-color: #334155 !important;
+}
+body.dark-theme nav button {
+  color: #94a3b8 !important;
+}
+body.dark-theme nav button:hover {
+  color: #f8fafc !important;
+  background: rgba(255, 255, 255, 0.05) !important;
+}
+body.dark-theme nav button.current {
+  color: #5eead4 !important;
+  background: transparent !important;
+  border-bottom-color: #5eead4 !important;
+}
+body.dark-theme .tabs {
+  background: #0f172a !important;
+  border-bottom-color: #1e293b !important;
+}
+body.dark-theme .tabs button {
+  color: #94a3b8 !important;
+}
+body.dark-theme .tabs button:hover {
+  background: rgba(255, 255, 255, 0.05) !important;
+  color: #f8fafc !important;
+}
+body.dark-theme .tabs button.selected {
+  background: #1e293b !important;
+  border-color: #334155 !important;
+  color: #5eead4 !important;
+}
+body.dark-theme h1 span {
+  background: #1e293b !important;
+  border-color: #334155 !important;
+  color: #94a3b8 !important;
+}
+body.dark-theme .badge.type {
+  background: #1e293b !important;
+  color: #94a3b8 !important;
+}
+body.dark-theme .connitem.active .badge.type {
+  background: #134e4a !important;
+  color: #5eead4 !important;
+}
+body.dark-theme .environment-local {
+  color: #6ee7b7 !important;
+  background: #064e3b !important;
+  border-color: #047857 !important;
+}
+body.dark-theme .environment-staging {
+  color: #fde047 !important;
+  background: #78350f !important;
+  border-color: #92400e !important;
+}
+body.dark-theme .environment-production {
+  color: #fca5a5 !important;
+  background: #7f1d1d !important;
+  border-color: #991b1b !important;
+}
+body.dark-theme .connection-readonly {
+  color: #93c5fd !important;
+  background: #1e3a8a !important;
+  border-color: #1d4ed8 !important;
+}
+
+/* ==========================================================================
+   7. Comprehensive Responsive Layout & Fluid Controls
+   ========================================================================== */
+
+/* Prevent ugly word-wrapping inside buttons, selects, and labels */
+button,
+select,
+.toolbar button,
+.toolbar select,
+.query-grid-toolbar button,
+.query-grid-toolbar select,
+.processlist-toolbar button,
+.processlist-toolbar select,
+.history-toolbar button,
+.snippets-toolbar button,
+.actions button {
+  white-space: nowrap !important;
+}
+
+/* Query View Toolbar: Fluid wrapping & proportional spacing */
+.query-mode #workspace > .toolbar {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 6px 8px !important;
+  align-items: center !important;
+  padding: 8px 0 10px !important;
+  flex-shrink: 0 !important;
+  min-height: 44px;
+}
+
+.query-mode #workspace > .toolbar button {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 5px !important;
+  height: 32px !important;
+  padding: 0 12px !important;
+  line-height: 1 !important;
+  flex-shrink: 0 !important;
+}
+
+.query-mode #workspace > .toolbar select {
+  height: 32px !important;
+  padding: 4px 10px !important;
+  font-size: 11px !important;
+  flex-shrink: 0 !important;
+}
+
+.explain-settings-option {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+  font-size: 11px !important;
+  color: #64748b !important;
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 4px;
+}
+.explain-settings-option input {
+  margin: 0 !important;
+  cursor: pointer;
+}
+body.dark-theme .explain-settings-option {
+  color: #94a3b8 !important;
+}
+
+/* Query Target Label: Smart truncation with tooltip */
+.query-target-label {
+  font-size: 11px !important;
+  color: #64748b !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  max-width: 480px !important;
+  flex-shrink: 1 !important;
+  display: inline-block !important;
+}
+body.dark-theme .query-target-label {
+  color: #94a3b8 !important;
+}
+
+/* Transaction Bar: Responsive layout */
+.transaction-bar {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 8px 12px !important;
+  align-items: center !important;
+  padding: 8px 14px !important;
+  margin: 0 0 10px !important;
+  border-radius: 8px !important;
+  background: #f8fafc !important;
+  border: 1px solid #e2e8f0 !important;
+  font-size: 11px !important;
+}
+body.dark-theme .transaction-bar {
+  background: #1e293b !important;
+  border-color: #334155 !important;
+}
+.transaction-bar .hint {
+  margin: 0 !important;
+  font-size: 11px !important;
+  color: #64748b !important;
+  flex: 1 1 220px !important;
+}
+body.dark-theme .transaction-bar .hint {
+  color: #94a3b8 !important;
+}
+.transaction-bar button {
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+  padding: 4px 10px !important;
+  height: 28px !important;
+}
+
+/* Query Grid Toolbar: Wrap on narrow screens */
+.query-grid-toolbar {
+  flex-wrap: wrap !important;
+  gap: 8px 12px !important;
+}
+.query-grid-toolbar .actions-left,
+.query-grid-toolbar .actions-right {
+  flex-wrap: wrap !important;
+  gap: 6px 8px !important;
+}
+
+/* Header breadcrumb truncation */
+header {
+  height: 52px !important;
+  padding: 0 20px !important;
+  gap: 12px !important;
+}
+header > div {
+  min-width: 0 !important;
+  gap: 8px !important;
+}
+header #crumbConnection,
+header #crumbDb {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  max-width: 180px !important;
+  display: inline-block !important;
+}
+
+/* Responsive Media Queries */
+@media (max-width: 1280px) {
+  .sidebar {
+    width: 230px !important;
+    padding: 20px 10px !important;
+  }
+  .content {
+    padding: 20px 20px 0 !important;
+  }
+  .query-mode .content {
+    padding: 8px 16px 0 !important;
+  }
+  .query-target-label {
+    max-width: 340px !important;
+  }
+}
+
+@media (max-width: 1024px) {
+  .sidebar {
+    width: 210px !important;
+  }
+  header {
+    padding: 0 14px !important;
+  }
+  header #crumbConnection,
+  header #crumbDb {
+    max-width: 120px !important;
+  }
+  .content {
+    padding: 16px 14px 0 !important;
+  }
+  .query-mode .content {
+    padding: 6px 12px 0 !important;
+  }
+  .query-target-label {
+    max-width: 260px !important;
+  }
+  .explain-settings-option {
+    font-size: 10.5px !important;
+  }
+}
+
+@media (max-width: 860px) {
+  .titleline h1 {
+    font-size: 20px !important;
+  }
+  .query-mode .titleline h1 {
+    font-size: 16px !important;
+  }
+  .query-target-label {
+    width: 100% !important;
+    max-width: 100% !important;
+    order: 99 !important;
+    padding-top: 4px !important;
+  }
+  dialog.wide {
+    width: 95vw !important;
+    max-width: 95vw !important;
+  }
+}
+
+@media (max-width: 700px) {
+  .fieldgrid {
+    grid-template-columns: 1fr !important;
+    gap: 12px 0 !important;
+  }
+  .rail {
+    width: 52px !important;
+    padding: 16px 0 !important;
+  }
+  .logo {
+    font-size: 22px !important;
+    margin-bottom: 16px !important;
+  }
+  .rail button {
+    font-size: 20px !important;
+    padding: 6px 8px !important;
+  }
+}
+/* ==========================================================================
+   Sleek, Soft & Modern Tabs (Mềm mại, Tinh tế, Dễ chịu)
+   ========================================================================== */
+.tabs {
+  display: flex !important;
+  align-items: flex-end !important;
+  background: #f8fafc !important;
+  border-bottom: 1px solid #e2e8f0 !important;
+  padding: 0 10px !important;
+  gap: 4px !important;
+  height: 38px !important;
+  user-select: none !important;
+  box-sizing: border-box !important;
+}
+
+#queryTabs {
+  display: flex !important;
+  align-items: flex-end !important;
+  gap: 4px !important;
+  min-width: 0 !important;
+  overflow-x: auto !important;
+  scrollbar-width: none !important;
+  height: 100% !important;
+}
+#queryTabs::-webkit-scrollbar {
+  display: none !important;
+}
+
+/* Inactive Tab Base: Soft, clean, no harsh borders */
+.tabs button,
+#queryTabs .querytab,
+#dataTab,
+.tabs .transfer-tab {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 7px !important;
+  height: 31px !important;
+  padding: 0 8px 0 12px !important;
+  border: 1px solid transparent !important;
+  border-bottom: 1px solid transparent !important;
+  background: transparent !important;
+  color: #64748b !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  border-radius: 7px 7px 0 0 !important;
+  box-shadow: none !important;
+  transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  flex: 0 0 auto !important;
+  max-width: 380px !important;
+  position: relative !important;
+  cursor: pointer !important;
+  margin-bottom: 0 !important;
+}
+
+.tabs button:hover,
+#queryTabs .querytab:hover,
+#dataTab:hover,
+.tabs .transfer-tab:hover {
+  background: rgba(0, 0, 0, 0.04) !important;
+  color: #1e293b !important;
+  border-color: transparent !important;
+}
+
+/* Selected Tab: Elevated white card with soft top accent, seamless bottom merge */
+.tabs button.selected,
+#queryTabs .querytab.selected,
+#dataTab.selected,
+.tabs .transfer-tab.selected {
+  background: #ffffff !important;
+  color: #0f172a !important;
+  font-weight: 600 !important;
+  border-color: #e2e8f0 #e2e8f0 #ffffff #e2e8f0 !important;
+  border-top: 2.5px solid #087f72 !important;
+  border-bottom: 1px solid #ffffff !important;
+  margin-bottom: -1px !important;
+  box-shadow: 0 -1px 3px rgba(0, 0, 0, 0.04), 0 2px 4px rgba(0, 0, 0, 0.02) !important;
+  z-index: 2 !important;
+}
+
+/* Tab Icon: Crisp, clean, soft opacity */
+.tab-icon {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  color: #087f72 !important;
+  opacity: 0.8 !important;
+  flex-shrink: 0 !important;
+}
+.querytab:not(.selected) .tab-icon {
+  color: #64748b !important;
+  opacity: 0.65 !important;
+}
+
+/* Tab Title Text */
+.tab-title-text {
+  font-size: 12px !important;
+  max-width: 140px !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+  letter-spacing: -0.1px !important;
+}
+
+/* Tab Target / Connection Subtitle - Soft & Unobtrusive */
+.querytab-target {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+  max-width: 160px !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  font-size: 10.5px !important;
+  color: #64748b !important;
+  font-weight: 400 !important;
+  margin-left: 2px !important;
+  border: none !important;
+  padding: 0 !important;
+}
+.querytab.selected .querytab-target {
+  color: #475569 !important;
+}
+
+/* Status badge inside tab (e.g. LOCAL) */
+.querytab-target .connection-environment {
+  font-size: 9px !important;
+  padding: 1px 6px !important;
+  border-radius: 8px !important;
+  font-weight: 600 !important;
+}
+
+/* Running tab indicator */
+.tabrunning {
+  color: #d97706 !important;
+  font-weight: 700 !important;
+  font-size: 11px !important;
+}
+
+/* Tab Close Button (✕) - Soft, Rounded, Ergonomic & Pleasant */
+.tabclose {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 18px !important;
+  height: 18px !important;
+  min-width: 18px !important;
+  min-height: 18px !important;
+  margin-left: 6px !important;
+  margin-right: -2px !important;
+  padding: 0 !important;
+  border-radius: 50% !important;
+  color: #94a3b8 !important;
+  background: transparent !important;
+  border: none !important;
+  cursor: pointer !important;
+  flex-shrink: 0 !important;
+  transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+.tab-close-icon {
+  pointer-events: none !important;
+  display: block !important;
+}
+
+.tabclose:hover {
+  background: #fee2e2 !important;
+  color: #ef4444 !important;
+  transform: scale(1.1) !important;
+}
+
+.tabclose:active {
+  background: #fecaca !important;
+  color: #dc2626 !important;
+  transform: scale(0.92) !important;
+}
+
+.querytab.selected .tabclose {
+  color: #94a3b8 !important;
+}
+.querytab.selected .tabclose:hover {
+  background: #fee2e2 !important;
+  color: #ef4444 !important;
+}
+
+/* New Query Button (+) on Tabs Bar */
+#newQueryTab {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 26px !important;
+  height: 26px !important;
+  min-width: 26px !important;
+  min-height: 26px !important;
+  padding: 0 !important;
+  font-size: 15px !important;
+  font-weight: 500 !important;
+  line-height: 1 !important;
+  color: #64748b !important;
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  border-radius: 6px !important;
+  box-shadow: none !important;
+  cursor: pointer !important;
+  margin-left: 4px !important;
+  margin-bottom: 3px !important;
+  flex-shrink: 0 !important;
+  transition: all 0.15s ease !important;
+}
+
+#newQueryTab:hover {
+  background: rgba(0, 0, 0, 0.05) !important;
+  color: #087f72 !important;
+  border-color: #cbd5e1 !important;
+  transform: translateY(-0.5px) !important;
+}
+
+/* ==========================================================================
+   Dark Theme: Soft & Refined Dark Tabs
+   ========================================================================== */
+body.dark-theme .tabs {
+  background: #090d16 !important;
+  border-bottom-color: #1e293b !important;
+}
+
+body.dark-theme .tabs button,
+body.dark-theme #queryTabs .querytab,
+body.dark-theme #dataTab,
+body.dark-theme .tabs .transfer-tab {
+  background: transparent !important;
+  border-color: transparent !important;
+  color: #94a3b8 !important;
+}
+
+body.dark-theme .tabs button:hover,
+body.dark-theme #queryTabs .querytab:hover,
+body.dark-theme #dataTab:hover,
+body.dark-theme .tabs .transfer-tab:hover {
+  background: rgba(255, 255, 255, 0.05) !important;
+  color: #f8fafc !important;
+}
+
+body.dark-theme .tabs button.selected,
+body.dark-theme #queryTabs .querytab.selected,
+body.dark-theme #dataTab.selected,
+body.dark-theme .tabs .transfer-tab.selected {
+  background: #1e293b !important;
+  border-color: #334155 #334155 #1e293b #334155 !important;
+  border-top: 2.5px solid #2dd4bf !important;
+  border-bottom: 1px solid #1e293b !important;
+  color: #f1f5f9 !important;
+  box-shadow: 0 -1px 3px rgba(0, 0, 0, 0.2) !important;
+}
+
+body.dark-theme .tab-icon {
+  color: #2dd4bf !important;
+}
+body.dark-theme .querytab:not(.selected) .tab-icon {
+  color: #94a3b8 !important;
+}
+
+body.dark-theme .querytab-target {
+  color: #94a3b8 !important;
+}
+body.dark-theme .querytab.selected .querytab-target {
+  color: #cbd5e1 !important;
+}
+
+body.dark-theme .tabclose {
+  color: #64748b !important;
+}
+
+body.dark-theme .tabclose:hover {
+  background: rgba(239, 68, 68, 0.2) !important;
+  color: #f87171 !important;
+  border-color: transparent !important;
+}
+
+body.dark-theme .tabclose:active {
+  background: rgba(239, 68, 68, 0.35) !important;
+  color: #fca5a5 !important;
+}
+
+body.dark-theme #newQueryTab {
+  color: #94a3b8 !important;
+  background: transparent !important;
+  border-color: transparent !important;
+}
+
+body.dark-theme #newQueryTab:hover {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border-color: #334155 !important;
+  color: #2dd4bf !important;
 }

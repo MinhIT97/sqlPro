@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { DatabaseSession } = require('./database.cjs');
 const Diff = require('../data-diff.js');
+const { normalizeColumnType } = require('../schema-diff.js');
 const { createWorkerGuard } = require('./schema-migration-worker.cjs');
 const { computeSchemaFingerprint } = require('./schema-snapshot.cjs');
 const {
@@ -40,7 +41,15 @@ function sanitizeDiffError(err) {
   const code = typeof err === 'string' ? err : err.code;
   const safeCode = SAFE_DIFF_CODES.has(code) ? code : 'DATA_DIFF_FAILED';
   // Driver errors may contain SQL, literals, credentials or server paths.
-  const message = `So sánh dữ liệu không hoàn tất (${safeCode}).`;
+  const explanations = {
+    DATA_DIFF_NO_PRIMARY_KEY: 'Cần cùng khóa chính ở hai bảng; chưa dùng cờ UNI để suy khóa duy nhất.',
+    DATA_DIFF_SCHEMA_MISMATCH: 'Tên, kiểu hoặc thứ tự cột hai bảng khác nhau; chưa hỗ trợ mapping.',
+    DATA_DIFF_BUDGET_EXCEEDED: 'Kết quả vượt hạn mức hoặc bị cắt; chưa có báo cáo đầy đủ.',
+    DATA_DIFF_UNSUPPORTED_PK_TYPE: 'Kiểu hoặc collation khóa chính chưa có bằng chứng thứ tự phù hợp.',
+    DATA_DIFF_CANCELLED: 'Đã hủy so sánh dữ liệu.',
+    DATA_DIFF_CONTEXT_CHANGED: 'Cấu hình kết nối đã thay đổi; hãy đọc lại dữ liệu.'
+  };
+  const message = explanations[safeCode] || `So sánh dữ liệu không hoàn tất (${safeCode}).`;
   return { code: safeCode, message };
 }
 
@@ -276,6 +285,8 @@ class DataDiffService {
     this.jobs = new Map();
     this.activeJobCount = 0;
     this.maxConcurrentJobs = 2;
+    this.maxJobs = 16;
+    this.maxReportBytes = 4 * 1024 * 1024;
     this.jobTtlMs = 10 * 60 * 1000;
     this.generation = 0;
     this.clearing = null;
@@ -325,7 +336,12 @@ class DataDiffService {
   } = {}) {
     this.prune();
 
-    if (this.clearing || this.activeJobCount >= this.maxConcurrentJobs) {
+    while (this.jobs.size >= this.maxJobs) {
+      const removable = [...this.jobs].find(([, job]) => job.status !== 'running');
+      if (!removable) break;
+      this.jobs.delete(removable[0]);
+    }
+    if (this.clearing || this.jobs.size >= this.maxJobs || this.activeJobCount >= this.maxConcurrentJobs) {
       throw error('DATA_DIFF_BUSY', 'Đang có quá nhiều tác vụ so sánh dữ liệu đang chạy; vui lòng thử lại sau.');
     }
 
@@ -434,7 +450,7 @@ class DataDiffService {
         for (let i = 0; i < sourceReader.columns.length; i++) {
           const sc = sourceReader.columns[i];
           const tc = targetReader.columns[i];
-          if (sc.name !== tc.name || sc.type.toLowerCase() !== tc.type.toLowerCase()) {
+          if (sc.name !== tc.name || normalizeColumnType(sc.type) !== normalizeColumnType(tc.type)) {
             throw error('DATA_DIFF_SCHEMA_MISMATCH', `Cột "${sc.name}" (${sc.type}) ở nguồn khác với cột "${tc.name}" (${tc.type}) ở đích; chưa hỗ trợ mapping.`);
           }
         }
@@ -460,6 +476,9 @@ class DataDiffService {
         });
 
         assertCurrent();
+        if (Buffer.byteLength(JSON.stringify(report)) > this.maxReportBytes) {
+          throw error('DATA_DIFF_BUDGET_EXCEEDED', 'Báo cáo vượt hạn mức hiển thị.');
+        }
         completedReport = report;
       } catch (err) {
         if (controller.signal.aborted || err?.code === 'DATA_DIFF_CANCELLED') {
@@ -508,11 +527,19 @@ class DataDiffService {
   }
 
   getDiffStatus(jobId) {
+    this.prune();
     const job = this.jobs.get(jobId);
     if (!job) {
       throw error('DATA_DIFF_JOB_NOT_FOUND', `Không tìm thấy tác vụ so sánh ${jobId}.`);
     }
 
+    if (job.status === 'completed') {
+      try { if (!this.getJob(jobId)) throw error('DATA_DIFF_CONTEXT_CHANGED', 'Context đã thay đổi.'); }
+      catch {
+        job.status = 'failed'; job.report = null;
+        job.error = sanitizeDiffError({ code: 'DATA_DIFF_CONTEXT_CHANGED' });
+      }
+    }
     return {
       jobId: job.jobId,
       status: job.status,

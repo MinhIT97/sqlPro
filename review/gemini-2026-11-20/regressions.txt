@@ -1,0 +1,124 @@
+TAP version 13
+# Subtest: renderer state encrypts all SQL at rest without changing drafts or their targets
+ok 1 - renderer state encrypts all SQL at rest without changing drafts or their targets
+  ---
+  duration_ms: 15.143286
+  type: 'test'
+  ...
+# Subtest: legacy plaintext is readable and migrates atomically on next save
+ok 2 - legacy plaintext is readable and migrates atomically on next save
+  ---
+  duration_ms: 4.31626
+  type: 'test'
+  ...
+# Subtest: corruption, unsupported version and failed decryption preserve the old file and reject subsequent writes
+ok 3 - corruption, unsupported version and failed decryption preserve the old file and reject subsequent writes
+  ---
+  duration_ms: 4.959985
+  type: 'test'
+  ...
+# Subtest: missing local key with only encrypted state cannot create a replacement key
+ok 4 - missing local key with only encrypted state cannot create a replacement key
+  ---
+  duration_ms: 9.334239
+  type: 'test'
+  ...
+# Subtest: write/fsync/rename failures retain old ciphertext and clean only the owned staging file
+ok 5 - write/fsync/rename failures retain old ciphertext and clean only the owned staging file
+  ---
+  duration_ms: 10.536725
+  type: 'test'
+  ...
+# Subtest: state quota validates bytes, rejects arrays and cycles without touching existing data
+ok 6 - state quota validates bytes, rejects arrays and cycles without touching existing data
+  ---
+  duration_ms: 16.326013
+  type: 'test'
+  ...
+# Subtest: production Main state IPC uses encryption for saves and returns errors without overwriting corrupt state
+ok 7 - production Main state IPC uses encryption for saves and returns errors without overwriting corrupt state
+  ---
+  duration_ms: 130.502185
+  type: 'test'
+  ...
+# Subtest: development file changes notify the renderer without reloading drafts or running work
+ok 8 - development file changes notify the renderer without reloading drafts or running work
+  ---
+  duration_ms: 129.90196
+  type: 'test'
+  ...
+# Subtest: manual development reload defaults to Cancel and reloads only after explicit confirmation
+ok 9 - manual development reload defaults to Cancel and reloads only after explicit confirmation
+  ---
+  duration_ms: 2.266675
+  type: 'test'
+  ...
+# Subtest: reload is blocked for transactions, autocommit OFF, leases, opens and transfers, including changes during confirm
+ok 10 - reload is blocked for transactions, autocommit OFF, leases, opens and transfers, including changes during confirm
+  ---
+  duration_ms: 25.793999
+  type: 'test'
+  ...
+# Subtest: bulk close others keeps editor, result and target on the selected tab before persistence
+ok 11 - bulk close others keeps editor, result and target on the selected tab before persistence
+  ---
+  duration_ms: 19.984004
+  type: 'test'
+  ...
+# Subtest: close right retains an active running tab by identity as indexes shift
+ok 12 - close right retains an active running tab by identity as indexes shift
+  ---
+  duration_ms: 10.560031
+  type: 'test'
+  ...
+# Subtest: closing right of an earlier tab renders the fallback without copying the removed editor
+ok 13 - closing right of an earlier tab renders the fallback without copying the removed editor
+  ---
+  duration_ms: 9.345403
+  type: 'test'
+  ...
+# Subtest: saving a query during tab switch keeps SQL, saved identity and database bound to original tab
+ok 14 - saving a query during tab switch keeps SQL, saved identity and database bound to original tab
+  ---
+  duration_ms: 10.132654
+  type: 'test'
+  ...
+# Subtest: opening a saved query at the tab limit cannot relabel the existing tab or attach its save identity
+ok 15 - opening a saved query at the tab limit cannot relabel the existing tab or attach its save identity
+  ---
+  duration_ms: 9.666374
+  type: 'test'
+  ...
+# Subtest: desktop beforeunload persists the same complete scoped workspace as normal autosave
+ok 16 - desktop beforeunload persists the same complete scoped workspace as normal autosave
+  ---
+  duration_ms: 9.701
+  type: 'test'
+  ...
+# Subtest: restored missing or explicit-null targets stay unbound instead of inheriting the sidebar
+ok 17 - restored missing or explicit-null targets stay unbound instead of inheriting the sidebar
+  ---
+  duration_ms: 9.431299
+  type: 'test'
+  ...
+# Subtest: explicit Save waits for disk acknowledgement, retains the form on failure, and retries without duplicate entries
+ok 18 - explicit Save waits for disk acknowledgement, retains the form on failure, and retries without duplicate entries
+  ---
+  duration_ms: 9.695756
+  type: 'test'
+  ...
+# Subtest: late save acknowledgement cannot close a replacement modal or rename another tab
+ok 19 - late save acknowledgement cannot close a replacement modal or rename another tab
+  ---
+  duration_ms: 9.619375
+  type: 'test'
+  ...
+1..19
+# tests 19
+# suites 0
+# pass 19
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 259.891448

@@ -11,6 +11,27 @@ const { serialize, deserialize } = require('node:v8');
 const { pathToFileURL } = require('node:url');
 
 const store = require('./store.cjs');
+const { createRendererState } = require('./renderer-state.cjs');
+const { createLocalRecovery, readLocalRecovery, writeLocalRecovery, createLocalRecoveryManager } = require('./local-recovery.cjs');
+const { fingerprint: localVaultFingerprint } = require('./store-schema.cjs');
+let localRecoveryManager;
+function localRecovery() {
+  if (!localRecoveryManager) localRecoveryManager = createLocalRecoveryManager({ store,
+    isLoggedIn: () => sync.status().loggedIn, isBusy: () => Boolean(activeDatabaseTransfer), getGeneration: () => backupContextGeneration,
+    confirm: async counts => (await dialog.showMessageBox(mainWindow, { type: 'warning', title: 'Nhập bộ phục hồi cục bộ',
+      message: 'Thêm các kết nối và workspace phục hồi?',
+      detail: `${counts.connections} kết nối, ${counts.workspaces} workspace sẽ được thêm với ID mới. Giữ dữ liệu hiện tại, không xóa theo tombstone và không tự đồng bộ lên server. Tệp SSH private key/chứng chỉ cần sao chép riêng.`,
+      buttons: ['Hủy', 'Thêm dữ liệu phục hồi'], defaultId: 0, cancelId: 0, noLink: true })).response === 1
+  });
+  return localRecoveryManager;
+}
+let rendererStateRepository;
+function rendererState() {
+  if (!rendererStateRepository) {
+    rendererStateRepository = createRendererState({ directory: app.getPath('userData'), seal: store.seal, unseal: store.unseal });
+  }
+  return rendererStateRepository;
+}
 const { createTablePreferences } = require('./table-preferences.cjs');
 let tablePreferencesRepository;
 function tablePreferences() {
@@ -52,6 +73,7 @@ const { validateAnalyzeSource, buildAnalyzeQuery, assertAnalyzeSession, assertPl
 const { explainSettings, explainSchema } = require('../query-results.js');
 const {
   SchemaSnapshotCollector,
+  computeSchemaFingerprint,
   projectSnapshotForRenderer
 } = require('./schema-snapshot.cjs');
 const { SchemaMigrationService } = require('./schema-migration-service.cjs');
@@ -81,6 +103,7 @@ function backupSchedules() {
 
 function stopBackupSchedules() {
   backupContextGeneration++;
+  localRecoveryManager?.clear();
   schemaMigrationService.clear();
   schemaMigrationAdmission.clear();
   schemaMigrationApproval.clear();
@@ -92,7 +115,7 @@ function stopBackupSchedules() {
   operationApprovalManager?.clear();
   backupInspection.invalidate?.();
   scheduleServices?.scheduler.stop();
-  if (activeDatabaseTransfer?.scheduleId || ['backup-retention', 'backup-selection-preview', 'selective-restore', 'restore-selective', 'data-sync'].includes(activeDatabaseTransfer?.operation)) {
+  if (activeDatabaseTransfer?.scheduleId || ['backup-retention', 'backup-selection-preview', 'selective-restore', 'restore-selective', 'data-sync', 'backup-encrypt', 'backup-decrypt', 'backup-archive-import', 'backup-archive-export', 'backup-archive-delete', 'backup-archive-sftp'].includes(activeDatabaseTransfer?.operation)) {
     cancelDatabaseTransfer(activeDatabaseTransfer);
   }
 }
@@ -288,7 +311,12 @@ const dataSyncExecutor = new DataSyncExecutor({
 });
 
 const { BackupReplicaManager } = require('./backup-replica-manager.cjs');
-const { inspectBackupContainer, encryptBackupFile, decryptBackupFile } = require('./backup-crypto.cjs');
+const { inspectBackupContainer } = require('./backup-crypto.cjs');
+const { createEncryptedCatalog } = require('./backup-encrypted-catalog.cjs');
+const { recordBackupTrial } = require('./backup-trial-report.cjs');
+const { assertExternalDestination } = require('./backup-archive-copy.cjs');
+const { validateRemoteDirectory } = require('./backup-sftp-replica.cjs');
+const { nextScheduledAt, nextScheduledAtAsync } = require('./backup-schedule-timing.cjs');
 const backupReplicaManager = new BackupReplicaManager();
 const { backupDirectory, backupName, listBackups, resolveBackup, copyBackup, verifyBackup, renameBackup, updateBackupAnnotations, deleteBackup } = require('./backup-catalog.cjs');
 
@@ -642,7 +670,7 @@ function cancelDatabaseTransfer(transfer) {
     void transfer.session?.close().catch(() => {});
     return true;
   }
-  if (['backup-retention', 'selective-restore', 'restore-selective', 'data-sync'].includes(transfer.operation)) {
+  if (['backup-retention', 'selective-restore', 'restore-selective', 'data-sync', 'backup-encrypt', 'backup-decrypt', 'backup-archive-import', 'backup-archive-export', 'backup-archive-delete', 'backup-archive-sftp'].includes(transfer.operation)) {
     transfer.canceled = true;
     transfer.controller?.abort();
     if (transfer.cancelController && transfer.cancelController !== transfer.controller) {
@@ -784,11 +812,7 @@ function buildMenu() {
         {
           label: 'Tải lại giao diện',
           accelerator: 'Ctrl+Shift+R',
-          click: () => {
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.reloadIgnoringCache();
-            }
-          }
+          click: requestDevReload
         },
         {
           label: 'Mở DevTools',
@@ -805,6 +829,33 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+function devReloadBlocked() {
+  return Boolean(activeDatabaseTransfer || sessionRegistry.leases.size || sessionRegistry.opening.size
+    || [...openSessions.values()].some((entry) => entry.session.activeTask || entry.session.inTransaction
+      || entry.session.autocommit === false || entry.exclusiveOperation || entry.productionWriteInProgress));
+}
+
+function requestDevReload() {
+  const window = mainWindow;
+  if (app.isPackaged || !window || window.isDestroyed()) return;
+  if (devReloadBlocked()) {
+    dialog.showMessageBoxSync(window, {
+      type: 'info', title: 'Chưa thể tải lại giao diện',
+      message: 'Hãy kết thúc tác vụ và transaction đang mở trước khi tải lại giao diện.',
+      buttons: ['Đóng'], defaultId: 0, cancelId: 0
+    });
+    return;
+  }
+  const choice = dialog.showMessageBoxSync(window, {
+    type: 'warning', title: 'Tải lại giao diện phát triển?',
+    message: 'Các form và kết quả đang mở sẽ bị đóng.',
+    detail: 'Hãy lưu nội dung quan trọng trước khi tiếp tục. Không tự tải lại khi tệp thay đổi.',
+    buttons: ['Hủy', 'Tải lại'], defaultId: 0, cancelId: 0, noLink: true
+  });
+  if (choice !== 1 || mainWindow !== window || window.isDestroyed() || devReloadBlocked()) return;
+  window.webContents.reloadIgnoringCache();
+}
+
 let devWatcher = null;
 function setupDevFileWatcher() {
   if (devWatcher || app.isPackaged || process.env.NODE_ENV === 'test') return;
@@ -819,7 +870,7 @@ function setupDevFileWatcher() {
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => {
           if (mainWindow && typeof mainWindow.isDestroyed === 'function' && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.reload();
+            sendCommand('dev-files-changed');
           }
         }, 250);
         if (debounceTimer && typeof debounceTimer.unref === 'function') debounceTimer.unref();
@@ -1166,14 +1217,8 @@ handle('app:metadata', () => ({
   version: app.getVersion(),
   platform: process.platform
 }));
-handle('state:load', async () => {
-  const value = await readJson('renderer-state.json', {});
-  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-});
-handle('state:save', (value) => {
-  writeJson('renderer-state.json', validateState(value));
-  return { saved: true };
-});
+handle('state:load', () => rendererState().read());
+handle('state:save', (value) => rendererState().save(validateState(value)));
 handle('table-preferences:read', (scope) => tablePreferences().read(scope));
 handle('table-preferences:save', (scope, value) => tablePreferences().save(scope, value));
 handle('table-preferences:remove', (scope) => tablePreferences().remove(scope));
@@ -1339,6 +1384,43 @@ handle('account:sync-now', () => sync.syncNow());
 handle('account:resolve-conflicts', (choices) => sync.resolveConflicts(choices));
 
 handle('account:list-recovery', () => sync.listRecovery());
+
+handle('account:export-local-kit', async () => {
+  const vault = store.snapshotForSync(), generation = backupContextGeneration, before = localVaultFingerprint(vault);
+  const started = Date.now();
+  const check = () => {
+    if (Date.now() - started > 120000 || generation !== backupContextGeneration
+        || localVaultFingerprint(store.snapshotForSync()) !== before) throw new Error('Dữ liệu thay đổi hoặc chọn tệp quá lâu; hãy xuất lại bộ phục hồi.');
+  };
+  const result = await dialog.showSaveDialog(mainWindow, { title: 'Lưu bộ phục hồi cục bộ được mã hóa',
+    defaultPath: `SqlPro-${Date.now()}.sqlpro-recovery`, filters: [{ name: 'SqlPro recovery', extensions: ['sqlpro-recovery'] }] });
+  if (result.canceled || !result.filePath) return { canceled: true };
+  await assertExternalDestination(result.filePath, app.getPath('userData')); check();
+  const kit = createLocalRecovery(vault, sync.status().email || 'offline');
+  await writeLocalRecovery(result.filePath, kit.bundle, check);
+  return { filePath: result.filePath, recoveryKey: kit.recoveryKey, connections: kit.connections,
+    workspaces: kit.workspaces, createdAt: kit.bundle.createdAt };
+});
+handle('account:prepare-local-kit', async payload => {
+  if (sync.status().loggedIn) throw new Error('Hãy đăng xuất đồng bộ trước khi nhập bộ phục hồi cục bộ.');
+  if (activeDatabaseTransfer) throw new Error('Hãy đợi tác vụ database hoàn tất trước khi nhập bộ phục hồi.');
+  if (typeof payload?.recoveryKey !== 'string' || payload.recoveryKey.length > 256) throw new Error('Mã khôi phục không hợp lệ.');
+  const generation = backupContextGeneration;
+  const result = await dialog.showOpenDialog(mainWindow, { title: 'Chọn bộ phục hồi cục bộ', properties: ['openFile'],
+    filters: [{ name: 'SqlPro recovery', extensions: ['sqlpro-recovery'] }] });
+  if (result.canceled || !result.filePaths?.length) return { canceled: true };
+  const bundle = await readLocalRecovery(result.filePaths[0]);
+  if (generation !== backupContextGeneration || activeDatabaseTransfer) throw new Error('Phiên ứng dụng đã thay đổi; hãy chọn lại bộ phục hồi.');
+  return localRecovery().prepare(bundle, payload.recoveryKey);
+});
+handle('account:apply-local-kit', async payload => {
+  if (activeDatabaseTransfer) throw new Error('Hãy đợi tác vụ database hoàn tất trước khi nhập bộ phục hồi.');
+  const result = await localRecovery().apply(payload?.token);
+  if (result.imported) mainWindow?.webContents.send('sync:applied', { at: new Date().toISOString(), localRecovery: true });
+  return result;
+});
+handle('account:cancel-local-kit', payload => ({ revoked: localRecovery().revoke(payload?.token) }));
+
 
 handle('account:restore-recovery', (id) => {
   if (typeof id !== 'string' || !id) throw new Error('Bản phục hồi không hợp lệ.');
@@ -2093,13 +2175,18 @@ handle('db:save-backup-schedule', async payload => {
   const before = JSON.stringify(repository.read());
   const generation = scheduler.generation;
   const candidate = validateSchedule({ id, profileId, database: payload.database, enabled: true,
-    intervalHours: payload.intervalHours, nextRunAt: payload.nextRunAt, timeZone: payload.timeZone,
+    mode: payload.mode, timeOfDay: payload.timeOfDay, cron: payload.cron,
+    intervalHours: payload.intervalHours,
+    nextRunAt: payload.mode === 'cron' ? new Date(Date.now() + 60000).toISOString() : payload.mode === 'daily' ? nextScheduledAt(payload) : payload.nextRunAt, timeZone: payload.timeZone,
     target: targetIdentity(profile), revision: crypto.randomBytes(16).toString('hex'), lastRun: null });
+  if (candidate.mode === 'cron') candidate.nextRunAt = await nextScheduledAtAsync(candidate);
+  if (generation !== scheduler.generation || activeDatabaseTransfer || JSON.stringify(repository.read()) !== before
+      || productionProfileFingerprint(store.getWithSecrets(profileId)) !== productionProfileFingerprint(profile)) throw new Error('Kết nối hoặc lịch đã thay đổi trong khi tính lịch.');
   const started = Date.now();
   if (Date.parse(candidate.nextRunAt) <= started) throw new Error('Lần chạy đầu phải trong tương lai.');
   const confirmation = await dialog.showMessageBox(mainWindow, {
     type: 'question', title: 'Bật lịch backup khi app đang mở', message: 'Lưu và bật lịch backup cho database này?',
-    detail: `Kết nối: ${profile.name || profileId}\nMáy chủ: ${profile.host || ''}:${profile.port || 3306}\nDatabase: ${candidate.database}\nChu kỳ: mỗi ${candidate.intervalHours} giờ trôi qua\nBắt đầu: ${new Intl.DateTimeFormat('vi-VN', { timeZone: candidate.timeZone, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(candidate.nextRunAt))} (${candidate.timeZone})\n\nSao lưu cấu trúc và dữ liệu của toàn bộ bảng/view/routine/event mà tài khoản nhìn thấy, vào catalog local bằng phiên riêng. Chỉ chạy khi app mở; quá hạn 60 giây thì ghi nhận bỏ lỡ, không chạy bù và không tự retry. Chính sách tự dọn đã bật cũng được áp dụng sau backup thành công. Không tự chấp nhận SSH host key hoặc bỏ kiểm tra TLS khi chạy nền.`,
+    detail: `Kết nối: ${profile.name || profileId}\nMáy chủ: ${profile.host || ''}:${profile.port || 3306}\nDatabase: ${candidate.database}\nChu kỳ: ${candidate.mode === 'cron' ? `cron ${candidate.cron}; giờ DST thiếu bỏ qua, giờ lặp có thể chạy hai lần` : candidate.mode === 'daily' ? `hằng ngày lúc ${candidate.timeOfDay}; giờ DST bị thiếu được bỏ qua, giờ lặp chạy ở cả hai thời điểm` : `mỗi ${candidate.intervalHours} giờ trôi qua`}\nBắt đầu: ${new Intl.DateTimeFormat('vi-VN', { timeZone: candidate.timeZone, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(candidate.nextRunAt))} (${candidate.timeZone})\n\nSao lưu cấu trúc và dữ liệu của toàn bộ bảng/view/routine/event mà tài khoản nhìn thấy, vào catalog local bằng phiên riêng. Chỉ chạy khi app mở; quá hạn 60 giây thì ghi nhận bỏ lỡ, không chạy bù và không tự retry. Chính sách tự dọn đã bật cũng được áp dụng sau backup thành công. Không tự chấp nhận SSH host key hoặc bỏ kiểm tra TLS khi chạy nền.`,
     buttons: ['Hủy', 'Lưu và bật lịch'], defaultId: 0, cancelId: 0, noLink: true
   });
   if (confirmation.response !== 1) return { canceled: true };
@@ -2561,24 +2648,100 @@ handle('db:inspect-backup-container', async (payload) => {
   return inspectBackupContainer(filePath);
 });
 
-handle('db:encrypt-backup', async (payload) => {
-  const filePath = await resolveBackup(app.getPath('userData'), payload.profileId, payload.database, payload.id);
-  const outPath = `${filePath}.enc`;
-  const result = await encryptBackupFile(filePath, outPath, {
-    passphrase: payload.passphrase,
-    compress: payload.compress !== false
+function encryptedCatalog(payload, signal) {
+  const { profileId, database } = payload || {};
+  const generation = backupContextGeneration;
+  const fingerprint = computeSchemaFingerprint(store.getWithSecrets(profileId));
+  return createEncryptedCatalog({ root: app.getPath('userData'), profileId, database, signal,
+    checkContext: () => {
+      if (generation !== backupContextGeneration || fingerprint !== computeSchemaFingerprint(store.getWithSecrets(profileId))) {
+        throw Object.assign(new Error('Kết nối hoặc phiên xử lý backup đã thay đổi.'), { code: 'BACKUP_CONTEXT_CHANGED' });
+      }
+    }
   });
-  return { ...result, outPath };
-});
+}
 
-handle('db:decrypt-backup', async (payload) => {
-  const filePath = await resolveBackup(app.getPath('userData'), payload.profileId, payload.database, payload.id);
-  const outPath = filePath.endsWith('.enc') ? filePath.slice(0, -4) : `${filePath}.dec.sql`;
-  const result = await decryptBackupFile(filePath, outPath, {
-    passphrase: payload.passphrase
-  });
-  return { ...result, outPath };
-});
+handle('db:list-encrypted-backups', payload => encryptedCatalog(payload).list());
+async function runBackupCrypto(payload, operation) {
+  if (!payload || typeof payload.taskId !== 'string' || !payload.taskId || payload.taskId.length > 160
+      || typeof payload.passphrase !== 'string' || payload.passphrase.length > 1024
+      || (payload.compress !== undefined && typeof payload.compress !== 'boolean')) {
+    throw Object.assign(new Error('Yêu cầu xử lý backup không hợp lệ.'), { code: 'INVALID_BACKUP_CRYPTO_REQUEST' });
+  }
+  const transfer = claimDatabaseTransfer({ operation, profileId: payload?.profileId, database: payload?.database, taskId: payload?.taskId });
+  const timer = setTimeout(() => transfer.controller.abort(), 600000);
+  timer.unref?.();
+  try {
+    const catalog = encryptedCatalog(payload, transfer.controller.signal);
+    return operation === 'backup-encrypt'
+      ? await catalog.encrypt(payload.id, payload.passphrase, payload.compress !== false)
+      : await catalog.decrypt(payload.id, payload.passphrase);
+  } catch (error) {
+    if (transfer.controller.signal.aborted) throw Object.assign(new Error('Đã hủy xử lý backup; chưa tạo bản kết quả hoàn chỉnh.'), { code: 'BACKUP_CRYPTO_CANCELLED' });
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    if (activeDatabaseTransfer === transfer) activeDatabaseTransfer = null;
+  }
+}
+handle('db:encrypt-backup', payload => runBackupCrypto(payload, 'backup-encrypt'));
+handle('db:decrypt-backup', payload => runBackupCrypto(payload, 'backup-decrypt'));
+
+async function manageBackupArchive(payload, operation) {
+  if (!payload || typeof payload.taskId !== 'string' || !payload.taskId || payload.taskId.length > 160) throw new Error('Thiếu mã tác vụ archive.');
+  const transfer = claimDatabaseTransfer({ operation, profileId: payload.profileId, database: payload.database, taskId: payload.taskId });
+  const timer = setTimeout(() => transfer.controller.abort(), 600000); timer.unref?.();
+  try {
+    const catalog = encryptedCatalog(payload, transfer.controller.signal);
+    if (operation === 'backup-archive-import') {
+      const result = await dialog.showOpenDialog(mainWindow, { title: 'Nhập backup mã hóa', properties: ['openFile'], filters: [{ name: 'SqlPro encrypted', extensions: ['enc'] }] });
+      if (result.canceled || !result.filePaths?.length) return { canceled: true };
+      return await catalog.importArchive(result.filePaths[0]);
+    }
+    // Capture the archive identity across native dialogs; don't act on a replacement.
+    const entries = await catalog.list(), entry = entries.find(item => item.id === payload.id);
+    if (!entry) throw new Error('Không tìm thấy archive đã chọn.');
+    const archivePath = path.join(backupDirectory(app.getPath('userData'), payload.profileId, payload.database), entry.id);
+    const before = await fs.promises.lstat(archivePath);
+    if (operation === 'backup-archive-export') {
+      const result = await dialog.showSaveDialog(mainWindow, { title: 'Xuất backup mã hóa', defaultPath: entry.id, filters: [{ name: 'SqlPro encrypted', extensions: ['enc'] }] });
+      if (result.canceled || !result.filePath) return { canceled: true };
+      await assertExternalDestination(result.filePath, app.getPath('userData'));
+      const after = await fs.promises.lstat(archivePath);
+      if (!sameBackupFile(before, after)) throw new Error('Archive thay đổi trong khi chọn nơi lưu.');
+      return await catalog.exportArchive(entry.id, result.filePath);
+    }
+    if (operation === 'backup-archive-sftp') {
+      const destinationDir = validateRemoteDirectory(payload.destinationDir);
+      const profile = store.getWithSecrets(payload.profileId);
+      if (!profile.ssh?.enabled || !profile.ssh.knownHostKey?.fingerprint) throw new Error('Hãy cấu hình và tin cậy SSH host key trong kết nối trước khi gửi SFTP.');
+      const confirmation = await dialog.showMessageBox(mainWindow, {
+        type: 'question', title: 'Gửi replica mã hóa qua SFTP', message: 'Gửi archive tới máy chủ SSH đã cấu hình?',
+        detail: `${profile.ssh.host}:${profile.ssh.port || 22}\nThư mục: ${destinationDir}\nArchive: ${entry.id}\nTạo thư mục replica riêng, đọc lại SHA-256 và giữ bản local. Không tự retry hoặc tự tin cậy host key.`,
+        buttons: ['Hủy', 'Gửi replica'], defaultId: 0, cancelId: 0, noLink: true
+      });
+      if (confirmation.response !== 1) return { canceled: true };
+      if (!sameBackupFile(before, await fs.promises.lstat(archivePath))) throw new Error('Archive thay đổi trong khi xác nhận.');
+      return await catalog.replicateArchive(entry.id, { ssh: profile.ssh, destinationDir });
+    }
+    const confirmation = await dialog.showMessageBox(mainWindow, {
+      type: 'warning', title: 'Xóa archive mã hóa', message: 'Xóa vĩnh viễn bản mã hóa đã chọn?',
+      detail: `${entry.id}\nChỉ xóa archive này. Các bản SQL đang có được giữ.`,
+      buttons: ['Hủy', 'Xóa archive'], defaultId: 0, cancelId: 0, noLink: true
+    });
+    if (confirmation.response !== 1) return { canceled: true };
+    if (!sameBackupFile(before, await fs.promises.lstat(archivePath))) throw new Error('Archive thay đổi trong khi xác nhận.');
+    return await catalog.removeArchive(entry.id);
+  } finally { clearTimeout(timer); if (activeDatabaseTransfer === transfer) activeDatabaseTransfer = null; }
+}
+function sameBackupFile(left, right) {
+  return ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].every(key => left[key] === right[key]);
+}
+handle('db:import-encrypted-backup', payload => manageBackupArchive(payload, 'backup-archive-import'));
+handle('db:export-encrypted-backup', payload => manageBackupArchive(payload, 'backup-archive-export'));
+handle('db:delete-encrypted-backup', payload => manageBackupArchive(payload, 'backup-archive-delete'));
+handle('db:replicate-encrypted-backup', payload => manageBackupArchive(payload, 'backup-archive-sftp'));
+
 
 handle('db:create-backup-replica', async (payload) => {
   const filePath = await resolveBackup(app.getPath('userData'), payload.profileId, payload.database, payload.id);
@@ -2674,11 +2837,7 @@ handle('db:trial-backup',async(payload)=>{
     const report=await runRestoreTrial({session,filePath,taskId,control,
       journal: { prepare: ownership => journal.prepare(profile, ownership), remove: id => journal.remove(id) },
       onProgress:progress=>sendDbProgress({...progress,taskId,profileId})});
-    const reportPath=`${filePath}.trial.json`;
-    const temporary=`${reportPath}.${crypto.randomBytes(8).toString('hex')}.part`;
-    try {await fs.promises.writeFile(temporary,JSON.stringify(report,null,2),{flag:'wx',mode:0o600});await fs.promises.rename(temporary,reportPath);}
-    catch(error){report.reportSaveError=error.message;}
-    finally {await fs.promises.rm(temporary,{force:true}).catch(()=>{});}
+    await recordBackupTrial(filePath, report, fileIdentity(sourceBefore));
     return {report};
   } finally {try {await session?.close();}finally {if(activeDatabaseTransfer===transfer)activeDatabaseTransfer=null;}}
 });

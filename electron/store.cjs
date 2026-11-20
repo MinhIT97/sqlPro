@@ -150,6 +150,12 @@ function hasLocalSecrets() {
     if (error.code !== 'ENOENT') throw secretError('LOCAL_KEY_READ_FAILED', 'Không kiểm tra được nhật ký phục hồi thử. Giữ nguyên khóa và dữ liệu.', error);
   }
   try {
+    const state = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'renderer-state.json'), 'utf8'));
+    if (state?.kind === 'sqlpro-renderer-state' && state.sealed?.alg === 'local') return true;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw secretError('LOCAL_KEY_READ_FAILED', 'Không kiểm tra được trạng thái mã hóa hiện có. Khóa và dữ liệu được giữ nguyên.', error);
+  }
+  try {
     const session = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'sync-session.json'), 'utf8'));
     return [session.tokenSealed, session.vaultKeySealed].some((secret) => secret?.alg === 'local');
   } catch (error) {

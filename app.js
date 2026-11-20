@@ -5,6 +5,9 @@ let mode = 'data';
 let historyRows = [];
 let savedQueries = [];
 let snippets = [];
+let queryDraftCache = '';
+// Remove the old plaintext browser cache; durable drafts belong to Main's encrypted state.
+try { sessionStorage.removeItem('query'); } catch {}
 let snippetSearchTerm = '';
 let snippetFilterTag = '';
 let historyFilter = { query: '', status: 'all', scrubSensitive: false };
@@ -1046,34 +1049,52 @@ function normalizeSavedQuery(item) {
   };
 }
 
+function captureRendererState() {
+  syncActiveQuery();
+  return {
+    connectionId: app.connection ? app.connection.id : null,
+    workspaceId: app.activeWorkspaceId,
+    database: app.database,
+    table,
+    mode: mode === 'transfer' ? 'backups' : mode,
+    savedQuery: app.query?.sql ?? queryDraftCache,
+    queryTabs: queryTabs.map((tab) => ({
+      timeoutMs: queryTimeoutMs(tab),
+      rowLimit: queryRowLimit(tab),
+      title: tab.title,
+      sql: tab.sql ?? '',
+      profileId: tab.profileId || null,
+      database: tab.database || null
+    })),
+    activeQuery,
+    history: historyRows.slice(0, 500),
+    savedQueries: savedQueries.slice(0, 200),
+    snippets: snippets.slice(0, 200),
+    maskData: Boolean(app.maskData)
+  };
+}
+
+let stateSaveErrorShown = false;
+async function saveRendererStateNow() {
+  if (!desktop) return false;
+  try {
+    await desktop.saveState(captureRendererState());
+    stateSaveErrorShown = false;
+    return true;
+  } catch (error) {
+    if (!stateSaveErrorShown) toast('Chưa lưu được trạng thái: ' + (error.message || 'Hãy kiểm tra quyền truy cập và dung lượng ổ đĩa.'), 'error');
+    stateSaveErrorShown = true;
+    return false;
+  }
+}
+
 let persistTimer;
 function persistState() {
   if (!desktop) return;
-  const editor = $('#sql');
-  if (mode === 'query' && editor && app.query) app.query.sql = editor.value;
+  syncActiveQuery();
   clearTimeout(persistTimer);
   persistTimer = setTimeout(() => {
-    desktop.saveState({
-      connectionId: app.connection ? app.connection.id : null,
-      workspaceId: app.activeWorkspaceId,
-      database: app.database,
-      table,
-      mode: mode === 'transfer' ? 'backups' : mode,
-      savedQuery: app.query?.sql ?? (sessionStorage.getItem('query') || ''),
-      queryTabs: queryTabs.map((tab) => ({
-        timeoutMs: queryTimeoutMs(tab),
-        rowLimit: queryRowLimit(tab),
-        title: tab.title,
-        sql: tab.sql ?? '',
-        profileId: tab.profileId || null,
-        database: tab.database || null
-      })),
-      activeQuery,
-      history: historyRows.slice(0, 500),
-      savedQueries: savedQueries.slice(0, 200),
-      snippets: snippets.slice(0, 200),
-      maskData: Boolean(app.maskData)
-    }).catch(() => undefined);
+    void saveRendererStateNow();
   }, 150);
 }
 
@@ -1328,6 +1349,25 @@ async function showErDiagramModal() {
   });
 }
 
+function restoreQueryTab(tab, index) {
+  return {
+    id: index + 1,
+    title: tab && typeof tab.title === 'string' && tab.title.trim()
+      ? tab.title.trim().slice(0, 40) : `Query ${index + 1}`,
+    sql: tab && typeof tab.sql === 'string' ? tab.sql : '',
+    timeoutMs: queryTimeoutMs(tab),
+    rowLimit: queryRowLimit(tab),
+    result: null,
+    error: null,
+    running: false,
+    // Legacy/missing targets remain unbound. A sidebar choice cannot prove
+    // where a recovered SQL draft was intended to execute.
+    profileId: tab && typeof tab.profileId === 'string' && tab.profileId ? tab.profileId : null,
+    database: tab && typeof tab.database === 'string' && tab.database ? tab.database : null,
+    taskId: null
+  };
+}
+
 async function init() {
   initTheme();
   setupContextMenu();
@@ -1399,39 +1439,13 @@ async function init() {
   let saved = {};
   try {
     saved = await desktop.loadState();
-  } catch {
+  } catch (error) {
     saved = {};
+    toast(error.message || 'Không đọc được trạng thái đã lưu. Tệp được giữ nguyên.', 'error');
   }
   if (saved && Array.isArray(saved.queryTabs) && saved.queryTabs.length) {
-    queryTabs = saved.queryTabs.slice(0, 50).map((tab, index) => ({
-      id: index + 1,
-      title: tab && typeof tab.title === 'string' && tab.title.trim()
-        ? tab.title.trim().slice(0, 40)
-        : `Query ${index + 1}`,
-      sql: tab && typeof tab.sql === 'string' ? tab.sql : '',
-      timeoutMs: queryTimeoutMs(tab),
-      rowLimit: queryRowLimit(tab),
-      result: null,
-      error: null,
-      running: false,
-      profileId: tab && typeof tab.profileId === 'string' && tab.profileId
-        ? tab.profileId
-        : (typeof saved.connectionId === 'string' ? saved.connectionId : null),
-      database: tab && typeof tab.database === 'string' && tab.database
-        ? tab.database
-        : (typeof saved.database === 'string' ? saved.database : null),
-      taskId: null
-    }));
-    const allDefault = queryTabs.every((tab) => /^Query\s+\d+$/i.test(tab.title));
-    if (allDefault && queryTabs.length > 0) {
-      queryTabs.forEach((tab, i) => {
-        tab.title = `Query ${i + 1}`;
-      });
-    }
-    queryId = queryTabs.reduce((max, tab) => {
-      const match = /(\d+)\s*$/.exec(tab.title);
-      return Math.max(max, match ? Number(match[1]) : 0);
-    }, queryTabs.length);
+    queryTabs = saved.queryTabs.slice(0, 50).map(restoreQueryTab);
+    queryId = queryTabs.length;
     activeQuery = Number.isInteger(saved.activeQuery)
       ? Math.min(Math.max(saved.activeQuery, 0), queryTabs.length - 1)
       : 0;
@@ -1439,7 +1453,7 @@ async function init() {
   }
   if (saved && typeof saved.savedQuery === 'string' && saved.savedQuery) {
     if (!Array.isArray(saved.queryTabs) || !saved.queryTabs.length) queryTabs[0].sql = saved.savedQuery;
-    sessionStorage.setItem('query', saved.savedQuery);
+    queryDraftCache = saved.savedQuery;
   }
   if (saved && Array.isArray(saved.history)) {
     historyRows = saved.history.map(normalizeHistory).filter(Boolean).slice(0, 500);
@@ -1921,24 +1935,24 @@ function newRoutineModal(kind) {
 function openSavedQuery(id) {
   const entry = savedQueries.find((item) => item.id === id);
   if (!entry) return;
-  newQuery(entry.sql, { profileId: entry.profileId, database: entry.database });
-  app.query.savedQueryId = entry.id;
-  app.query.title = entry.name.slice(0, 40);
-  updateChrome();
-  persistState();
+  newQuery(entry.sql, { profileId: entry.profileId, database: entry.database }, {
+    title: entry.name, savedQueryId: entry.id
+  });
 }
 
 function saveQuery() {
   const editor = $('#sql');
   if (editor && app.query) app.query.sql = editor.value;
-  const sql = app.query?.sql || '';
+  const query = app.query;
+  const sql = query?.sql || '';
+  const target = { profileId: query?.profileId || null, database: query?.database || null };
   if (!sql.trim()) {
     toast('Câu lệnh SQL đang trống.', 'error');
     return;
   }
-  sessionStorage.setItem('query', sql);
-  const existing = app.query.savedQueryId
-    ? savedQueries.find((entry) => entry.id === app.query.savedQueryId)
+  queryDraftCache = sql;
+  let existing = query.savedQueryId
+    ? savedQueries.find((entry) => entry.id === query.savedQueryId)
     : null;
   const suggested = existing
     ? existing.name
@@ -1953,14 +1967,21 @@ function saveQuery() {
       <button class="primary" id="savedQueryGo">Lưu</button>
     </div>
   `);
-  $('#savedQueryGo').addEventListener('click', () => {
+  const revision = modalRevision;
+  let saving = false;
+  $('#savedQueryGo').addEventListener('click', async () => {
+    if (saving || revision !== modalRevision) return;
     const name = $('#savedQueryName').value.trim();
     if (!name) {
       toast('Tên truy vấn không được để trống.', 'error');
       return;
     }
     const now = new Date().toISOString();
-    const target = { profileId: app.query.profileId || null, database: app.query.database || null };
+    if (!queryTabs.includes(query) || query.profileId !== target.profileId || query.database !== target.database
+      || (existing && !savedQueries.includes(existing))) {
+      toast('Tab hoặc đích truy vấn đã thay đổi. Hãy mở lại thao tác lưu.', 'error');
+      return;
+    }
     if (existing) {
       existing.name = name.slice(0, 80);
       existing.sql = sql;
@@ -1977,14 +1998,18 @@ function saveQuery() {
         updatedAt: now
       };
       savedQueries.unshift(entry);
-      app.query.savedQueryId = entry.id;
+      existing = entry;
+      query.savedQueryId = entry.id;
     }
-    app.query.title = name.slice(0, 40);
+    query.title = name.slice(0, 40);
     renderQueryTabs();
     savedQueries = savedQueries.slice(0, 200);
     openTreeGroups.add('queries');
-    persistState();
     renderSidebar();
+    saving = true;
+    const saved = await saveRendererStateNow();
+    saving = false;
+    if (!saved || revision !== modalRevision) return;
     closeModal();
     toast('Đã lưu truy vấn trên máy.');
   });
@@ -2497,6 +2522,25 @@ async function showProcesslistModal() {
     </div>
   `);
 
+  const target = activeQueryTarget();
+  const profileName = app.connection.name || app.connection.host || target.profileId;
+  const revision = modalRevision;
+  let invalidated = false;
+  const isCurrent = () => {
+    if (revision !== modalRevision || !$('#modal')?.open
+      || target.profileId !== app.connection?.id || target.database !== (app.database || null)) {
+      invalidated = true;
+      onModalClose();
+    }
+    return !invalidated;
+  };
+  const queryDiagnostic = async (payload) => {
+    if (!isCurrent()) throw new Error('Đích chẩn đoán đã thay đổi. Hãy mở lại bảng chẩn đoán.');
+    const result = await call(desktop.db.query({ ...payload, ...target }));
+    if (!isCurrent()) throw new Error('Đích chẩn đoán đã thay đổi. Hãy mở lại bảng chẩn đoán.');
+    return result;
+  };
+
   let currentTab = 'processlist';
   let activeQuickFilter = 'all';
   let autoRefreshTimer = null;
@@ -2511,7 +2555,7 @@ async function showProcesslistModal() {
       clearInterval(autoRefreshTimer);
       autoRefreshTimer = null;
     }
-    document.removeEventListener('visibilitychange', onVisibilityChange);
+    document.removeEventListener?.('visibilitychange', onVisibilityChange);
   };
   dialog.addEventListener('close', onModalClose, { once: true });
 
@@ -2528,6 +2572,7 @@ async function showProcesslistModal() {
   document.addEventListener('visibilitychange', onVisibilityChange);
 
   function setupAutoRefresh() {
+    if (!isCurrent()) return;
     if (autoRefreshTimer) {
       clearInterval(autoRefreshTimer);
       autoRefreshTimer = null;
@@ -2536,7 +2581,7 @@ async function showProcesslistModal() {
     const intervalSec = Number(select?.value) || 0;
     if (intervalSec > 0) {
       autoRefreshTimer = setInterval(() => {
-        if (!document.hidden && !isFetching && $('#modal').open) {
+        if (!document.hidden && !isFetching && isCurrent()) {
           void refreshCurrentTab();
         }
       }, intervalSec * 1000);
@@ -2550,7 +2595,7 @@ async function showProcesslistModal() {
   async function ensureServerInfo() {
     if (currentConnectionId !== null && serverEngine !== null) return;
     try {
-      const res = await call(desktop.db.query({ ...activeQueryTarget(), sql: 'SELECT CONNECTION_ID() AS my_id, VERSION() AS ver' }));
+      const res = await queryDiagnostic({ sql: 'SELECT CONNECTION_ID() AS my_id, VERSION() AS ver' });
       if (res && Array.isArray(res.rows) && res.rows.length) {
         currentConnectionId = String(res.rows[0][0]);
         if (typeof SqlDiagnostics !== 'undefined') {
@@ -2570,12 +2615,12 @@ async function showProcesslistModal() {
 
   async function loadProcesslist() {
     const container = $('#diagTabContent');
-    if (!container || isFetching) return;
+    if (!container || isFetching || !isCurrent()) return;
     isFetching = true;
     try {
       await ensureServerInfo();
-      const res = await call(desktop.db.query({ ...activeQueryTarget(), sql: 'SHOW FULL PROCESSLIST' }));
-      if (container !== $('#diagTabContent') || currentTab !== 'processlist') return;
+      const res = await queryDiagnostic({ sql: 'SHOW FULL PROCESSLIST' });
+      if (!isCurrent() || container !== $('#diagTabContent') || currentTab !== 'processlist') return;
 
       const rawRows = res.rows || [];
       const processes = rawRows.map((r) => {
@@ -2705,6 +2750,7 @@ async function showProcesslistModal() {
       container.querySelectorAll('.process-sql').forEach((codeEl) => {
         codeEl.addEventListener('click', async (e) => {
           e.stopPropagation();
+          if (!isCurrent()) return;
           const sql = codeEl.dataset.fullSql;
           if (sql) {
             if (navigator.clipboard?.writeText) {
@@ -2729,17 +2775,17 @@ async function showProcesslistModal() {
           if (p.isSystem) msg += '\n\n⚠️ CẢNH BÁO: Đây là tiến trình hệ thống MySQL!';
 
           const confirmed = await confirmAction(`Dừng câu lệnh SQL #${killId}?`, msg, 'Dừng SQL (KILL QUERY)', { separate: true });
-          if (!confirmed) return;
+          if (!confirmed || !isCurrent() || container !== $('#diagTabContent')) return;
 
           try {
             const sql = typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.safeKillQuerySql(killId) : `KILL QUERY ${killId}`;
-            await call(desktop.db.query({ ...activeQueryTarget(), sql, confirmed: true }));
+            await queryDiagnostic({ sql, confirmed: true });
             toast(`Đã gửi lệnh dừng SQL cho tiến trình #${killId}`, 'success');
-            void recordAudit({ actionType: 'KILL', summary: `Dừng câu lệnh SQL (KILL QUERY #${killId})`, status: 'success' });
+            void recordAudit({ ...target, profileName, actionType: 'KILL', summary: `Dừng câu lệnh SQL (KILL QUERY #${killId})`, status: 'success' });
             await loadProcesslist();
           } catch (err) {
             toast(err.message || 'Lỗi khi dừng câu lệnh SQL', 'error');
-            void recordAudit({ actionType: 'KILL', summary: `Lỗi khi dừng câu lệnh SQL #${killId}`, status: 'error', errorSummary: err.message });
+            void recordAudit({ ...target, profileName, actionType: 'KILL', summary: `Lỗi khi dừng câu lệnh SQL #${killId}`, status: 'error', errorSummary: err.message });
           }
         });
       });
@@ -2758,21 +2804,22 @@ async function showProcesslistModal() {
           if (p.isSystem) msg += '\n\n⚠️ CẢNH BÁO NGUY HIỂM: Đây là tiến trình nội bộ hệ thống MySQL (replication/scheduler)! Hủy tiến trình này có thể gây lỗi hệ thống.';
 
           const confirmed = await confirmAction(`Hủy kết nối #${killId}?`, msg, 'Đóng kết nối (KILL)', { separate: true });
-          if (!confirmed) return;
+          if (!confirmed || !isCurrent() || container !== $('#diagTabContent')) return;
 
           try {
             const sql = typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.safeKillConnectionSql(killId) : `KILL ${killId}`;
-            await call(desktop.db.query({ ...activeQueryTarget(), sql, confirmed: true }));
+            await queryDiagnostic({ sql, confirmed: true });
             toast(`Đã hủy tiến trình #${killId}`, 'success');
-            void recordAudit({ actionType: 'KILL', summary: `Đóng kết nối tiến trình (KILL #${killId})`, status: 'success' });
+            void recordAudit({ ...target, profileName, actionType: 'KILL', summary: `Đóng kết nối tiến trình (KILL #${killId})`, status: 'success' });
             await loadProcesslist();
           } catch (err) {
             toast(err.message || 'Lỗi khi hủy tiến trình', 'error');
-            void recordAudit({ actionType: 'KILL', summary: `Lỗi khi hủy tiến trình #${killId}`, status: 'error', errorSummary: err.message });
+            void recordAudit({ ...target, profileName, actionType: 'KILL', summary: `Lỗi khi hủy tiến trình #${killId}`, status: 'error', errorSummary: err.message });
           }
         });
       });
     } catch (err) {
+      if (!isCurrent() || container !== $('#diagTabContent')) return;
       container.innerHTML = `<div class="processlist-error">Lỗi khi đọc Processlist: ${esc(err.message)}</div>`;
     } finally {
       isFetching = false;
@@ -2781,7 +2828,7 @@ async function showProcesslistModal() {
 
   async function loadLocksAndTransactions() {
     const container = $('#diagTabContent');
-    if (!container || isFetching) return;
+    if (!container || isFetching || !isCurrent()) return;
     isFetching = true;
     container.innerHTML = '<div class="processlist-loading">Đang phân tích giao dịch và khóa InnoDB...</div>';
 
@@ -2790,7 +2837,7 @@ async function showProcesslistModal() {
       let trxRows = [];
       try {
         const trxSql = typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.getLongTransactionsQuery() : 'SELECT * FROM information_schema.innodb_trx LIMIT 100';
-        const resTrx = await call(desktop.db.query({ ...activeQueryTarget(), sql: trxSql }));
+        const resTrx = await queryDiagnostic({ sql: trxSql });
         trxRows = (resTrx.rows || []).map((r) => (typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.parseTransactionRow(r) : r));
       } catch {
         // ignore
@@ -2801,14 +2848,14 @@ async function showProcesslistModal() {
       try {
         const lockSql = typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.getLockWaitersQuery(serverEngine) : '';
         if (lockSql) {
-          const resLock = await call(desktop.db.query({ ...activeQueryTarget(), sql: lockSql }));
+          const resLock = await queryDiagnostic({ sql: lockSql });
           lockRows = (resLock.rows || []).map((r) => (typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.parseLockWaiterRow(r) : r));
         }
       } catch (err) {
         lockError = err.message;
       }
 
-      if (container !== $('#diagTabContent') || currentTab !== 'locks') return;
+      if (!isCurrent() || container !== $('#diagTabContent') || currentTab !== 'locks') return;
 
       container.innerHTML = `
         <div class="diag-section">
@@ -2887,11 +2934,11 @@ async function showProcesslistModal() {
         btn.addEventListener('click', async () => {
           const blockerId = btn.dataset.killBlocker;
           const confirmed = await confirmAction(`Hủy tiến trình chặn #${blockerId}?`, `Tiến trình #${blockerId} đang giữ khóa khiến các truy vấn khác phải chờ. Hủy tiến trình này sẽ giải phóng khóa.`, 'Hủy Blocker', { separate: true });
-          if (!confirmed) return;
+          if (!confirmed || !isCurrent() || container !== $('#diagTabContent')) return;
 
           try {
             const sql = typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.safeKillConnectionSql(blockerId) : `KILL ${blockerId}`;
-            await call(desktop.db.query({ ...activeQueryTarget(), sql, confirmed: true }));
+            await queryDiagnostic({ sql, confirmed: true });
             toast(`Đã hủy tiến trình blocker #${blockerId}`, 'success');
             await loadLocksAndTransactions();
           } catch (err) {
@@ -2900,6 +2947,7 @@ async function showProcesslistModal() {
         });
       });
     } catch (err) {
+      if (!isCurrent() || container !== $('#diagTabContent')) return;
       container.innerHTML = `<div class="processlist-error">Lỗi khi phân tích khóa: ${esc(err.message)}</div>`;
     } finally {
       isFetching = false;
@@ -2908,7 +2956,7 @@ async function showProcesslistModal() {
 
   async function loadSlowQueries() {
     const container = $('#diagTabContent');
-    if (!container || isFetching) return;
+    if (!container || isFetching || !isCurrent()) return;
     isFetching = true;
     container.innerHTML = '<div class="processlist-loading">Đang đọc cấu hình và lịch sử truy vấn chậm...</div>';
 
@@ -2919,7 +2967,7 @@ async function showProcesslistModal() {
       let uptime = '—';
 
       try {
-        const resVars = await call(desktop.db.query({ ...activeQueryTarget(), sql: "SHOW GLOBAL VARIABLES WHERE Variable_name IN ('slow_query_log', 'long_query_time', 'log_output', 'slow_query_log_file')" }));
+        const resVars = await queryDiagnostic({ sql: "SHOW GLOBAL VARIABLES WHERE Variable_name IN ('slow_query_log', 'long_query_time', 'log_output', 'slow_query_log_file')" });
         for (const r of (resVars.rows || [])) {
           const key = String(r[0]).toLowerCase();
           const val = String(r[1]);
@@ -2929,7 +2977,7 @@ async function showProcesslistModal() {
       } catch {}
 
       try {
-        const resStatus = await call(desktop.db.query({ ...activeQueryTarget(), sql: "SHOW GLOBAL STATUS WHERE Variable_name IN ('Slow_queries', 'Uptime')" }));
+        const resStatus = await queryDiagnostic({ sql: "SHOW GLOBAL STATUS WHERE Variable_name IN ('Slow_queries', 'Uptime')" });
         for (const r of (resStatus.rows || [])) {
           const key = String(r[0]).toLowerCase();
           const val = String(r[1]);
@@ -2942,13 +2990,13 @@ async function showProcesslistModal() {
       let slowLogError = null;
       try {
         const slowSql = typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.getSlowQueriesQuery() : 'SELECT * FROM mysql.slow_log ORDER BY start_time DESC LIMIT 50';
-        const resSlow = await call(desktop.db.query({ ...activeQueryTarget(), sql: slowSql }));
+        const resSlow = await queryDiagnostic({ sql: slowSql });
         slowLogRows = (resSlow.rows || []).map((r) => (typeof SqlDiagnostics !== 'undefined' ? SqlDiagnostics.parseSlowQueryRow(r) : r));
       } catch (err) {
         slowLogError = err.message;
       }
 
-      if (container !== $('#diagTabContent') || currentTab !== 'slow') return;
+      if (!isCurrent() || container !== $('#diagTabContent') || currentTab !== 'slow') return;
 
       container.innerHTML = `
         <div class="diag-stat-grid">
@@ -3024,6 +3072,7 @@ async function showProcesslistModal() {
       container.querySelectorAll('.process-sql').forEach((codeEl) => {
         codeEl.addEventListener('click', (e) => {
           e.stopPropagation();
+          if (!isCurrent()) return;
           const sql = codeEl.dataset.fullSql;
           if (sql && navigator.clipboard?.writeText) {
             navigator.clipboard.writeText(sql);
@@ -3032,6 +3081,7 @@ async function showProcesslistModal() {
         });
       });
     } catch (err) {
+      if (!isCurrent() || container !== $('#diagTabContent')) return;
       container.innerHTML = `<div class="processlist-error">Lỗi khi đọc nhật ký truy vấn chậm: ${esc(err.message)}</div>`;
     } finally {
       isFetching = false;
@@ -3040,6 +3090,7 @@ async function showProcesslistModal() {
 
   $('#modal').querySelectorAll('[data-diag-tab]').forEach((btn) => {
     btn.addEventListener('click', () => {
+      if (!isCurrent()) return;
       $('#modal').querySelectorAll('[data-diag-tab]').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
       currentTab = btn.dataset.diagTab;
@@ -3727,7 +3778,7 @@ async function showDataDiffModal(initialTable = null) {
 
       <div class="modal-footer">
         <div class="modal-footer-hint">
-          <span>💡 <em>Báo cáo giới hạn dòng, chỉ đọc. Yêu cầu cùng khóa chính ở hai bảng; chưa hỗ trợ snapshot hoặc đồng bộ.</em></span>
+          <span>💡 <em>Đọc theo từng phần bằng kết nối riêng. Phạm vi và snapshot được báo rõ; đồng bộ vẫn khóa.</em></span>
         </div>
         <button class="secondary" data-click="close-modal">Đóng (Esc)</button>
       </div>
@@ -3739,10 +3790,6 @@ async function showDataDiffModal(initialTable = null) {
   let revision = 0, configRequest = 0;
   let currentTab = 'config';
   let diffResult = null;
-  let sourceRows = [];
-  let targetRows = [];
-  let sourceColumns = [];
-  let targetColumns = [];
   let primaryKeys = [];
 
   let sourceProfileId = app.connection?.id || null;
@@ -3755,12 +3802,20 @@ async function showDataDiffModal(initialTable = null) {
 
   let rowLimit = 500;
   let isComparing = false;
+  let activeJob = null;
   function invalidateComparison() {
     revision++; diffResult = null; isComparing = false;
+    void activeJob?.cancel().catch(() => {});
+    activeJob = null;
     const button = $('#dataDiffRunCompareBtn');
     if (button && modalCurrent()) { button.disabled = false; button.textContent = 'Đọc và so sánh'; }
     modalRoot?.closest('.data-diff-card')?.querySelectorAll('[data-data-diff-tab]:not([data-data-diff-tab="config"])').forEach(button => { button.disabled = true; });
   }
+
+  const lifecycle = new MutationObserver(() => {
+    if (!modalCurrent()) { invalidateComparison(); lifecycle.disconnect(); }
+  });
+  lifecycle.observe($('#modal'), { childList: true, attributes: true, attributeFilter: ['open'] });
 
   function switchTab(tabName) {
     if (!modalCurrent()) return;
@@ -3877,11 +3932,13 @@ async function showDataDiffModal(initialTable = null) {
           <button class="primary" id="dataDiffRunCompareBtn" style="padding:8px 20px; font-weight:600;">
             ${isComparing ? '⏳ Đang so sánh...' : '⚖️ Bắt đầu so sánh dữ liệu'}
           </button>
+          <button id="dataDiffCancelBtn" ${isComparing ? '' : 'hidden'}>Hủy so sánh</button>
+          <span id="dataDiffProgress" role="status" aria-live="polite"></span>
         </div>
 
         ${diffResult ? `
           <div style="margin-top:16px; padding:12px; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:6px; color:#166534; font-size:0.9em; display:flex; justify-content:space-between; align-items:center;">
-            <span>✓ Đã so sánh xong <strong>${diffResult.summary.totalSource}</strong> dòng Nguồn và <strong>${diffResult.summary.totalTarget}</strong> dòng Đích. Khóa chính: <code>${diffResult.primaryKeys.join(', ')}</code></span>
+            <span>✓ Đã so sánh xong <strong>${diffResult.summary.totalSource}</strong> dòng Nguồn và <strong>${diffResult.summary.totalTarget}</strong> dòng Đích. Khóa chính: <code>${esc(diffResult.primaryKeys.join(', '))}</code></span>
             <button class="small-btn primary" id="dataDiffViewOverviewQuickBtn">Xem kết quả chi tiết ➔</button>
           </div>
         ` : ''}
@@ -3942,6 +3999,12 @@ async function showDataDiffModal(initialTable = null) {
 
     $('#dataDiffViewOverviewQuickBtn')?.addEventListener('click', () => switchTab('overview'));
 
+    $('#dataDiffCancelBtn')?.addEventListener('click', () => {
+      if (!current()) return;
+      invalidateComparison();
+      $('#dataDiffCancelBtn').hidden = true;
+      $('#dataDiffProgress').textContent = 'Đã yêu cầu hủy so sánh.';
+    });
     $('#dataDiffRunCompareBtn')?.addEventListener('click', async () => {
       if (isComparing || !current()) return;
       if (!sourceProfileId || !targetProfileId || !sourceDb || !sourceTable || !targetDb || !targetTable) {
@@ -3951,40 +4014,35 @@ async function showDataDiffModal(initialTable = null) {
       const version = revision;
       const scope = { sourceProfileId, sourceDb, sourceTable, targetProfileId, targetDb, targetTable, rowLimit };
       const valid = () => current() && revision === version;
+      const job = window.SqlDataDiffJob.createJob({ db: desktop.db, unwrap: call, isCurrent: valid,
+        onProgress: progress => {
+          if (!valid()) return;
+          const count = value => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString() : '—';
+          $('#dataDiffProgress').textContent = `Đã đọc ${count(progress.totalSource)} dòng nguồn / ${count(progress.totalTarget)} dòng đích.`;
+        }
+      });
+      activeJob = job;
       isComparing = true;
       $('#dataDiffRunCompareBtn').textContent = 'Đang đọc và so sánh…';
       $('#dataDiffRunCompareBtn').disabled = true;
+      $('#dataDiffCancelBtn').hidden = false;
       try {
-        const sourceMetadata = await call(desktop.db.columns(scope.sourceDb, scope.sourceTable, scope.sourceProfileId));
-        if (!valid()) return;
-        const targetMetadata = await call(desktop.db.columns(scope.targetDb, scope.targetTable, scope.targetProfileId));
-        if (!valid()) return;
-        const columns = sourceMetadata.map(column => ({ name: column.name, type: column.type }));
-        const targetSchema = targetMetadata.map(column => ({ name: column.name, type: column.type }));
-        if (!columns.length || JSON.stringify(columns) !== JSON.stringify(targetSchema)) throw new Error('Tên, kiểu hoặc thứ tự cột hai bảng khác nhau; chưa hỗ trợ mapping.');
-        const keys = sourceMetadata.filter(column => column.key === 'PRI').map(column => column.name);
-        if (!keys.length || JSON.stringify(keys) !== JSON.stringify(targetMetadata.filter(column => column.key === 'PRI').map(column => column.name))) throw new Error('Cần cùng khóa chính ở hai bảng; chưa dùng cờ UNI để suy khóa duy nhất.');
         if (![200, 500, 1000, 2000].includes(scope.rowLimit)) throw new Error('Giới hạn dòng không hợp lệ.');
-        const query = (database, name) => `SELECT ${columns.map(column => quoteId(column.name)).join(', ')} FROM ${quoteId(database)}.${quoteId(name)} ORDER BY ${keys.map(quoteId).join(', ')} LIMIT ${scope.rowLimit};`;
-        const sourceResult = await call(desktop.db.query({ profileId: scope.sourceProfileId, database: scope.sourceDb, sql: query(scope.sourceDb, scope.sourceTable) }));
+        const report = await job.run(scope);
         if (!valid()) return;
-        const targetResult = await call(desktop.db.query({ profileId: scope.targetProfileId, database: scope.targetDb, sql: query(scope.targetDb, scope.targetTable) }));
-        if (!valid()) return;
-        for (const result of [sourceResult, targetResult]) {
-          if (result.kind !== 'rows' || result.truncated || !Array.isArray(result.rows)
-              || JSON.stringify(result.columns?.map(column => column.name)) !== JSON.stringify(columns.map(column => column.name))) throw new Error('Kết quả bị cắt hoặc metadata không khớp; hãy đọc lại.');
-        }
-        const report = SqlDataDiff.compareTableData({ sourceRows: sourceResult.rows, targetRows: targetResult.rows, primaryKeys: keys, columns });
-        sourceColumns = sourceMetadata; targetColumns = targetMetadata;
-        sourceRows = sourceResult.rows; targetRows = targetResult.rows; primaryKeys = keys; diffResult = report;
+        primaryKeys = report.primaryKeys;
+        diffResult = report;
         for (const selector of ['#dataDiffOverviewTabBtn', '#dataDiffDiffTabBtn', '#dataDiffMissingTabBtn', '#dataDiffSyncTabBtn']) $(selector).disabled = false;
-        toast('Đã so sánh các dòng đọc được. Chưa xác minh toàn bảng hoặc tính nhất quán.', 'success');
         switchTab('overview');
       } catch (error) {
         if (!valid()) return;
         toast(error.message, 'error');
+        isComparing = false;
         await renderConfigTab();
-      } finally { if (modalCurrent() && revision === version) isComparing = false; }
+      } finally {
+        if (activeJob === job) activeJob = null;
+        if (modalCurrent() && revision === version) isComparing = false;
+      }
     });
   }
 
@@ -3992,11 +4050,17 @@ async function showDataDiffModal(initialTable = null) {
     const container = $('#dataDiffTabContent');
     if (!container || !diffResult) return;
 
-    const { summary } = diffResult;
+    const { summary, coverage } = diffResult;
+    const range = coverage.complete
+      ? 'Đã đi đến cuối hai luồng đọc trong hạn mức của lượt này.'
+      : `Báo cáo giới hạn tối đa ${rowLimit} dòng mỗi phía; chưa chứng minh dòng vắng mặt ở toàn bảng.`;
+    const snapshot = coverage.consistent
+      ? 'Mỗi phía dùng snapshot riêng; hai snapshot không cùng thời điểm.'
+      : 'Không có snapshot được xác minh cho cả hai phía.';
 
     container.innerHTML = `
       <div style="padding:16px;">
-        <p class="data-diff-limit" role="status">Chỉ so sánh tối đa ${rowLimit} dòng mỗi phía, đọc ở hai thời điểm. Không có snapshot nhất quán, chưa chứng minh dòng vắng mặt ở toàn bảng. Đồng bộ và xuất SQL bị khóa.</p>
+        <p class="data-diff-limit" role="status">${esc(range)} ${esc(snapshot)} Đồng bộ và xuất SQL bị khóa.</p>
         <div class="diff-summary-cards" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px; margin-bottom:20px;">
           <div class="stat-card" style="border-left:4px solid #16a34a;">
             <div class="stat-number" style="color:#16a34a;">${summary.identicalCount}</div>
@@ -5778,6 +5842,8 @@ function renderBackupsView() {
         <button data-backup-action="copy-to-db" ${selected ? '' : 'disabled'}>⧉ Sao chép sang DB khác…</button>
         <button data-backup-action="create-replica" ${selected ? '' : 'disabled'}>⧉ Tạo Replica…</button>
         <button data-backup-action="container-info" ${selected ? '' : 'disabled'}>🔒 Kiểm tra container…</button>
+        <button data-backup-action="encrypt" ${selected ? '' : 'disabled'}>Mã hóa bản sao…</button>
+        <button data-backup-action="encrypted-list">Bản mã hóa / Giải mã…</button>
         <button data-backup-action="delete" class="danger" ${selected && !selected.pinned && !selected.annotationError ? '' : 'disabled'}>⌫ Xóa bản sao lưu</button>
         <button data-backup-action="export" ${selected ? '' : 'disabled'}>⇩ Xuất tệp SQL</button>
         <button data-backup-action="refresh">↻ Làm mới</button>
@@ -6393,9 +6459,13 @@ async function showBackupSchedule() {
   const localInput = date => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
   modal(`<section id="backupScheduleEditor"><h2>Lịch backup</h2><p>${esc(app.connection?.name || profileId || '')} · ${esc(database || '')}</p>
     <p>Sao lưu cấu trúc và dữ liệu của toàn bộ bảng, view, routine và event mà tài khoản nhìn thấy bằng phiên riêng, vào catalog trên máy này. Chính sách tự dọn đã bật sẽ áp dụng sau khi backup thành công.</p>
+    <label for="backupScheduleMode">Kiểu lịch</label><select id="backupScheduleMode"><option value="interval">Theo chu kỳ giờ</option><option value="daily">Hằng ngày theo múi giờ</option></select>
+    <label for="backupScheduleTime">Giờ hằng ngày (HH:mm)</label><input id="backupScheduleTime" type="time" value="02:00" disabled>
+    <label for="backupScheduleZone">Múi giờ IANA</label><input id="backupScheduleZone" value="${esc(timeZone)}" maxlength="100" disabled>
     <label for="backupScheduleHours">Chu kỳ (giờ trôi qua, 1–168)</label><input id="backupScheduleHours" type="number" min="1" max="168" step="1" value="24">
     <label for="backupScheduleStart">Lần chạy đầu (${esc(timeZone)})</label><input id="backupScheduleStart" type="datetime-local" value="${localInput(new Date(Date.now() + 3600000))}">
-    <p class="hint">Chỉ chạy khi ứng dụng đang mở. Lịch tính theo số giờ trôi qua, không cố định giờ địa phương khi đổi DST. Quá hạn 60 giây do đóng app, sleep hoặc tác vụ khác sẽ được ghi nhận bỏ lỡ; không chạy bù và không tự retry. Tối đa một tác vụ database cùng lúc.</p>
+    <p class="hint">Lịch chu kỳ tính theo số giờ trôi qua, không cố định giờ địa phương khi đổi DST. Quá hạn 60 giây do đóng app, sleep hoặc tác vụ khác sẽ được ghi nhận bỏ lỡ; không chạy bù và không tự retry. Tối đa một tác vụ database cùng lúc.</p>
+    <p>Lịch hằng ngày dùng múi giờ đã chọn: giờ không tồn tại khi đổi DST được bỏ qua; giờ lặp có thể chạy hai lần. Chỉ chạy khi app mở; không chạy bù hoặc tự retry.</p>
     <div id="backupScheduleState" role="status" aria-live="polite">Đang đọc lịch…</div>
     <p id="backupScheduleMessage" role="status" aria-live="polite"></p>
     <div class="actions"><button data-click="close-modal">Đóng</button><button id="refreshBackupSchedule" disabled>Cập nhật trạng thái</button><button id="pauseBackupSchedule" disabled>Tạm dừng lịch</button><button id="deleteBackupSchedule" disabled>Xóa lịch</button><button id="saveBackupSchedule" class="primary" disabled>Lưu và bật lịch (Ctrl+Enter)</button></div></section>`, true);
@@ -6403,6 +6473,7 @@ async function showBackupSchedule() {
   const state = $('#backupScheduleState');
   const message = $('#backupScheduleMessage');
   const hours = $('#backupScheduleHours');
+  const timing = $('#backupScheduleMode'), dailyTime = $('#backupScheduleTime'), zone = $('#backupScheduleZone');
   const start = $('#backupScheduleStart');
   const save = $('#saveBackupSchedule');
   const pause = $('#pauseBackupSchedule');
@@ -6415,7 +6486,10 @@ async function showBackupSchedule() {
     pause.disabled = busy || !loaded || !schedule?.enabled;
     remove.disabled = busy || !loaded || !schedule;
     refresh.disabled = busy;
-    hours.disabled = start.disabled = busy;
+    const daily = timing.value === 'daily';
+    timing.disabled = busy;
+    hours.disabled = start.disabled = busy || daily;
+    dailyTime.disabled = zone.disabled = busy || !daily;
   };
   const renderState = result => {
     schedule = result.schedule;
@@ -6426,7 +6500,7 @@ async function showBackupSchedule() {
       RETENTION_STOPPED: 'Tự dọn đã dừng', RETENTION_SKIPPED: 'Đã bỏ qua tự dọn', RETENTION_HISTORY_FAILED: 'Lịch sử dọn chưa lưu đầy đủ' };
     const format = value => new Intl.DateTimeFormat('vi-VN', { timeZone: schedule.timeZone, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
     const run = schedule.lastRun;
-    state.innerHTML = `<p>${schedule.enabled ? 'Lịch đã bật' : 'Lịch đã tạm dừng'} · Mỗi ${esc(schedule.intervalHours)} giờ · Lần kế tiếp: ${esc(format(schedule.nextRunAt))} (${esc(schedule.timeZone)})</p>
+    state.innerHTML = `<p>${schedule.enabled ? 'Lịch đã bật' : 'Lịch đã tạm dừng'} · ${schedule.mode === 'daily' ? `Hằng ngày ${esc(schedule.timeOfDay)}` : `Mỗi ${esc(schedule.intervalHours)} giờ`} · Lần kế tiếp: ${esc(format(schedule.nextRunAt))} (${esc(schedule.timeZone)})</p>
       ${result.paused ? '<p class="errorbox">Bộ chạy lịch đang dừng trên phiên ứng dụng này. Lưu và bật lại để tiếp tục.</p>' : ''}
       ${schedule.targetMatches === false ? '<p class="errorbox">Đích kết nối đã thay đổi. Hãy kiểm tra kết nối và lưu lại lịch trước khi chạy tiếp.</p>' : ''}
       ${run ? `<p>Lần gần nhất: ${esc(labels[run.status] || run.status)} · Theo lịch ${esc(format(run.scheduledFor))}${run.backupId ? ` · ${esc(run.backupId)}` : ''}${run.errorCode ? ` · ${esc(run.errorCode)}` : ''}</p>` : '<p>Chưa có lần chạy được ghi nhận.</p>'}
@@ -6441,7 +6515,10 @@ async function showBackupSchedule() {
       if (!matches()) return;
       renderState(result); loaded = true;
       if (initial && schedule && !edited) {
-        hours.value = String(schedule.intervalHours);
+        timing.value = schedule.mode || 'interval';
+        dailyTime.value = schedule.timeOfDay || '02:00';
+        zone.value = schedule.timeZone;
+        hours.value = String(schedule.intervalHours || 24);
         start.value = localInput(new Date(schedule.nextRunAt));
       }
     } catch (error) { if (matches()) message.textContent = error.message; }
@@ -6454,13 +6531,18 @@ async function showBackupSchedule() {
     if (action === 'save') {
       const intervalHours = Number(hours.value);
       const next = new Date(start.value);
-      if (!Number.isInteger(intervalHours) || intervalHours < 1 || intervalHours > 168 || !hours.validity.valid) {
+      if (timing.value !== 'daily' && (!Number.isInteger(intervalHours) || intervalHours < 1 || intervalHours > 168 || !hours.validity.valid)) {
         message.textContent = 'Chu kỳ phải là số nguyên từ 1 đến 168 giờ.'; hours.focus(); return;
       }
-      if (!start.value || !start.validity.valid || !Number.isFinite(next.getTime()) || next.getTime() <= Date.now()) {
+      if (timing.value !== 'daily' && (!start.value || !start.validity.valid || !Number.isFinite(next.getTime()) || next.getTime() <= Date.now())) {
         message.textContent = 'Hãy chọn lần chạy đầu trong tương lai.'; start.focus(); return;
       }
-      payload = { ...payload, intervalHours, nextRunAt: next.toISOString(), timeZone };
+      if (timing.value === 'daily') {
+        if (!/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(dailyTime.value)) { message.textContent = 'Hãy nhập giờ HH:mm hợp lệ.'; dailyTime.focus(); return; }
+        try { new Intl.DateTimeFormat('vi-VN', { timeZone: zone.value }).format(0); }
+        catch { message.textContent = 'Múi giờ IANA không hợp lệ.'; zone.focus(); return; }
+        payload = { ...payload, mode: 'daily', timeOfDay: dailyTime.value, timeZone: zone.value };
+      } else payload = { ...payload, intervalHours, nextRunAt: next.toISOString(), timeZone };
     }
     busy = true; controls(); message.textContent = 'Đang xử lý…';
     try {
@@ -6475,6 +6557,9 @@ async function showBackupSchedule() {
     } catch (error) { if (matches()) message.textContent = error.message; }
     finally { busy = false; if (matches()) controls(); }
   };
+  timing.addEventListener('change', () => { edited = true; controls(); });
+  dailyTime.addEventListener('input', () => { edited = true; });
+  zone.addEventListener('input', () => { edited = true; });
   hours.addEventListener('input', () => { edited = true; });
   start.addEventListener('input', () => { edited = true; });
   save.addEventListener('click', () => mutate('save'));
@@ -6485,7 +6570,7 @@ async function showBackupSchedule() {
     if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void mutate('save'); }
   });
   await load(true);
-  if (matches()) hours.focus();
+  if (matches()) (timing.value === 'daily' ? dailyTime : hours).focus();
 }
 
 async function showBackupRetentionHistory() {
@@ -6798,7 +6883,105 @@ function editBackupAnnotations() {
   note.focus();
 }
 
+async function showBackupCrypto(operation, id = null) {
+  if (!desktop || !app.connection || !app.database) return;
+  const profileId = app.connection.id, database = app.database;
+  modal(`<h2>${operation === 'encrypt' ? 'Tạo bản sao mã hóa' : 'Bản mã hóa / Giải mã'}</h2>
+    <p>${operation === 'encrypt' ? 'Giữ nguyên SQL gốc. Tên, ghi chú và manifest được mã hóa cùng SQL. Hãy cất mật khẩu ở nơi có thể lấy lại.' : 'Giải mã xác thực toàn bộ container và tạo SQL mới cùng manifest. Chọn phục hồi thử riêng sau khi giải mã; không tự ghi vào database.'}</p>
+    ${operation === 'decrypt' ? '<label for="backupArchiveId">Bản mã hóa</label><select id="backupArchiveId" disabled><option>Đang đọc…</option></select><div class="actions"><button id="backupArchiveImport">Nhập archive…</button><button id="backupArchiveExport" disabled>Xuất archive…</button><button id="backupArchiveDelete" class="danger" disabled>Xóa archive…</button></div><label for="backupArchiveRemoteDir">Thư mục SFTP trên máy chủ SSH của kết nối</label><input id="backupArchiveRemoteDir" placeholder="/backups" maxlength="1024"><button id="backupArchiveSftp" disabled>Gửi replica qua SFTP…</button><p class="hint">Nhập/xuất chỉ kiểm tra container và bản sao byte; cần giải mã đúng mật khẩu để xác thực. Không tự xóa archive khi dọn SQL. SFTP cần SSH/host key đã tin cậy trong cấu hình kết nối, giữ bản local và không tự retry.</p>' : `<p>Mã nguồn: ${esc(id)}</p>`}
+    <label for="backupCryptoPassword">Mật khẩu</label><input type="password" id="backupCryptoPassword" autocomplete="new-password" maxlength="1024">
+    ${operation === 'encrypt' ? '<label for="backupCryptoConfirm">Nhập lại mật khẩu</label><input type="password" id="backupCryptoConfirm" autocomplete="new-password" maxlength="1024"><label><input type="checkbox" id="backupCryptoCompress" checked> Nén Gzip</label>' : ''}
+    <p id="backupCryptoStatus" role="status" aria-live="polite">Giải mã giới hạn 10 GiB và tối đa 10 phút. Không lưu mật khẩu trong trạng thái ứng dụng.</p>
+    <div class="actions"><button data-click="close-modal">Đóng</button><button id="backupCryptoStop" hidden>Hủy tác vụ</button><button id="backupCryptoTrial" hidden>Phục hồi thử SQL mới…</button><button class="primary" id="backupCryptoGo" ${operation === 'decrypt' ? 'disabled' : ''}>${operation === 'encrypt' ? 'Mã hóa bản sao' : 'Giải mã thành SQL mới'}</button></div>`);
+  const root = $('#backupCryptoStatus'), dialog = $('#modal'), revision = modalRevision;
+  const current = () => revision === modalRevision && dialog.open && root === $('#backupCryptoStatus')
+    && profileId === app.connection?.id && database === app.database;
+  let taskId = null, restoredId = null, hasArchives = false;
+  const cancel = () => taskId ? call(desktop.db.cancelTask({ profileId, taskId })).catch(() => {}) : Promise.resolve();
+  const lifecycle = new MutationObserver(() => {
+    if (!current()) { void cancel(); lifecycle.disconnect(); }
+  });
+  lifecycle.observe(dialog, { childList: true, attributes: true, attributeFilter: ['open'] });
+  const controls = () => {
+    if (!current()) return;
+    const busy = Boolean(taskId);
+    $('#backupCryptoGo').disabled = busy || operation === 'decrypt' && !hasArchives;
+    $('#backupCryptoStop').hidden = !busy;
+    $('#backupCryptoTrial').hidden = !restoredId;
+    $('#backupCryptoTrial').disabled = busy || connectionIsReadOnly();
+    for (const selector of ['#backupArchiveExport', '#backupArchiveDelete', '#backupArchiveId']) {
+      if ($(selector)) $(selector).disabled = busy || !hasArchives;
+    }
+    if ($('#backupArchiveImport')) $('#backupArchiveImport').disabled = busy;
+    if ($('#backupArchiveSftp')) $('#backupArchiveSftp').disabled = busy || !hasArchives || !app.connection?.ssh?.enabled;
+    if ($('#backupArchiveRemoteDir')) $('#backupArchiveRemoteDir').disabled = busy;
+  };
+  const loadArchives = async (selectedId = null) => {
+    const archives = await call(desktop.db.listEncryptedBackups({ profileId, database }));
+    if (!current()) return;
+    const select = $('#backupArchiveId');
+    select.innerHTML = archives.map(entry => `<option value="${esc(entry.id)}">${esc(entry.id)} · ${formatBytes(entry.bytes)}</option>`).join('');
+    if (selectedId && archives.some(entry => entry.id === selectedId)) select.value = selectedId;
+    hasArchives = archives.length > 0;
+    controls();
+    if (!hasArchives) root.textContent = 'Chưa có bản mã hóa trong catalog của database này.';
+  };
+  $('#backupCryptoStop').addEventListener('click', () => { if (current()) { void cancel(); root.textContent = 'Đã yêu cầu hủy tác vụ.'; } });
+  $('#backupCryptoTrial').addEventListener('click', () => {
+    if (!current() || taskId || !restoredId || connectionIsReadOnly()) return;
+    app.selectedBackupId = restoredId;
+    closeModal();
+    mode = 'backups'; renderBackupsView();
+    void runBackupManagerAction('trial');
+  });
+  $('#backupCryptoGo').addEventListener('click', async () => {
+    if (!current() || taskId) return;
+    const password = $('#backupCryptoPassword'), confirmation = $('#backupCryptoConfirm');
+    const passphrase = password.value;
+    if (!passphrase || passphrase.length > 1024 || (operation === 'encrypt' && (passphrase.length < 8 || passphrase !== confirmation.value))) {
+      root.textContent = operation === 'encrypt' ? 'Nhập mật khẩu từ 8 đến 1.024 ký tự và xác nhận trùng khớp.' : 'Hãy nhập mật khẩu của bản mã hóa.'; return;
+    }
+    const archiveId = operation === 'decrypt' ? $('#backupArchiveId').value : id;
+    const compress = $('#backupCryptoCompress')?.checked !== false;
+    password.value = ''; if (confirmation) confirmation.value = '';
+    taskId = `backup-crypto-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    controls(); root.textContent = 'Đang xử lý; bản gốc được giữ nguyên…';
+    try {
+      const result = await call(desktop.db[operation === 'encrypt' ? 'encryptBackup' : 'decryptBackup']({ profileId, database, id: archiveId, passphrase, compress, taskId }));
+      if (!current()) return;
+      root.textContent = `${operation === 'encrypt' ? 'Đã tạo bản mã hóa' : 'Đã xác thực và tạo SQL mới cùng manifest'}: ${result.id}. Chưa xác nhận phục hồi thử.${result.manifestError ? ` ${result.manifestError}` : ''}`;
+      if (operation === 'decrypt') {
+        restoredId = result.id; app.selectedBackupId = result.id;
+        await refreshBackupList(database, profileId);
+      }
+    } catch (error) { if (current()) root.textContent = error.message; }
+    finally { taskId = null; controls(); }
+  });
+  for (const [selector, api] of [['#backupArchiveImport', 'importEncryptedBackup'], ['#backupArchiveExport', 'exportEncryptedBackup'], ['#backupArchiveDelete', 'deleteEncryptedBackup'], ['#backupArchiveSftp', 'replicateEncryptedBackup']]) {
+    $(selector)?.addEventListener('click', async () => {
+      if (!current() || taskId) return;
+      const archiveId = $('#backupArchiveId').value;
+      taskId = `backup-archive-${Date.now()}-${Math.random().toString(16).slice(2)}`; controls();
+      try {
+        const result = await call(desktop.db[api]({ profileId, database, id: archiveId, taskId,
+          ...(api === 'replicateEncryptedBackup' ? { destinationDir: $('#backupArchiveRemoteDir').value } : {}) }));
+        if (!current()) return;
+        if (!result.canceled) { await loadArchives(result.id); if (!current()) return; }
+        root.textContent = result.canceled ? 'Đã hủy thao tác archive.' : api === 'importEncryptedBackup' ? 'Đã nhập archive. Hãy giải mã để xác thực mật khẩu và nội dung.' : api === 'exportEncryptedBackup' ? 'Đã xuất archive; bản gốc được giữ nguyên.' : api === 'replicateEncryptedBackup' ? `Đã đối chiếu SHA-256 replica: ${result.remotePath}. Chưa phục hồi thử.${result.durability === 'fsync' ? '' : ' Máy chủ chưa xác nhận fsync.'}` : 'Đã xóa archive. Các bản SQL vẫn được giữ.';
+      } catch (error) { if (current()) root.textContent = error.message; }
+      finally { taskId = null; controls(); }
+    });
+  }
+  $('#backupCryptoPassword').focus();
+  if (operation === 'decrypt') {
+    try { await loadArchives(); }
+    catch (error) { if (current()) root.textContent = error.message; }
+  }
+}
+
 async function runBackupManagerAction(action) {
+  if (action === 'encrypt' && app.selectedBackupId) return showBackupCrypto('encrypt', app.selectedBackupId);
+  if (action === 'encrypted-list') return showBackupCrypto('decrypt');
   if (action === 'selection-preview') return showBackupSelectionPreview();
   if (action === 'schedule') return showBackupSchedule();
   if (action === 'retention-history') return showBackupRetentionHistory();
@@ -7235,7 +7418,7 @@ function syncActiveQuery() {
   const editor = $('#sql');
   if (!editor || !app.query) return;
   app.query.sql = editor.value;
-  sessionStorage.setItem('query', editor.value);
+  queryDraftCache = editor.value;
 }
 
 function renderQueryTabs() {
@@ -7354,35 +7537,40 @@ function duplicateQueryTab(index) {
   newQuery(source.sql || '', { profileId: source.profileId, database: source.database }, `${source.title} (bản sao)`);
 }
 
-function closeOtherQueryTabs(index) {
-  if (index < 0 || index >= queryTabs.length) return;
-  const kept = queryTabs[index];
-  const running = queryTabs.filter((t, i) => i !== index && t.running);
-  if (running.length) {
-    toast('Không thể đóng các tab đang chạy truy vấn.', 'error');
+function retainQueryTabs(keptTabs, nextActive) {
+  const previous = app.query;
+  syncActiveQuery();
+  for (const tab of queryTabs) {
+    if (!keptTabs.includes(tab)) explainObservations.delete(tab);
   }
-  queryTabs = queryTabs.filter((t, i) => i === index || t.running);
-  activeQuery = queryTabs.indexOf(kept);
-  if (activeQuery < 0) activeQuery = 0;
-  app.query = queryTabs[activeQuery];
+  queryTabs = keptTabs;
+  activeQuery = queryTabs.indexOf(nextActive);
+  app.query = nextActive;
   updateChrome();
+  if (mode === 'query' && previous !== nextActive) {
+    if (!app.connection) renderWelcome();
+    else renderQueryView();
+  }
   persistState();
 }
 
+function closeOtherQueryTabs(index) {
+  if (!Number.isInteger(index) || index < 0 || index >= queryTabs.length) return;
+  const kept = queryTabs[index];
+  if (queryTabs.some((tab) => tab !== kept && tab.running)) {
+    toast('Các tab đang chạy truy vấn được giữ lại.', 'info');
+  }
+  retainQueryTabs(queryTabs.filter((tab) => tab === kept || tab.running), kept);
+}
+
 function closeQueryTabsToRight(index) {
-  if (index < 0 || index >= queryTabs.length) return;
-  const running = queryTabs.slice(index + 1).filter((t) => t.running);
-  if (running.length) {
-    toast('Không thể đóng các tab bên phải đang chạy truy vấn.', 'error');
+  if (!Number.isInteger(index) || index < 0 || index >= queryTabs.length) return;
+  const kept = queryTabs[index];
+  const toKeep = queryTabs.filter((tab, i) => i <= index || tab.running);
+  if (queryTabs.slice(index + 1).some((tab) => tab.running)) {
+    toast('Các tab bên phải đang chạy truy vấn được giữ lại.', 'info');
   }
-  const toKeep = queryTabs.slice(0, index + 1).concat(running);
-  queryTabs = toKeep;
-  if (activeQuery >= queryTabs.length) {
-    activeQuery = index;
-  }
-  app.query = queryTabs[activeQuery];
-  updateChrome();
-  persistState();
+  retainQueryTabs(toKeep, toKeep.includes(app.query) ? app.query : kept);
 }
 
 function newQuery(sql = '', target = null, options = null) {
@@ -9106,7 +9294,7 @@ function recordSqlEditorChange(editor, { before, inputType } = {}) {
     history.current = next;
   }
   app.query.sql = editor.value;
-  sessionStorage.setItem('query', editor.value);
+  queryDraftCache = editor.value;
   persistState();
 }
 
@@ -9114,7 +9302,7 @@ function restoreSqlEditorSnapshot(editor, snapshot) {
   editor.value = snapshot.value;
   editor.setSelectionRange(snapshot.start, snapshot.end);
   app.query.sql = snapshot.value;
-  sessionStorage.setItem('query', snapshot.value);
+  queryDraftCache = snapshot.value;
   closeSqlSuggestions();
   persistState();
 }
@@ -9668,7 +9856,7 @@ function renderQueryView() {
   sqlAutocomplete.requestId += 1;
   const value = app.query.sql === null || app.query.sql === undefined ? defaultSql() : app.query.sql;
   app.query.sql = value;
-  sessionStorage.setItem('query', value);
+  queryDraftCache = value;
   updateChrome();
   $('#workspace').innerHTML = `
     <div class="toolbar">
@@ -11374,6 +11562,85 @@ async function accountModal() {
   else accountAuthModal(false);
 }
 
+function showLocalRecovery() {
+  if (!desktop?.account) return;
+  modal(`<section id="localRecoveryEditor"><h2>Bộ phục hồi cục bộ</h2>
+    <p>Xuất kết nối và workspace thành tệp mã hóa, giữ mã khôi phục ở nơi riêng. Không gồm SQL, backup database hoặc nội dung tệp SSH key/chứng chỉ. Bộ này không đặt lại mật khẩu tài khoản đồng bộ hay mật khẩu archive.</p>
+    <button id="localRecoveryExport">Xuất bộ phục hồi mã hóa…</button>
+    <label for="localRecoveryGenerated">Mã của bộ vừa xuất — cất riêng trước khi đóng</label><input id="localRecoveryGenerated" type="password" readonly autocomplete="off">
+    <div class="actions"><button id="localRecoveryReveal">Hiện / ẩn mã</button><button id="localRecoveryCopy" disabled>Sao chép mã</button></div>
+    <hr><p>Nhập bộ phục hồi sẽ thêm các bản sao với ID mới và giữ dữ liệu hiện tại. Cần đăng xuất đồng bộ trước; không tự gửi dữ liệu lên server.</p>
+    <label for="localRecoveryCode">Mã khôi phục của tệp cần nhập</label><input id="localRecoveryCode" type="password" maxlength="256" autocomplete="off">
+    <div class="actions"><button id="localRecoveryPrepare">Chọn tệp và xem trước…</button><button id="localRecoveryApply" disabled>Thêm dữ liệu phục hồi…</button></div>
+    <p id="localRecoveryStatus" role="status" aria-live="polite">Giữ cả tệp mã hóa và mã khôi phục; thiếu một trong hai sẽ không mở được bộ này.</p>
+    <div class="actions"><button data-click="close-modal">Đóng</button></div></section>`, true);
+  const editor = $('#localRecoveryEditor'), output = $('#localRecoveryStatus'), dialog = $('#modal'), revision = modalRevision;
+  const current = () => modalRevision === revision && dialog.open && $('#localRecoveryEditor') === editor;
+  let busy = false, token = null;
+  const revoke = () => { const previous = token; token = null; if (previous) void call(desktop.account.cancelLocalKit({ token: previous })).catch(() => {}); };
+  const controls = () => {
+    if (!current()) return;
+    $('#localRecoveryExport').disabled = $('#localRecoveryPrepare').disabled = busy;
+    $('#localRecoveryCode').disabled = busy;
+    $('#localRecoveryApply').disabled = busy || !token;
+    $('#localRecoveryCopy').disabled = !$('#localRecoveryGenerated').value;
+  };
+  const lifecycle = new MutationObserver(() => {
+    if (!current()) {
+      revoke(); editor.querySelector('#localRecoveryGenerated').value = '';
+      editor.querySelector('#localRecoveryCode').value = ''; lifecycle.disconnect();
+    }
+  });
+  lifecycle.observe(dialog, { attributes: true, childList: true, attributeFilter: ['open'] });
+  $('#localRecoveryCode').addEventListener('input', () => { revoke(); controls(); });
+  $('#localRecoveryReveal').addEventListener('click', () => {
+    if (!current()) return;
+    const input = $('#localRecoveryGenerated'); input.type = input.type === 'password' ? 'text' : 'password';
+  });
+  $('#localRecoveryCopy').addEventListener('click', async () => {
+    if (!current()) return;
+    try { await writeClipboardText($('#localRecoveryGenerated').value); if (current()) output.textContent = 'Đã sao chép mã. Hãy cất riêng khỏi tệp mã hóa.'; }
+    catch { if (current()) output.textContent = 'Không sao chép được mã; dùng Hiện mã để lưu thủ công.'; }
+  });
+  $('#localRecoveryExport').addEventListener('click', async () => {
+    if (busy || !current()) return;
+    busy = true; controls();
+    try {
+      const result = await call(desktop.account.exportLocalKit());
+      if (!current()) return;
+      if (result.canceled) { output.textContent = 'Đã hủy xuất bộ phục hồi.'; return; }
+      $('#localRecoveryGenerated').value = result.recoveryKey; $('#localRecoveryGenerated').type = 'password';
+      output.textContent = `Đã xuất ${result.connections} kết nối và ${result.workspaces} workspace. Cất mã khôi phục riêng trước khi đóng.`;
+    } catch (error) { if (current()) output.textContent = error.message; }
+    finally { busy = false; controls(); }
+  });
+  $('#localRecoveryPrepare').addEventListener('click', async () => {
+    if (busy || !current()) return;
+    const recoveryKey = $('#localRecoveryCode').value;
+    if (!recoveryKey.trim()) { output.textContent = 'Hãy nhập mã khôi phục của tệp.'; return; }
+    revoke(); $('#localRecoveryCode').value = ''; busy = true; controls();
+    try {
+      const result = await call(desktop.account.prepareLocalKit({ recoveryKey }));
+      if (!current()) { if (result.token) void call(desktop.account.cancelLocalKit({ token: result.token })).catch(() => {}); return; }
+      if (result.canceled) { output.textContent = 'Đã hủy chọn bộ phục hồi.'; return; }
+      token = result.token;
+      output.textContent = `Sẽ thêm ${result.connections} kết nối và ${result.workspaces} workspace với ID mới. Giữ dữ liệu hiện tại. Xem trước hết hạn sau hai phút; cần xác nhận riêng khi thêm.`;
+    } catch (error) { if (current()) output.textContent = error.message; }
+    finally { busy = false; controls(); }
+  });
+  $('#localRecoveryApply').addEventListener('click', async () => {
+    if (busy || !token || !current()) return;
+    busy = true; controls();
+    try {
+      const result = await call(desktop.account.applyLocalKit({ token }));
+      if (!current()) return;
+      output.textContent = result.canceled ? 'Đã hủy nhập. Chọn lại tệp nếu muốn xem trước lần nữa.' : `Đã thêm ${result.connections} kết nối và ${result.workspaces} workspace; dữ liệu hiện tại được giữ nguyên.`;
+      if (result.imported) { await refreshWorkspaces(); if (current()) await refreshConnections(); }
+    } catch (error) { if (current()) output.textContent = error.message; }
+    finally { busy = false; revoke(); controls(); }
+  });
+}
+
 function accountAuthModal(registerMode, prefill = {}) {
   if (!desktop?.account) return;
   const serverUrl = prefill.serverUrl || readSyncServerUrl() || app.account?.defaultServerUrl || 'http://localhost:8080';
@@ -11385,6 +11652,7 @@ function accountAuthModal(registerMode, prefill = {}) {
       <button type="button" id="accountTabLogin" class="${registerMode ? '' : 'selected'}">Đăng nhập</button>
       <button type="button" id="accountTabRegister" class="${registerMode ? 'selected' : ''}">Tạo tài khoản</button>
     </div>
+    <button type="button" id="accountLocalRecovery">Bộ phục hồi cục bộ…</button>
     <form id="accountForm">
       <label>Server đồng bộ</label>
       <input id="accountServer" type="url" required autocomplete="url" value="${esc(serverUrl)}" placeholder="https://sync.example.com">
@@ -11410,6 +11678,7 @@ function accountAuthModal(registerMode, prefill = {}) {
       </div>
     </form>
   `);
+  $('#accountLocalRecovery').addEventListener('click', showLocalRecovery);
   const form = $('#accountForm');
   const errorBox = $('#accountError');
   const serverInput = $('#accountServer');
@@ -11656,6 +11925,7 @@ async function renderAccountPanel(status) {
     ${errorHtml}
     ${syncConflictsHtml(status)}
     ${syncRecoveryHtml(recovery)}
+    <button type="button" id="accountLocalRecovery">Bộ phục hồi cục bộ…</button>
     <div class="accountnote">Connection và workspace được mã hóa trên máy trước khi gửi lên server. Server không đọc được host, user hay mật khẩu. Mật khẩu không thể khôi phục.</div>
     <div class="actions">
       <button type="button" id="accountLogout">Đăng xuất</button>
@@ -11664,6 +11934,7 @@ async function renderAccountPanel(status) {
       <button type="button" class="primary" id="accountSync" ${status.state === 'syncing' ? 'disabled' : ''}>${reauth ? 'Đăng nhập lại' : needsChoice ? 'Áp dụng lựa chọn' : 'Đồng bộ ngay'}</button>
     </div>
   `);
+  $('#accountLocalRecovery').addEventListener('click', showLocalRecovery);
   $('#accountClose').addEventListener('click', closeModal);
   $('#accountSync').addEventListener('click', async () => {
     if (reauth) {

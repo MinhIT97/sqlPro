@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { scheduleTiming, nextScheduledAtAsync } = require('./backup-schedule-timing.cjs');
 
 const HOUR = 3600000;
 const MAX_SCHEDULES = 50;
@@ -16,11 +17,11 @@ function scheduleId(profileId, database) {
 
 function validateSchedule(value) {
   if (!value || value.id !== scheduleId(value.profileId, value.database) || typeof value.enabled !== 'boolean'
-      || !Number.isInteger(value.intervalHours) || value.intervalHours < 1 || value.intervalHours > 168
       || typeof value.nextRunAt !== 'string' || !Number.isFinite(Date.parse(value.nextRunAt))
       || typeof value.timeZone !== 'string' || value.timeZone.length > 100
       || typeof value.target !== 'string' || !/^[a-f0-9]{64}$/.test(value.target)
       || typeof value.revision !== 'string' || !/^[a-f0-9]{32}$/.test(value.revision)) throw new Error('Lịch backup không hợp lệ. Giữ nguyên cấu hình để kiểm tra.');
+  const timing = scheduleTiming(value);
   new Intl.DateTimeFormat('en', { timeZone: value.timeZone }).format(0);
   let lastRun = null;
   if (value.lastRun !== null && value.lastRun !== undefined) {
@@ -37,7 +38,7 @@ function validateSchedule(value) {
       finishedAt: run.finishedAt, taskId: run.taskId, backupId: run.backupId, errorCode: run.errorCode, warnings: run.warnings || [] };
   }
   return { id: value.id, profileId: value.profileId, database: value.database, enabled: value.enabled,
-    intervalHours: value.intervalHours, nextRunAt: value.nextRunAt, timeZone: value.timeZone,
+    ...timing, nextRunAt: value.nextRunAt, timeZone: value.timeZone,
     target: value.target, revision: value.revision, lastRun };
 }
 
@@ -48,14 +49,17 @@ function createScheduleStore(root) {
     try { stat = fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
     if (!stat.isFile() || stat.size > 256 * 1024) throw new Error('Tệp lịch backup không hợp lệ hoặc vượt 256 KiB.');
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!data || data.version !== 1 || !Array.isArray(data.schedules) || data.schedules.length > MAX_SCHEDULES) throw new Error('Phiên bản lịch backup chưa được hỗ trợ.');
+    if (!data || ![1, 2, 3].includes(data.version) || !Array.isArray(data.schedules) || data.schedules.length > MAX_SCHEDULES) throw new Error('Phiên bản lịch backup chưa được hỗ trợ.');
+    if (data.version < 3 && data.schedules.some(item => item.mode === 'cron')) throw new Error('Lịch cron yêu cầu định dạng v3.');
+    if (data.version === 1 && data.schedules.some(item => item.mode === 'daily')) throw new Error('Lịch hằng ngày yêu cầu định dạng v2.');
     const schedules = data.schedules.map(validateSchedule);
     if (new Set(schedules.map(item => item.id)).size !== schedules.length) throw new Error('Lịch backup bị trùng mã.');
     return schedules;
   }
   function write(schedules) {
     if (schedules.length > MAX_SCHEDULES) throw new Error('Tối đa 50 lịch backup trên máy này.');
-    const text = JSON.stringify({ version: 1, schedules: schedules.map(validateSchedule) }, null, 2);
+    const normalized = schedules.map(validateSchedule);
+    const text = JSON.stringify({ version: normalized.some(item => item.mode === 'cron') ? 3 : normalized.some(item => item.mode === 'daily') ? 2 : 1, schedules: normalized }, null, 2);
     if (Buffer.byteLength(text) > 256 * 1024) throw new Error('Lịch backup vượt 256 KiB.');
     fs.mkdirSync(root, { recursive: true, mode: 0o700 });
     const temporary = `${file}.${crypto.randomBytes(8).toString('hex')}.part`;
@@ -89,8 +93,8 @@ function createScheduleStore(root) {
 }
 
 class BackupScheduler {
-  constructor({ repository, run, isBusy, now = Date.now, graceMs = 60000 }) {
-    Object.assign(this, { repository, run, isBusy, now, graceMs });
+  constructor({ repository, run, isBusy, now = Date.now, graceMs = 60000, nextRun = nextScheduledAtAsync }) {
+    Object.assign(this, { repository, run, isBusy, now, graceMs, nextRun });
     this.busy = false; this.stopped = false; this.error = null; this.generation = 0;
   }
 
@@ -112,15 +116,22 @@ class BackupScheduler {
         if (this.stopped || generation !== this.generation) break;
         const schedule = this.repository.read().find(item => item.id === queued.id);
         if (!schedule?.enabled || schedule.revision !== queued.revision || schedule.nextRunAt !== queued.nextRunAt) continue;
-        const now = this.now(), due = Date.parse(schedule.nextRunAt), interval = schedule.intervalHours * HOUR;
+        const now = this.now(), due = Date.parse(schedule.nextRunAt);
         if (now < due) continue;
         const busy = this.isBusy();
         if (busy && now - due <= this.graceMs) continue;
         const status = now - due > this.graceMs ? busy ? 'busy' : 'missed' : 'running';
         const taskId = `scheduled-${crypto.randomBytes(16).toString('hex')}`;
         const startedAt = new Date(now).toISOString();
+        const nextRunAt = await this.nextRun(schedule, now);
+        if (this.stopped || generation !== this.generation) break;
+        const current = this.repository.read().find(item => item.id === schedule.id);
+        if (!current?.enabled || current.revision !== schedule.revision || current.nextRunAt !== schedule.nextRunAt) continue;
+        // A very short cron interval may elapse while calculating. Leave it for
+        // the next tick rather than claim a past next run or replay twice.
+        if (Date.parse(nextRunAt) <= this.now()) continue;
         const claimed = this.repository.update(schedule.id, schedule.revision, item => ({ ...item,
-          nextRunAt: new Date(due + (Math.floor((now - due) / interval) + 1) * interval).toISOString(),
+          nextRunAt,
           lastRun: { status, scheduledFor: schedule.nextRunAt, startedAt, finishedAt: status === 'running' ? null : startedAt, taskId, backupId: null, errorCode: null } }));
         if (status !== 'running') continue;
         let result;

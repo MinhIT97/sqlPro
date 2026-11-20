@@ -3,6 +3,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const allowedCommands = new Set([
+  'dev-files-changed',
   'new-connection',
   'import-navicat',
   'disconnect',
@@ -94,6 +95,11 @@ const db = Object.freeze({
   verifyBackup: (payload) => ipcRenderer.invoke('db:verify-backup', payload),
   inspectBackup: (payload) => ipcRenderer.invoke('db:inspect-backup', payload),
   inspectBackupContainer: (payload) => ipcRenderer.invoke('db:inspect-backup-container', payload),
+  listEncryptedBackups: (payload) => ipcRenderer.invoke('db:list-encrypted-backups', payload),
+  importEncryptedBackup: (payload) => ipcRenderer.invoke('db:import-encrypted-backup', payload),
+  exportEncryptedBackup: (payload) => ipcRenderer.invoke('db:export-encrypted-backup', payload),
+  deleteEncryptedBackup: (payload) => ipcRenderer.invoke('db:delete-encrypted-backup', payload),
+  replicateEncryptedBackup: (payload) => ipcRenderer.invoke('db:replicate-encrypted-backup', payload),
   encryptBackup: (payload) => ipcRenderer.invoke('db:encrypt-backup', payload),
   decryptBackup: (payload) => ipcRenderer.invoke('db:decrypt-backup', payload),
   createBackupReplica: (payload) => ipcRenderer.invoke('db:create-backup-replica', payload),
@@ -133,6 +139,10 @@ const account = Object.freeze({
   syncNow: () => ipcRenderer.invoke('account:sync-now'),
   resolveConflicts: (choices) => ipcRenderer.invoke('account:resolve-conflicts', choices),
   listRecovery: () => ipcRenderer.invoke('account:list-recovery'),
+  exportLocalKit: () => ipcRenderer.invoke('account:export-local-kit'),
+  prepareLocalKit: payload => ipcRenderer.invoke('account:prepare-local-kit', payload),
+  applyLocalKit: payload => ipcRenderer.invoke('account:apply-local-kit', payload),
+  cancelLocalKit: payload => ipcRenderer.invoke('account:cancel-local-kit', payload),
   restoreRecovery: (id) => ipcRenderer.invoke('account:restore-recovery', id),
   onStatus: (callback) => {
     const listener = (_event, payload) => callback(payload);

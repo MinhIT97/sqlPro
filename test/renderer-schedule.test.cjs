@@ -9,10 +9,13 @@ const saved = { enabled: true, intervalHours: 12, nextRunAt: '2027-01-01T12:00:0
 
 function setup(overrides = {}) {
   const elements = new Map();
-  for (const selector of ['#backupScheduleEditor', '#backupScheduleState', '#backupScheduleMessage', '#backupScheduleHours', '#backupScheduleStart', '#saveBackupSchedule', '#pauseBackupSchedule', '#deleteBackupSchedule', '#refreshBackupSchedule']) {
+  for (const selector of ['#backupScheduleEditor', '#backupScheduleState', '#backupScheduleMessage', '#backupScheduleMode', '#backupScheduleTime', '#backupScheduleZone', '#backupScheduleHours', '#backupScheduleStart', '#saveBackupSchedule', '#pauseBackupSchedule', '#deleteBackupSchedule', '#refreshBackupSchedule']) {
     elements.set(selector, { value: '', innerHTML: '', textContent: '', disabled: false, validity: { valid: true },
       listeners: {}, addEventListener(name, handler) { this.listeners[name] = handler; }, focus() { this.focused = true; } });
   }
+  elements.get('#backupScheduleMode').value = 'interval';
+  elements.get('#backupScheduleTime').value = '02:00';
+  elements.get('#backupScheduleZone').value = 'UTC';
   const calls = [];
   const r = loadRenderer({ elements, desktop: { db: {
     getBackupSchedule: async () => ok({ schedule: saved }),
@@ -83,4 +86,22 @@ test('refresh preserves edited inputs and unreadable config locks writes but per
   r.get('#backupScheduleHours').value = '5';
   await r.click('#refreshBackupSchedule');
   assert.equal(r.get('#backupScheduleHours').value, '5'); assert.equal(r.get('#saveBackupSchedule').disabled, false);
+});
+
+
+test('daily timing sends no interval timestamp and preserves timezone and draft after cancel', async () => {
+  const r = setup(); await r.ready;
+  r.get('#backupScheduleMode').value = 'daily';
+  r.get('#backupScheduleMode').listeners.change();
+  r.get('#backupScheduleTime').value = '03:45';
+  r.get('#backupScheduleZone').value = 'Invalid/Zone';
+  assert.equal(r.get('#backupScheduleHours').disabled, true);
+  await r.click('#saveBackupSchedule'); assert.equal(r.calls.length, 0);
+  r.get('#backupScheduleZone').value = 'Asia/Bangkok';
+  await r.click('#saveBackupSchedule');
+  assert.deepEqual(JSON.parse(JSON.stringify(r.calls[0][1])), {
+    profileId: 'p1', database: 'demo', mode: 'daily', timeOfDay: '03:45', timeZone: 'Asia/Bangkok'
+  });
+  assert.equal(r.get('#backupScheduleTime').value, '03:45');
+  assert.match(r.get('#backupScheduleMessage').textContent, /Đã hủy lưu/);
 });

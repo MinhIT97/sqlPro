@@ -294,10 +294,10 @@ test('B01.7 [CONFIRMED GAP] Selective restore plan generator exists, but executo
 });
 
 // --------------------------------------------------------------------------
-// 4. P1 — G1.1 Persistence: Plaintext Sensitive SQL in persistState
+// 4. Draft persistence: unchanged SQL in IPC; encrypted at rest by Main
 // --------------------------------------------------------------------------
 
-test('B01.8 [CONFIRMED DEFECT] persistState saves raw password-bearing queries directly without scrubbing', () => {
+test('B01.8 draft SQL is preserved across IPC; Main renderer-state repository owns at-rest encryption', () => {
   let savedPayload = null;
   const desktop = {
     saveState: async (data) => {
@@ -322,19 +322,19 @@ test('B01.8 [CONFIRMED DEFECT] persistState saves raw password-bearing queries d
   assert.equal(
     savedPayload.queryTabs[0].sql,
     "CREATE USER 'developer'@'%' IDENTIFIED BY 'SuperSecretP@ssw0rd!';",
-    'DEFECT REPRODUCED: persistState saved raw password in plaintext'
+    'IPC retains the original draft; encryption is verified in renderer-state.test.cjs'
   );
 
   // Compare with SqlSnippets.scrubSensitiveSql which DOES scrub:
   const scrubbed = SqlSnippets.scrubSensitiveSql(savedPayload.queryTabs[0].sql);
-  assert.ok(!scrubbed.includes('SuperSecretP@ssw0rd!'), 'SqlSnippets.scrubSensitiveSql masks passwords, but persistState does not use it');
+  assert.ok(!scrubbed.includes('SuperSecretP@ssw0rd!'), 'SqlSnippets scrubs display/history separately from unchanged editor drafts');
 });
 
 // --------------------------------------------------------------------------
 // 5. P1 — G5.6 Diagnostics: Target Drift During Await
 // --------------------------------------------------------------------------
 
-test('B01.9 [CONFIRMED BUG] Diagnostics process row lacks profileId; real KILL handler sends command to wrong connection if app.connection changes during confirmation', async () => {
+test('B01.9 regression: Diagnostics cannot KILL another connection after confirmation context changes', async () => {
   // 1. Verify parseProcesslistRow does NOT include profileId:
   const mockRow = [101, 'staging_user', '10.0.0.1:5000', 'staging_db', 'Query', 10, 'Locked', 'SELECT * FROM secret_staging_data'];
   const parsed = SqlDiagnostics.parseProcesslistRow(mockRow, 999);
@@ -447,60 +447,23 @@ test('B01.9 [CONFIRMED BUG] Diagnostics process row lacks profileId; real KILL h
   await killPromise;
   await new Promise((resolve) => setTimeout(resolve, 20));
 
-  const killQuery = queries.find((q) => q.sql && q.sql.includes('KILL QUERY'));
-  assert.ok(killQuery, 'desktop.db.query was called with KILL QUERY');
-  assert.equal(
-    killQuery.profileId,
-    'production-conn',
-    'DEFECT REPRODUCED: KILL QUERY was sent to production-conn instead of staging-conn from which the processlist was loaded!'
-  );
-  assert.equal(killQuery.sql, 'KILL QUERY 101');
+  const killQueries = queries.filter((q) => /^KILL\b/.test(q.sql || ''));
+  assert.equal(killQueries.length, 0, 'Stale confirmation must not send KILL to either server');
+  assert.ok(queries.every((q) => q.profileId === 'staging-conn'));
+
 });
 
 // --------------------------------------------------------------------------
 // 6. P1 — G3.3 Backup Scheduler: Interval-Only Scope & In-Memory Limits
 // --------------------------------------------------------------------------
 
-test('B01.10 [CONFIRMED LIMITATION] BackupScheduler validateSchedule silently ignores calendar/cron fields and only supports intervalHours', () => {
-  const { createScheduleStore } = require('../electron/backup-scheduler.cjs');
-  const tmpDir = path.join(os.tmpdir(), `sqlpro-sched-test-${Date.now()}`);
-  const store = createScheduleStore(tmpDir);
-
-  const inputWithCalendarFields = {
-    profileId: 'conn-1',
-    database: 'sales_db',
-    enabled: true,
-    intervalHours: 24,
-    nextRunAt: new Date(Date.now() + 3600000).toISOString(),
-    timeZone: 'UTC',
-    target: 'a'.repeat(64),
-    revision: 'b'.repeat(32),
-    // Extra fields submitted for calendar / cron scheduling:
-    timeOfDay: '02:00',
-    cron: '0 2 * * *'
-  };
-
-  // Valid interval succeeds:
-  const saved = store.save(inputWithCalendarFields);
-  assert.equal(saved.intervalHours, 24);
-
-  // LIMITATION VERIFIED: timeOfDay and cron are silently dropped (ignored) rather than parsed:
-  assert.equal(Object.hasOwn(saved, 'timeOfDay'), false, 'timeOfDay field is dropped by validateSchedule');
-  assert.equal(Object.hasOwn(saved, 'cron'), false, 'cron field is dropped by validateSchedule');
-
-  // Attempting to use a non-integer intervalHours fails validation:
-  assert.throws(() => {
-    store.save({
-      ...inputWithCalendarFields,
-      intervalHours: 'daily-at-02:00'
-    });
-  }, /Lịch backup không hợp lệ/);
-
-  // Attempting interval < 1 hour fails:
-  assert.throws(() => {
-    store.save({
-      ...inputWithCalendarFields,
-      intervalHours: 0
-    });
-  }, /Lịch backup không hợp lệ/);
+test('B01.10 scheduler rejects calendar fields on an interval instead of silently dropping them', () => {
+  const { validateSchedule } = require('../electron/backup-scheduler.cjs');
+  const { scheduleId } = require('../electron/backup-scheduler.cjs');
+  const input = { id: scheduleId('p','d'),profileId:'p',database:'d',enabled:true,intervalHours:24,
+    nextRunAt:new Date(Date.now()+3600000).toISOString(),timeZone:'UTC',target:'a'.repeat(64),revision:'b'.repeat(32) };
+  assert.throws(()=>validateSchedule({...input,cron:'0 2 * * *'}));
+  assert.throws(()=>validateSchedule({...input,timeOfDay:'02:00'}));
+  const daily=validateSchedule({...input,mode:'daily',timeOfDay:'02:00'});
+  assert.equal(daily.mode,'daily');assert.equal(daily.timeOfDay,'02:00');assert.equal(Object.hasOwn(daily,'intervalHours'),false);
 });

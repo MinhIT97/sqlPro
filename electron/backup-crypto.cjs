@@ -5,6 +5,8 @@ const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 const { pipeline } = require('node:stream/promises');
 const { Transform, Readable } = require('node:stream');
+const { fileIdentity, sameFileIdentity } = require('./backup-file.cjs');
+const { normalizeArchiveMetadata, encodeMetadata, createMetadataReader } = require('./backup-archive-metadata.cjs');
 
 const MAGIC = Buffer.from('SQLPRO_ENC_V1\0'); // 14 bytes
 const HEADER_SIZE = 61; // 14 magic + 1 version + 1 cipher + 1 compress + 32 salt + 12 iv
@@ -17,14 +19,15 @@ function error(code, message) {
 function validateHeader(header, size) {
   if (size < HEADER_SIZE + TAG_SIZE) throw error('BACKUP_FILE_CORRUPT', 'Tệp backup mã hóa bị thiếu dữ liệu.');
   if (!header.subarray(0, MAGIC.length).equals(MAGIC)) throw error('NOT_ENCRYPTED_BACKUP', 'Tệp không phải backup mã hóa của SqlPro.');
-  if (![1, 2].includes(header[14]) || header[15] !== 1 || ![0, 1].includes(header[16])) {
+  if (![1, 2, 3].includes(header[14]) || header[15] !== 1 || ![0, 1].includes(header[16])) {
     throw error('BACKUP_FORMAT_UNSUPPORTED', 'Phiên bản hoặc thuật toán backup chưa được hỗ trợ.');
   }
 }
 
-async function publishExclusive(tempPath, destinationPath) {
+async function publishExclusive(tempPath, destinationPath, checkContext = () => {}) {
   const handle = await fs.promises.open(tempPath, 'r+');
   try { await handle.sync(); } finally { await handle.close(); }
+  await checkContext();
   try { await fs.promises.link(tempPath, destinationPath); }
   catch (err) {
     if (err.code === 'EEXIST') throw error('BACKUP_DESTINATION_EXISTS', 'Tệp đích đã tồn tại. Bản backup hiện có được giữ nguyên.');
@@ -34,7 +37,7 @@ async function publishExclusive(tempPath, destinationPath) {
 }
 
 function deriveKey(passphrase, salt) {
-  if (typeof passphrase !== 'string' || !passphrase) {
+  if (typeof passphrase !== 'string' || !passphrase || passphrase.length > 1024) {
     throw error('PASSPHRASE_REQUIRED', 'Mật khẩu bảo vệ backup bắt buộc phải được cung cấp.');
   }
   // Scrypt with safe parameters
@@ -81,8 +84,8 @@ async function inspectBackupContainer(filePath) {
   }
 }
 
-async function encryptBackupFile(sourcePath, destinationPath, { passphrase, compress = true } = {}) {
-  if (!passphrase || typeof passphrase !== 'string' || passphrase.length < 8) {
+async function encryptBackupFile(sourcePath, destinationPath, { passphrase, compress = true, signal, checkContext = () => {}, metadata = null } = {}) {
+  if (!passphrase || typeof passphrase !== 'string' || passphrase.length < 8 || passphrase.length > 1024) {
     throw error('PASSPHRASE_TOO_SHORT', 'Mật khẩu mã hóa phải có ít nhất 8 ký tự.');
   }
 
@@ -97,13 +100,24 @@ async function encryptBackupFile(sourcePath, destinationPath, { passphrase, comp
     if (e.code === 'BACKUP_TARGET_CONFLICT') throw e;
   }
 
+  const archiveMetadata = metadata === null ? null : normalizeArchiveMetadata(metadata);
+  const prefix = archiveMetadata ? encodeMetadata(archiveMetadata) : null;
+  let prefixSent = false;
+  const prependMetadata = new Transform({
+    transform(chunk, encoding, callback) {
+      if (!prefixSent) { prefixSent = true; if (prefix) this.push(prefix); }
+      callback(null, chunk);
+    },
+    flush(callback) { if (!prefixSent && prefix) this.push(prefix); callback(); }
+  });
+  const sourceIdentity = fileIdentity(await fs.promises.stat(sourcePath));
   const salt = crypto.randomBytes(32);
   const iv = crypto.randomBytes(12);
   const key = deriveKey(passphrase, salt);
 
   const header = Buffer.alloc(HEADER_SIZE);
   MAGIC.copy(header, 0);
-  header[14] = 2; // version 2 authenticates the header as well as the ciphertext
+  header[14] = archiveMetadata ? 3 : 2; // v3 adds authenticated, encrypted metadata before SQL
   header[15] = 1; // 1 = aes-256-gcm
   header[16] = compress ? 1 : 0;
   salt.copy(header, 17);
@@ -140,9 +154,9 @@ async function encryptBackupFile(sourcePath, destinationPath, { passphrase, comp
   try {
     if (compress) {
       const gzip = zlib.createGzip({ level: 6 });
-      await pipeline(inputStream, hashContentStream, gzip, cipher, hashFileStream, out, { end: false });
+      await pipeline(inputStream, hashContentStream, prependMetadata, gzip, cipher, hashFileStream, out, { end: false, signal });
     } else {
-      await pipeline(inputStream, hashContentStream, cipher, hashFileStream, out, { end: false });
+      await pipeline(inputStream, hashContentStream, prependMetadata, cipher, hashFileStream, out, { end: false, signal });
     }
 
     const tag = cipher.getAuthTag();
@@ -154,8 +168,18 @@ async function encryptBackupFile(sourcePath, destinationPath, { passphrase, comp
 
     const contentChecksum = contentHasher.digest('hex');
     const fileChecksum = fileHasher.digest('hex');
+    if (archiveMetadata?.manifest && archiveMetadata.manifest.checksum.value !== contentChecksum) {
+      throw error('BACKUP_CHECKSUM_MISMATCH', 'SQL nguồn không khớp manifest; chưa tạo bản mã hóa.');
+    }
 
-    await publishExclusive(tempPath, destinationPath);
+    await publishExclusive(tempPath, destinationPath, async () => {
+      if (signal?.aborted) throw error('BACKUP_CRYPTO_CANCELLED', 'Đã hủy xử lý backup.');
+      await checkContext();
+      if (!sameFileIdentity(sourceIdentity, fileIdentity(await fs.promises.stat(sourcePath)))) {
+        throw error('BACKUP_FILE_CHANGED', 'Tệp nguồn thay đổi khi mã hóa; chưa tạo bản mã hóa.');
+      }
+      await checkContext();
+    });
 
     return {
       format: 'encrypted',
@@ -171,7 +195,11 @@ async function encryptBackupFile(sourcePath, destinationPath, { passphrase, comp
   }
 }
 
-async function decryptBackupFile(sourcePath, destinationPath, { passphrase } = {}) {
+async function decryptBackupFile(sourcePath, destinationPath, { passphrase, signal, checkContext = () => {}, maxPlaintextBytes = 10 * 1024 ** 3 } = {}) {
+  if (!Number.isSafeInteger(maxPlaintextBytes) || maxPlaintextBytes < 1 || maxPlaintextBytes > 10 * 1024 ** 3) {
+    throw error('BACKUP_CRYPTO_QUOTA_INVALID', 'Hạn mức giải mã không hợp lệ.');
+  }
+  let plaintextBytes = 0;
   const stat = await fs.promises.stat(sourcePath);
   if (stat.size < HEADER_SIZE + TAG_SIZE) {
     throw error('BACKUP_FILE_CORRUPT', 'Tệp backup không hợp lệ hoặc kích thước quá nhỏ.');
@@ -208,7 +236,7 @@ async function decryptBackupFile(sourcePath, destinationPath, { passphrase } = {
 
   const key = deriveKey(passphrase, salt);
   const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-  if (header[14] === 2) decipher.setAAD(header);
+  if (header[14] >= 2) decipher.setAAD(header);
   key.fill(0);
   decipher.setAuthTag(tag);
 
@@ -220,6 +248,16 @@ async function decryptBackupFile(sourcePath, destinationPath, { passphrase } = {
   const tempPath = `${destinationPath}.${crypto.randomBytes(8).toString('hex')}.part`;
   const out = fs.createWriteStream(tempPath, { mode: 0o600, flags: 'wx' });
   const contentHasher = crypto.createHash('sha256');
+  const metadataReader = header[14] === 3 ? createMetadataReader() : null;
+  const quota = new Transform({
+    transform(chunk, encoding, callback) {
+      plaintextBytes += chunk.length;
+      if (plaintextBytes > maxPlaintextBytes) {
+        callback(error('BACKUP_DECOMPRESSION_LIMIT', 'Nội dung giải mã vượt hạn mức; chưa tạo bản SQL.')); return;
+      }
+      callback(null, chunk);
+    }
+  });
 
   const hashContentStream = new Transform({
     transform(chunk, encoding, callback) {
@@ -231,22 +269,34 @@ async function decryptBackupFile(sourcePath, destinationPath, { passphrase } = {
   try {
     if (compress) {
       const gunzip = zlib.createGunzip();
-      await pipeline(cipherStream, decipher, gunzip, hashContentStream, out);
+      await pipeline(cipherStream, decipher, gunzip, quota, ...(metadataReader ? [metadataReader.stream] : []), hashContentStream, out, { signal });
     } else {
-      await pipeline(cipherStream, decipher, hashContentStream, out);
+      await pipeline(cipherStream, decipher, quota, ...(metadataReader ? [metadataReader.stream] : []), hashContentStream, out, { signal });
     }
-    await publishExclusive(tempPath, destinationPath);
+    const expected = metadataReader?.getMetadata()?.manifest?.checksum.value;
+    if (expected && contentHasher.copy().digest('hex') !== expected) {
+      throw error('BACKUP_CHECKSUM_MISMATCH', 'Nội dung SQL không khớp metadata đã xác thực.');
+    }
+    await publishExclusive(tempPath, destinationPath, async () => {
+      if (signal?.aborted) throw error('BACKUP_CRYPTO_CANCELLED', 'Đã hủy xử lý backup.');
+      await checkContext();
+      if (!sameFileIdentity(fileIdentity(stat), fileIdentity(await fs.promises.stat(sourcePath)))) {
+        throw error('BACKUP_FILE_CHANGED', 'Container thay đổi khi giải mã; chưa tạo bản SQL.');
+      }
+      await checkContext();
+    });
   } catch (err) {
     // Delete ONLY partial temporary file on error, never destinationPath
     try { await fs.promises.unlink(tempPath); } catch {}
-    if (/unable to authenticate|Unsupported state|bad decrypt/i.test(err.message)) {
+    if (/unable to authenticate|Unsupported state|bad decrypt/i.test(err.message) || ['Z_DATA_ERROR', 'Z_BUF_ERROR'].includes(err.code)) {
       throw error('BACKUP_DECRYPTION_FAILED', 'Mật khẩu giải mã không chính xác hoặc dữ liệu backup đã bị can thiệp/hỏng.');
     }
     throw err;
   }
 
   return {
-    contentChecksum: contentHasher.digest('hex')
+    contentChecksum: contentHasher.digest('hex'),
+    ...(metadataReader ? { metadata: metadataReader.getMetadata() } : {})
   };
 }
 

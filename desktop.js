@@ -5,26 +5,13 @@
   document.body.classList.add('desktop-app');
   const runtimeBadge = document.querySelector('#runtimeBadge');
 
-  function currentState() {
-    return {
-      connectionId: app.connection ? app.connection.id : null,
-      workspaceId: app.activeWorkspaceId,
-      database: app.database,
-      table,
-      mode,
-      savedQuery: document.querySelector('#sql')?.value || sessionStorage.getItem('query') || '',
-      queryTabs: queryTabs.map((tab) => ({ title: tab.title, sql: tab.sql ?? '' })),
-      activeQuery,
-      history: historyRows.slice(0, 100)
-    };
-  }
-
   function persistState() {
-    return desktop.saveState(currentState()).catch(() => undefined);
+    return saveRendererStateNow();
   }
 
   desktop.onMenuCommand((command) => {
     const actions = {
+      'dev-files-changed': () => toast('Tệp giao diện đã thay đổi. Nhấn Ctrl+Shift+R để xem xét tải lại.', 'info'),
       'new-connection': () => connection(),
       'import-navicat': () => importNavicat(),
       disconnect: () => disconnect(),

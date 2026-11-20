@@ -73,6 +73,30 @@ handle('account:list-recovery', () => ok([]));
 handle('account:resolve-conflicts', () => ok({ state: 'synced', conflicts: [], conflictCount: 0 }));
 handle('account:restore-recovery', (id) => ok({ restored: true, id }));
 handle('account:status', () => ok({ loggedIn: false }));
+let localKit = null, localExportCanceled = true, localConfirm = false, holdLocalConfirm = false, pendingLocalConfirm = null, localWrites = 0;
+const localRecoveryApi = require('../electron/local-recovery.cjs');
+let localVault = require('../electron/store-schema.cjs').normalizeVault({ connections: [{ id: 'kept-local', workspaceId: 'ws-personal', password: 'local-secret-marker' }] });
+const localRecoveryManager = localRecoveryApi.createLocalRecoveryManager({
+  store: { snapshotForSync: () => structuredClone(localVault), saveSyncRecovery() {}, replaceFromSync: value => { localVault = structuredClone(value); localWrites++; } },
+  isLoggedIn: () => false, getGeneration: () => 0,
+  confirm: async () => holdLocalConfirm ? new Promise(resolve => { pendingLocalConfirm = resolve; }) : localConfirm
+});
+handle('account:export-local-kit', () => {
+  if (localExportCanceled) return ok({ canceled: true });
+  localKit = localRecoveryApi.createLocalRecovery(localVault);
+  fs.writeFileSync(path.join(app.getPath('userData'), 'fixture.sqlpro-recovery'), JSON.stringify(localKit.bundle), { mode: 0o600 });
+  return ok({ recoveryKey: localKit.recoveryKey, connections: localKit.connections, workspaces: localKit.workspaces });
+});
+handle('account:prepare-local-kit', payload => {
+  try { return ok(localRecoveryManager.prepare(localKit.bundle, payload.recoveryKey)); }
+  catch (error) { return { ok: false, error: { code: error.code, message: error.message } }; }
+});
+handle('account:apply-local-kit', async payload => {
+  try { return ok(await localRecoveryManager.apply(payload.token)); }
+  catch (error) { return { ok: false, error: { code: error.code, message: error.message } }; }
+});
+handle('account:cancel-local-kit', payload => ok({ revoked: localRecoveryManager.revoke(payload.token) }));
+
 handle('db:use-database', () => ok({}));
 handle('db:databases', () => ok(schemaFixture ? ['source_schema', 'target_schema'] : ['test']));
 handle('db:schema-snapshot', async payload => {
@@ -153,6 +177,18 @@ let pendingBackup = null;
 let holdBackup = false;
 let pendingReplica = null;
 let pendingContainerInfo = null;
+const encryptedCatalog = payload => require('../electron/backup-encrypted-catalog.cjs').createEncryptedCatalog({root:app.getPath('userData'),profileId:payload.profileId,database:payload.database});
+handle('db:list-encrypted-backups', async payload => ok(await encryptedCatalog(payload).list()));
+let archiveExportPath = null, archiveImportPath = null, archiveDeleteConfirmed = false;
+handle('db:export-encrypted-backup', async payload => archiveExportPath ? ok(await encryptedCatalog(payload).exportArchive(payload.id, archiveExportPath)) : ok({ canceled: true }));
+handle('db:import-encrypted-backup', async payload => archiveImportPath ? ok(await encryptedCatalog(payload).importArchive(archiveImportPath)) : ok({ canceled: true }));
+handle('db:delete-encrypted-backup', async payload => archiveDeleteConfirmed ? ok(await encryptedCatalog(payload).removeArchive(payload.id)) : ok({ canceled: true }));
+
+handle('db:encrypt-backup', async payload => ok(await encryptedCatalog(payload).encrypt(payload.id,payload.passphrase,payload.compress)));
+handle('db:decrypt-backup', async payload => {
+  try { return ok(await encryptedCatalog(payload).decrypt(payload.id, payload.passphrase)); }
+  catch (error) { return { ok: false, error: { code: error.code, message: error.message } }; }
+});
 handle('db:create-backup-replica', () => new Promise(resolve => { pendingReplica = resolve; }));
 handle('db:inspect-backup-container', () => new Promise(resolve => { pendingContainerInfo = resolve; }));
 handle('db:routines', () => ok(routines));
@@ -173,13 +209,13 @@ handle('db:backup', (payload) => {
   if (holdBackup) return new Promise((resolve) => { pendingBackup = () => resolve(result); });
   return result;
 });
-handle('db:list-backups', () => ok([]));
+handle('db:list-backups', async payload => payload?.profileId === 'crypto-p' ? ok(await require('../electron/backup-catalog.cjs').listBackups(app.getPath('userData'),payload.profileId,payload.database)) : ok([]));
 let savedSchedule = null;
 let cancelScheduleSave = true;
 handle('db:get-backup-schedule', () => ok({ schedule: savedSchedule, paused: false }));
 handle('db:save-backup-schedule', payload => {
   if (cancelScheduleSave) return ok({ canceled: true });
-  savedSchedule = { ...payload, enabled: true, targetMatches: true, lastRun: null };
+  savedSchedule = { ...payload, nextRunAt: payload.mode === 'daily' ? require('../electron/backup-schedule-timing.cjs').nextScheduledAt(payload) : payload.nextRunAt, enabled: true, targetMatches: true, lastRun: null };
   return ok({ schedule: savedSchedule });
 });
 handle('db:pause-backup-schedule', () => { savedSchedule.enabled = false; return ok({ paused: true }); });
@@ -407,6 +443,24 @@ handle('db:analyze-query', () => analyzeCanceled ? ok({ canceled: true }) : ok({
   ...rows(['ANALYZE'], [['{"query_block":{"r_rows":2,"r_total_time_ms":0.12,"condition":"<img src=x onerror=alert(1)>"}}']]),
   isAnalyze: true, isExplain: true, explainFormat: 'JSON', analysis: { version: 1, executed: true, engine: 'MariaDB' }
 }));
+const mainDiffService = new (require(path.join(root, 'electron/data-diff-service.cjs')).DataDiffService)({
+  store: { getWithSecrets: id => ({ id, host: 'smoke', readOnly: true }) },
+  createSession: () => ({
+    async connect() {}, async close() {}, async useDatabase(database) { this.database = database; },
+    async listColumns(database, table) { this.table = table; return autocompleteColumns?.get(table) || rowEditorColumns; },
+    async raw(sql) {
+      if (/^(SET |START |ROLLBACK)/.test(sql)) return {};
+      if (sql.includes('information_schema.TABLES')) return { result: [{ engine: 'InnoDB' }] };
+      const result = dataDiffQuery ? await dataDiffQuery({ sql, database: this.database, table: this.table }) : ok(rows(['id','name'], [[1,'Alice']]));
+      if (!result.ok) throw Object.assign(new Error('fixture error'), { code: result.error?.code });
+      if (result.data.truncated) throw Object.assign(new Error('fixture truncation'), { code: 'DATA_DIFF_BUDGET_EXCEEDED' });
+      return result.data;
+    }
+  })
+});
+handle('db:start-data-diff', async payload => ok(await mainDiffService.startDiff(payload)));
+handle('db:data-diff-status', payload => ok(mainDiffService.getDiffStatus(payload.jobId)));
+handle('db:cancel-data-diff', async payload => ok(await mainDiffService.cancelDiff(payload.jobId)));
 handle('db:query', (payload) => {
   if (dataDiffQuery) return dataDiffQuery(payload);
   if (!payload || typeof payload.sql !== 'string') return { ok: false, error: { message: 'Invalid query payload' } };
@@ -534,6 +588,75 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate("$('#queryTimeout').value"), '900000');
     await evaluate("$('#queryTimeout').value='300000'; $('#queryTimeout').dispatchEvent(new Event('change'))");
     assert.equal(await evaluate("$('#sql').value='select 1'; $('#formatSqlBtn').click(); $('#sql').value"), 'SELECT 1');
+  });
+  await check('development change notification passes the preload allowlist without replacing the editor', async () => {
+    const before = await evaluate("$('#sql').value");
+    win.webContents.send('menu:command', 'dev-files-changed');
+    await until("$('#toast').textContent.includes('Tệp giao diện đã thay đổi')");
+    assert.equal(await evaluate("$('#sql').value"), before);
+  });
+  await check('bulk tab close preserves draft SQL, active running identity and the matching target', async () => {
+    const result = await evaluate(`(() => {
+      const original = { tabs: queryTabs, active: activeQuery, query: app.query };
+      try {
+        queryTabs = [
+          {id:101,title:'Keep',sql:'SELECT keep_marker',profileId:'test',database:'keep_db'},
+          {id:102,title:'Discard',sql:'SELECT discard_marker',profileId:'test',database:'discard_db'},
+          {id:103,title:'Running',sql:'SELECT running_marker',profileId:'test',database:'running_db',running:true},
+          {id:104,title:'Running two',sql:'SELECT other_marker',profileId:'test',database:'other_db',running:true}
+        ];
+        activeQuery=2;app.query=queryTabs[2];renderQueryView();
+        closeQueryTabsToRight(0);
+        const running = {id:app.query.id,sql:$('#sql').value,db:app.query.database,index:activeQuery,other:queryTabs[2].sql};
+        closeOtherQueryTabs(0);
+        return {running,kept:{id:app.query.id,sql:$('#sql').value,db:app.query.database,stored:app.query.sql}};
+      } finally {
+        queryTabs=original.tabs;activeQuery=original.active;app.query=original.query;renderQueryView();persistState();
+      }
+    })()`);
+    assert.deepEqual(result, {
+      running:{id:103,sql:'SELECT running_marker',db:'running_db',index:1,other:'SELECT other_marker'},
+      kept:{id:101,sql:'SELECT keep_marker',db:'keep_db',stored:'SELECT keep_marker'}
+    });
+  });
+  await check('tab rename supports Enter and saved query opening at the limit leaves the active draft intact', async () => {
+    await evaluate(`window.__tabReview={tabs:queryTabs,active:activeQuery,query:app.query,saved:savedQueries};
+      queryTabs=[{id:101,title:'Rename me',sql:'SELECT keep_draft',profileId:'test',database:'test'}];
+      activeQuery=0;app.query=queryTabs[0];renderQueryView();promptRenameQueryTab(0)`);
+    try {
+      assert.equal(await evaluate("document.activeElement === $('#renameQueryTabInput')"), true);
+      await evaluate(`$('#renameQueryTabInput').value='Renamed with Enter';
+        $('#renameQueryTabInput').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))`);
+      assert.equal(await evaluate('app.query.title'), 'Renamed with Enter');
+      assert.equal(await evaluate("$('#modal').open"), false);
+      await evaluate(`savedQueries=[{id:'other-saved',name:'Other saved',sql:'SELECT wrong',profileId:'other',database:'other'}];
+        while(queryTabs.length<50)queryTabs.push({id:queryTabs.length+101,title:'Extra',sql:''});openSavedQuery('other-saved')`);
+      assert.equal(await evaluate('app.query.title'), 'Renamed with Enter');
+      assert.equal(await evaluate('app.query.savedQueryId || null'), null);
+      assert.equal(await evaluate("$('#sql').value"), 'SELECT keep_draft');
+    } finally {
+      await evaluate(`closeModal();queryTabs=window.__tabReview.tabs;activeQuery=window.__tabReview.active;
+        app.query=window.__tabReview.query;savedQueries=window.__tabReview.saved;delete window.__tabReview;renderQueryView();persistState()`);
+    }
+  });
+  await check('beforeunload retains scoped drafts, saved queries, snippets and masking in one state payload', async () => {
+    await evaluate(`window.__stateReview={tabs:queryTabs,active:activeQuery,query:app.query,saved:savedQueries,snippets,mask:app.maskData};
+      queryTabs=[{id:101,title:'Unload',sql:'SELECT unload_marker',profileId:'test',database:'unload_db'}];
+      activeQuery=0;app.query=queryTabs[0];savedQueries=[{id:'unload-saved',name:'Keep',sql:'SELECT saved_marker'}];
+      snippets=[{id:'unload-snippet',title:'Keep',sql:'SELECT snippet_marker'}];app.maskData=true;renderQueryView();
+      window.dispatchEvent(new Event('beforeunload'))`);
+    try {
+      await untilNode(() => calls.some(c => c.name==='state:save' && c.args[0].savedQueries?.[0]?.id==='unload-saved'));
+      const state = calls.filter(c => c.name==='state:save' && c.args[0].savedQueries?.[0]?.id==='unload-saved').at(-1).args[0];
+      assert.equal(state.queryTabs[0].profileId, 'test');assert.equal(state.queryTabs[0].database, 'unload_db');
+      assert.equal(state.queryTabs[0].sql, 'SELECT unload_marker');assert.equal(state.snippets[0].id, 'unload-snippet');
+      assert.equal(state.maskData, true);
+      assert.equal(await evaluate("sessionStorage.getItem('query')"), null);
+    } finally {
+      await evaluate(`queryTabs=window.__stateReview.tabs;activeQuery=window.__stateReview.active;app.query=window.__stateReview.query;
+        savedQueries=window.__stateReview.saved;snippets=window.__stateReview.snippets;app.maskData=window.__stateReview.mask;
+        delete window.__stateReview;renderQueryView();persistState()`);
+    }
   });
   await check('SQL editor undo and redo survive formatting and tab switches', async () => {
     const result = await evaluate(`(() => {
@@ -1688,6 +1811,21 @@ app.whenReady().then(async () => {
 
     await evaluate('closeModal()');
   });
+  await check('diagnostic KILL confirmations cannot cross connections or survive a replacement dialog', async () => {
+    for (const selector of ['.kill-query-btn','.kill-conn-btn']) {
+      for (const drift of ['profile','dialog']) {
+        const before = calls.filter(c=>c.name==='db:query' && /^KILL\b/.test(c.args[0].sql || '')).length;
+        await evaluate('showProcesslistModal()');await until(`Boolean($('${selector}'))`);
+        await evaluate(`$('${selector}').click()`);await until("Boolean($('#confirmOk'))");
+        await evaluate(`window.__diagConnection=app.connection;
+          ${drift === 'profile' ? "app.connection={id:'other-profile',name:'Other'}" : "closeModal();modal('<p>Replacement dialog</p>')"};
+          document.querySelector('.confirmation-dialog #confirmOk').click()`);
+        await new Promise(resolve=>setTimeout(resolve,80));
+        assert.equal(calls.filter(c=>c.name==='db:query' && /^KILL\b/.test(c.args[0].sql || '')).length, before);
+        await evaluate('app.connection=window.__diagConnection;delete window.__diagConnection;closeModal()');
+      }
+    }
+  });
   await check('smart data masking toggles and masks sensitive PII columns in data grid and query grid', async () => {
     // 1. Table grid masking test
     await evaluate(`(() => {
@@ -1807,9 +1945,10 @@ app.whenReady().then(async () => {
       await evaluate("$('#dataDiffRunCompareBtn').click()");
       await until("Boolean($('#dataDiffGoSyncBtn'))");
       assert.equal(reads, 2);
-      assert.match(await evaluate("$('#dataDiffTabContent').textContent"), /Không có snapshot nhất quán/);
-      const queries = calls.filter(call => call.name === 'db:query').slice(-2);
-      for (const query of queries) assert.match(query.args[0].sql, /SELECT `id`, `value` FROM `test`.`users` ORDER BY `id` LIMIT 500;/);
+      assert.match(await evaluate("$('#dataDiffTabContent').textContent"), /hai snapshot không cùng thời điểm/);
+      const start = calls.filter(call => call.name === 'db:start-data-diff').at(-1).args[0];
+      assert.deepEqual(start,{sourceProfileId:'test',sourceDb:'test',sourceTable:'users',targetProfileId:'test',targetDb:'test',targetTable:'users',rowLimit:500});
+      assert.ok(calls.some(call=>call.name==='db:data-diff-status'));
       await evaluate("$('#dataDiffDiffTabBtn').click()");
       assert.match(await evaluate("$('#dataDiffTabContent').textContent"), /9007199254740993/);
       assert.match(await evaluate("$('#dataDiffTabContent').textContent"), /9007199254740992/);
@@ -1871,6 +2010,21 @@ app.whenReady().then(async () => {
       assert.equal(await evaluate("!$('#dataDiffRunCompareBtn').disabled && $('#dataDiffOverviewTabBtn').disabled"), true);
       await evaluate('closeModal()');
     } finally { release?.(); dataDiffQuery = null; }
+  });
+  await check('data diff cancel is focusable, cancels the Main worker and leaves no usable report', async () => {
+    let release;
+    dataDiffQuery=()=>new Promise(resolve=>{release=()=>resolve(ok(rows(['id','name'],[[1,'Alice']])));});
+    try {
+      await evaluate("showDataDiffModal('users')");await until("Boolean($('#dataDiffRunCompareBtn'))");
+      await evaluate("$('#dataDiffRunCompareBtn').click()");await untilNode(()=>Boolean(release));
+      await evaluate("$('#dataDiffCancelBtn').focus()");
+      assert.equal(await evaluate("document.activeElement===$('#dataDiffCancelBtn')"),true);
+      await evaluate("$('#dataDiffCancelBtn').click()");
+      await untilNode(()=>calls.some(c=>c.name==='db:cancel-data-diff'));
+      release();await untilNode(()=>mainDiffService.activeJobCount===0);
+      assert.equal(await evaluate("$('#dataDiffOverviewTabBtn').disabled && !$('#dataDiffRunCompareBtn').disabled"),true);
+      await evaluate('closeModal()');
+    } finally {release?.();dataDiffQuery=null;}
   });
   await check('data diff masks PII in unmatched samples as well as changed cells', async () => {
     rowEditorColumns = [{ name: 'id', type: 'int', key: 'PRI' }, { name: 'email', type: 'varchar(100)', key: '' }];
@@ -2973,6 +3127,43 @@ app.whenReady().then(async () => {
     await evaluate("closeModal();mode='query';renderQueryView()");
   });
 
+  await check('daily backup keeps local time and timezone through Cancel, keyboard save and reopen', async () => {
+    await evaluate("mode='backups';renderBackupsView();runBackupManagerAction('schedule')");
+    await until("!$('#saveBackupSchedule').disabled");
+    await evaluate("$('#backupScheduleMode').value='daily';$('#backupScheduleMode').dispatchEvent(new Event('change'));$('#backupScheduleTime').value='03:45';$('#backupScheduleZone').value='Invalid/Zone';$('#backupScheduleTime').focus()");
+    const before = calls.filter(call => call.name === 'db:save-backup-schedule').length;
+    await evaluate("$('#saveBackupSchedule').click()");
+    await until("$('#backupScheduleMessage').textContent.includes('không hợp lệ')");
+    assert.equal(calls.filter(call => call.name === 'db:save-backup-schedule').length, before);
+    assert.equal(await evaluate("$('#backupScheduleHours').disabled && $('#backupScheduleStart').disabled && !$('#backupScheduleTime').disabled"), true);
+    cancelScheduleSave = true;
+    await evaluate("$('#backupScheduleZone').value='Asia/Bangkok';$('#backupScheduleTime').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return', modifiers: ['control'] });
+    await until("$('#backupScheduleMessage').textContent.includes('Đã hủy lưu')");
+    assert.equal(await evaluate("$('#backupScheduleTime').value"), '03:45');
+    assert.equal(savedSchedule, null);
+    cancelScheduleSave = false;
+    await evaluate("$('#saveBackupSchedule').click()");
+    await until("$('#backupScheduleMessage').textContent.includes('Đã lưu và bật')");
+    assert.equal(savedSchedule.mode, 'daily');
+    assert.equal(savedSchedule.timeOfDay, '03:45');
+    assert.equal(savedSchedule.timeZone, 'Asia/Bangkok');
+    assert.equal(Object.hasOwn(savedSchedule, 'intervalHours'), false);
+    assert.match(await evaluate("$('#backupScheduleState').textContent"), /Hằng ngày 03:45/);
+    await evaluate("closeModal();runBackupManagerAction('schedule')");
+    await until("!$('#saveBackupSchedule').disabled");
+    assert.equal(await evaluate("$('#backupScheduleMode').value"), 'daily');
+    assert.equal(await evaluate('document.activeElement.id'), 'backupScheduleTime');
+    assert.equal(await evaluate("$('#backupScheduleZone').value"), 'Asia/Bangkok');
+    await evaluate("$('#saveBackupSchedule').scrollIntoView({block:'center'})");
+    assert.equal(await evaluate("(() => {const r=$('#saveBackupSchedule').getBoundingClientRect();return r.top>=0 && r.bottom<=innerHeight && $('#backupScheduleEditor').scrollWidth<=$('#backupScheduleEditor').clientWidth})()"), true);
+    await captureReview('backup-daily-schedule');
+    await evaluate("$('#deleteBackupSchedule').click()");
+    await until("$('#backupScheduleMessage').textContent.includes('Đã xóa lịch')");
+    await evaluate("closeModal();mode='query';renderQueryView()");
+  });
+
   await check('backup includes routines, events and the strip-DEFINER option', async () => {
     const before = calls.filter((call) => call.name === 'db:backup').length;
     holdBackup = true;
@@ -3479,6 +3670,124 @@ app.whenReady().then(async () => {
     await evaluate('Object.assign(app,window.backupUiBefore);delete window.backupUiBefore;delete window.oldReplicaButton;delete window.containerAction');
   });
 
+  await check('encrypted backup UI uses real crypto, rejects wrong passwords and returns a new SQL identity', async () => {
+    const id='20261120000000-1234abcd.sql';
+    const directory=require('../electron/backup-catalog.cjs').backupDirectory(app.getPath('userData'),'crypto-p','crypto_db');
+    fs.mkdirSync(directory,{recursive:true});const sql='CREATE TABLE restored (id INT);';fs.writeFileSync(path.join(directory,id),sql);
+    await evaluate(`window.__cryptoState={connection:app.connection,database:app.database,backups:app.backups,id:app.selectedBackupId};
+      app.connection={id:'crypto-p',name:'Crypto'};app.database='crypto_db';app.backups=[{id:'${id}',name:'Fixture'}];app.selectedBackupId='${id}';mode='backups';
+      showBackupCrypto('encrypt','${id}')`);
+    try {
+      await evaluate("$('#backupCryptoPassword').value='fixture-password';$('#backupCryptoConfirm').value='fixture-password';$('#backupCryptoGo').click()");
+      await until("$('#backupCryptoStatus').textContent.includes('Đã tạo bản mã hóa')");
+      assert.equal(await evaluate("$('#backupCryptoPassword').value"),'');
+      assert.equal(await evaluate("$('#backupCryptoConfirm').value"),'');
+      await evaluate("closeModal();showBackupCrypto('decrypt')");await until("!$('#backupArchiveId').disabled");
+      await evaluate("$('#backupCryptoPassword').value='wrong-password';$('#backupCryptoGo').click()");
+      await until("$('#backupCryptoStatus').textContent.includes('Mật khẩu')");
+      assert.equal((await require('../electron/backup-catalog.cjs').listBackups(app.getPath('userData'),'crypto-p','crypto_db')).length,1);
+      await evaluate("$('#backupCryptoPassword').value='fixture-password';$('#backupCryptoGo').click()");
+      await until("$('#backupCryptoStatus').textContent.includes('Đã xác thực và tạo SQL mới')");
+      const saved=(await require('../electron/backup-catalog.cjs').listBackups(app.getPath('userData'),'crypto-p','crypto_db')).find(entry=>entry.id!==id);
+      assert.ok(saved);assert.equal(fs.readFileSync(path.join(directory,saved.id),'utf8'),sql);
+      assert.equal(fs.readFileSync(path.join(directory,id),'utf8'),sql);
+      assert.equal(saved.verification.checksum, 'verified');
+      assert.equal(saved.verification.restore, 'not-tested');
+      assert.equal(await evaluate("$('#backupCryptoTrial').hidden"), false);
+      assert.equal(await evaluate("$('#backupArchiveSftp').disabled"), true);
+      await evaluate("$('#backupArchiveExport').click()");
+      await until("$('#backupCryptoStatus').textContent.includes('Đã hủy thao tác')");
+      archiveExportPath = path.join(app.getPath('userData'), 'exported-archive.enc');
+      await evaluate("$('#backupArchiveExport').click()");
+      await until("$('#backupCryptoStatus').textContent.includes('Đã xuất archive')");
+      assert.ok(fs.existsSync(archiveExportPath));
+      archiveImportPath = archiveExportPath;
+      await evaluate("$('#backupArchiveImport').click()");
+      await until("$('#backupCryptoStatus').textContent.includes('Đã nhập archive')");
+      assert.equal(await evaluate("$('#backupArchiveId').options.length"), 2);
+      await evaluate("$('#backupArchiveDelete').click()");
+      await until("$('#backupCryptoStatus').textContent.includes('Đã hủy thao tác')");
+      assert.equal(await evaluate("$('#backupArchiveId').options.length"), 2);
+      archiveDeleteConfirmed = true;
+      await evaluate("$('#backupArchiveDelete').click()");
+      await until("$('#backupCryptoStatus').textContent.includes('Đã xóa archive')");
+      assert.equal(await evaluate("$('#backupArchiveId').options.length"), 1);
+      assert.equal(fs.readFileSync(path.join(directory, saved.id), 'utf8'), sql);
+      win.setContentSize(940,700);
+      await evaluate("$('#backupCryptoGo').scrollIntoView({block:'center'})");
+      assert.equal(await evaluate("$('#backupCryptoGo').getBoundingClientRect().bottom<=innerHeight"),true);
+      assert.equal(calls.some(c=>c.name==='db:restore' && c.args[0]?.profileId==='crypto-p'),false);
+      await captureReview('backup-archive-management-small');
+      const trialBefore = calls.filter(c => c.name === 'db:trial-backup').length;
+      await evaluate("$('#backupCryptoTrial').click()");
+      await untilNode(() => pendingTrial !== null);
+      assert.equal(pendingTrial.payload.profileId, 'crypto-p');
+      assert.equal(pendingTrial.payload.database, 'crypto_db');
+      assert.equal(pendingTrial.payload.id, saved.id);
+      assert.equal(calls.filter(c => c.name === 'db:trial-backup').length, trialBefore + 1);
+      pendingTrial.resolve(ok({ canceled: true })); pendingTrial = null;
+      await until("$('#backupTrialReport').textContent.includes('Đã hủy phục hồi thử')");
+
+    } finally {
+      win.setContentSize(1344,835);
+      await evaluate('closeModal();app.connection=window.__cryptoState.connection;app.database=window.__cryptoState.database;app.backups=window.__cryptoState.backups;app.selectedBackupId=window.__cryptoState.id;delete window.__cryptoState;mode="query";renderQueryView()');
+    }
+  });
+  await check('local recovery UI keeps the key ephemeral, validates before approval and revokes a closed preview', async () => {
+    await evaluate("accountAuthModal(false);$('#accountLocalRecovery').click()");
+    assert.equal(await evaluate("!!$('#localRecoveryEditor')"), true);
+    await evaluate("$('#localRecoveryExport').click()");
+    await until("$('#localRecoveryStatus').textContent.includes('Đã hủy xuất')");
+    localExportCanceled = false;
+    await evaluate("$('#localRecoveryExport').click()");
+    await until("$('#localRecoveryStatus').textContent.includes('Đã xuất 1 kết nối')");
+    assert.equal(await evaluate("$('#localRecoveryGenerated').type"), 'password');
+    const key = localKit.recoveryKey;
+    assert.equal(await evaluate("$('#localRecoveryGenerated').value"), key);
+    assert.equal(fs.readFileSync(path.join(app.getPath('userData'), 'fixture.sqlpro-recovery'), 'utf8').includes(key), false);
+    assert.equal(await evaluate('JSON.stringify(captureRendererState())').then(value => value.includes(key)), false);
+    await evaluate("$('#localRecoveryCopy').click()");
+    await until("$('#localRecoveryStatus').textContent.includes('Đã sao chép mã')");
+    assert.equal(await clipboard.readText(), key); await clipboard.clear();
+    await evaluate("$('#localRecoveryCode').value='00000000';$('#localRecoveryPrepare').click()");
+    await until("$('#localRecoveryStatus').textContent.includes('Mã khôi phục sai')");
+    assert.equal(await evaluate("$('#localRecoveryCode').value"), '');
+    assert.equal(await evaluate("$('#localRecoveryApply').disabled"), true);
+    const prepare = async () => {
+      await evaluate(`$('#localRecoveryCode').value=${JSON.stringify(key)};$('#localRecoveryPrepare').click()`);
+      await until("!$('#localRecoveryApply').disabled");
+    };
+    await prepare();
+    await evaluate("$('#localRecoveryApply').click()");
+    await until("$('#localRecoveryStatus').textContent.includes('Đã hủy nhập')");
+    assert.equal(localWrites, 0);
+    await prepare(); holdLocalConfirm = true;
+    await evaluate("$('#localRecoveryApply').click()");
+    await untilNode(() => pendingLocalConfirm !== null);
+    const cancels = calls.filter(call => call.name === 'account:cancel-local-kit').length;
+    await evaluate("window.oldRecoveryKey=$('#localRecoveryGenerated');closeModal();modal('<h2 id=keepRecoveryDialog>Replacement</h2>')");
+    await untilNode(() => calls.filter(call => call.name === 'account:cancel-local-kit').length > cancels);
+    pendingLocalConfirm(true); pendingLocalConfirm = null;
+    await evaluate('new Promise(resolve=>setTimeout(resolve,80))');
+    assert.equal(localWrites, 0);
+    assert.equal(await evaluate("!!$('#keepRecoveryDialog')"), true);
+    assert.equal(await evaluate('window.oldRecoveryKey.value'), '');
+    holdLocalConfirm = false; localConfirm = true;
+    await evaluate('showLocalRecovery()'); await prepare();
+    await evaluate("$('#localRecoveryApply').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#localRecoveryStatus').textContent.includes('Đã thêm 1 kết nối')");
+    assert.equal(localWrites, 1); assert.equal(localVault.connections.length, 2);
+    assert.equal(localVault.connections[0].id, 'kept-local');
+    assert.notEqual(localVault.connections[1].id, 'kept-local');
+    win.setContentSize(900,650);
+    await evaluate("$('#localRecoveryApply').scrollIntoView({block:'center'})");
+    assert.equal(await evaluate("$('#localRecoveryEditor').scrollWidth<=$('#localRecoveryEditor').clientWidth && $('#localRecoveryApply').getBoundingClientRect().bottom<=innerHeight"), true);
+    await captureReview('local-recovery-small');
+    await evaluate('closeModal();delete window.oldRecoveryKey'); win.setContentSize(1344,835);
+  });
   await check('no renderer exceptions or unhandled rejections', async () => {
     await evaluate('new Promise(resolve => setTimeout(resolve, 200))');
     errors.push(...await evaluate('window.rendererErrors'));

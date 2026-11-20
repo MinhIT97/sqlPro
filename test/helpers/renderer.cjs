@@ -10,6 +10,7 @@ const SqlTableView = require('../../table-view.js');
 const SqlTablePreferences = require('../../table-preferences.js');
 const SqlExportValues = require('../../export-values.js');
 const SqlQueryResults = require('../../query-results.js');
+const SqlDataDiffJob = require('../../data-diff-job.js');
 const SqlRestoreReview = require('../../restore-review.js');
 const source = fs.readFileSync(path.join(__dirname, '../../app.js'), 'utf8');
 
@@ -19,7 +20,7 @@ function loadRenderer({ desktop, elements = new Map() } = {}) {
   const storage = new Map();
   const context = vm.createContext({
     console,
-    window: { sqlProDesktop: desktop, SqlAutocomplete, SqlRowValues, SqlTableFilters, SqlTableView, SqlTablePreferences, SqlExportValues, SqlQueryResults, SqlRestoreReview, addEventListener() {} },
+    window: { sqlProDesktop: desktop, SqlAutocomplete, SqlRowValues, SqlTableFilters, SqlTableView, SqlTablePreferences, SqlExportValues, SqlQueryResults, SqlRestoreReview, SqlDataDiffJob, addEventListener() {} },
     document: {
       querySelector: (selector) => elements.get(selector) || null,
       querySelectorAll: () => [],

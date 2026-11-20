@@ -70,7 +70,7 @@ test('failed atomic publication preserves previous schedule and cleans temporary
   const f = fixture(t);
   const original = fs.readFileSync(f.file, 'utf8');
   const source = fs.readFileSync(path.join(__dirname, '../electron/backup-scheduler.cjs'), 'utf8');
-  const context = { module: { exports: {} }, Buffer, require: id => id === 'node:fs' ? { ...fs, renameSync() { throw new Error('publish failure'); } } : require(id) };
+  const context = { module: { exports: {} }, Buffer, require: id => id === 'node:fs' ? { ...fs, renameSync() { throw new Error('publish failure'); } } : require(id.startsWith('./') ? path.join(__dirname, '../electron', id) : id) };
   vm.runInNewContext(source, context);
   assert.throws(() => context.module.exports.createScheduleStore(f.root).save(f.input, BASE), /publish failure/);
   assert.equal(fs.readFileSync(f.file, 'utf8'), original);
@@ -177,7 +177,7 @@ test('elapsed intervals remain exact across DST and malformed run state fails cl
 test('stop and restart while a cycle awaits cannot enqueue stale work or duplicate timers', async t => {
   const f = fixture(t), timers = [];
   const source = fs.readFileSync(path.join(__dirname, '../electron/backup-scheduler.cjs'), 'utf8');
-  const context = { module: { exports: {} }, require, clearTimeout: timer => { if (timer) timer.cleared = true; },
+  const context = { module: { exports: {} }, require: id => require(id.startsWith('./') ? path.join(__dirname, '../electron', id) : id), clearTimeout: timer => { if (timer) timer.cleared = true; },
     setTimeout: callback => { const timer = { callback, unref() {} }; timers.push(timer); return timer; } };
   vm.runInNewContext(source, context);
   let finish;

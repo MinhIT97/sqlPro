@@ -1301,3 +1301,23 @@ test('query export cancels the matching stream and releases the transfer slot', 
   r.dialog(async () => ({ canceled: true }));
   assert.equal((await r.call('db:export-query', { profileId: 'p1', sql: 'SELECT 1', taskId: 'export-2' })).ok, true);
 });
+
+test('daily schedule Main IPC computes next run itself, preserves timezone and binds native confirmation', async t => {
+  const { harness, payload } = scheduleFixture(t);
+  const r = setup({ scheduleHarness: harness });
+  r.productionDialog(async (_window, options) => {
+    assert.equal(options.defaultId, 0);
+    assert.match(options.detail, /hằng ngày lúc 02:00/);
+    assert.match(options.detail, /DST/);
+    return { response: 1 };
+  });
+  const result = await r.call('db:save-backup-schedule', {
+    ...payload,mode:'daily',timeOfDay:'02:00',timeZone:'Asia/Bangkok',nextRunAt:'1970-01-01T00:00:00Z'
+  });
+  assert.equal(result.ok,true,JSON.stringify(result.error));
+  assert.equal(result.data.schedule.mode,'daily');assert.equal(result.data.schedule.timeOfDay,'02:00');
+  assert.ok(Date.parse(result.data.schedule.nextRunAt)>Date.now());
+  assert.equal(Object.hasOwn(result.data.schedule,'intervalHours'),false);
+  assert.equal(harness.repository.read()[0].mode,'daily');
+  assert.equal(r.sessions.length,0);
+});

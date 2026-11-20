@@ -1,5 +1,10 @@
 # Tiến độ roadmap SqlPro
 
+> **Gói ưu tiên 20/11:** [Triển khai Data Diff Main, backup crypto UI và lịch daily theo múi giờ](CODE_REVIEW_FINAL_2026_11_18.md#gói-ưu-tiên-bảo-vệ-dữ-liệu--20112026). Node **1.302 pass/0 fail/26 DB opt-in skip**, DB hai engine/packet **328/328**, Electron **113/113**, website **14/14**, server **17/17**. Giải mã luôn tạo SQL mới, chưa manifest/trial tự động. Public Migration/Sync Apply vẫn khóa; cron tùy ý/OS scheduler/remote replica/recovery/release còn lại. Không tự tick 29 mục lớn chưa nghiệm thu; chưa commit. Các số trước đó là lịch sử.
+
+
+> **Mốc hiện hành 20/11/2026:** xem [review, bản sửa và toàn bộ tasks còn lại](CODE_REVIEW_FINAL_2026_11_18.md#rà-soát-và-sửa-lỗi-ngày-20112026). Đã sửa tab/đích SQL/unload, Save ACK, Diagnostics KILL, reload và mã hóa renderer-state có bảo toàn tệp/khóa. Node **1.282 pass / 0 fail / 24 opt-in skip**, Electron **110/110**, website **14/14**, server **17/17**. Còn **29/51 checkbox chưa tick** và các giới hạn nghiệm thu G6.4/G3.3; public Apply vẫn khóa. Chưa commit; các mốc 18–19/11 phía dưới là lịch sử.
+
 > **Mốc mới nhất 19/11:** [Đã sửa F01–F06 và giới hạn](CODE_REVIEW_FEATURES_2026_11_19_FIXES.md). Schema Diff UI đã dùng Main snapshot/plan; script giữ settings; Sync chặn inbound FK/metadata thiếu proof và đối chiếu lại quyền/context. Node **1.263 pass/0 fail/24 skip**, DB **43/43**, renderer **105/105**, website **14/14**, server **17/17**. Public Apply vẫn khóa; các dòng F01–F06 còn mở phía dưới giữ lịch sử trước sửa.
 
 > **Review mới nhất 19/11:** [Rà tính năng và bugs tại 60cdb20](CODE_REVIEW_FEATURES_2026_11_19.md): còn **F01–F06 (5 P1/1 P2)** đã tái hiện, chưa sửa runtime. Schema Diff UI chưa dùng Main collector/service; public Apply khóa không bảo vệ toàn bộ SQL xuất/mở Editor. Các mốc sửa lỗi phía dưới giữ lịch sử; không tự tick roadmap.

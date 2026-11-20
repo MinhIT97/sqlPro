@@ -51,8 +51,8 @@ async function listBackups(root, profileId, database, { maxEntries = Infinity } 
       catch (error) { annotationError = error.message; }
       const legacy = !manifest;
       const verification = manifest
-        ? { ...manifest.verification, checksum: sameFileIdentity(manifest.verification?.file, fileIdentity(stats))
-          ? manifest.verification.checksum : 'unverified' }
+        ? { ...manifest.verification, ...(sameFileIdentity(manifest.verification?.file, fileIdentity(stats))
+          ? {} : { checksum: 'unverified', restore: 'not-tested' }) }
         : { fileWritten: true, checksum: 'missing', restore: 'not-tested' };
       return {
         id: file.name,
@@ -151,6 +151,7 @@ async function verifyBackupFile(root, profileId, database, id) {
   const verification = {
     ...manifest.verification,
     checksum: match ? 'verified' : 'mismatch',
+    ...(!match ? { restore: 'not-tested' } : {}),
     checkedAt: new Date().toISOString(),
     file: fileIdentity(currentStats)
   };

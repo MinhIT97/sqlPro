@@ -185,6 +185,7 @@ async function saveBackupFile(filePath, produce, options = {}) {
 
 module.exports = {
   MANIFEST_VERSION,
+  buildManifest,
   saveBackupFile,
   manifestPathFor,
   readManifest,

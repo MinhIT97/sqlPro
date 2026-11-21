@@ -31,7 +31,10 @@ async function fixture(t, options = {}) {
       if (options.corrupt) fs.appendFileSync(local(file), 'corrupt');
       return fs.createReadStream(local(file));
     },
-    open(file, flags, done) { cb(fs.promises.open(local(file), flags), done); },
+    open(file, flags, done) {
+      assert.equal(flags, 'r+');
+      cb(fs.promises.open(local(file), flags), done);
+    },
     ext_openssh_fsync(handle, done) {
       if (options.noFsync) throw new Error('Server does not support this extended request');
       cb(handle.sync(), done);

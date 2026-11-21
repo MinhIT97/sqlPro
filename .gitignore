@@ -1,5 +1,6 @@
 node_modules/
 release/
+/scratch/
 *.log
 .DS_Store
 server/data/

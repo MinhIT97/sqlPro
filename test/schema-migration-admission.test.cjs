@@ -939,11 +939,11 @@ test('SchemaMigrationExecutor executes admitted candidate when wired with Main h
   }), { code: 'MIGRATION_TOKEN_USED' });
 });
 
-test('Main Apply IPC remains strictly fail-closed with MIGRATION_APPLY_NOT_READY', async () => {
+test('Main Apply IPC rejects forged confirmation and invalid tokens before opening sessions', async () => {
   const r = mainFixture();
   const res = await r.call('db:apply-migration-plan', { confirmed: true, planToken: 'forged' });
   assert.equal(res.ok, false);
-  assert.equal(res.error.code, 'MIGRATION_APPLY_NOT_READY');
+  assert.equal(res.error.code, 'INVALID_MIGRATION_APPLY');
   assert.equal(r.sessions.length, 0);
   assert.equal(r.queries.length, 0);
 });

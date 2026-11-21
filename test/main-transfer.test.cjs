@@ -95,6 +95,13 @@ function setup({ sync = {}, reset = () => ({ backupName: 'fixture-backup.json' }
 }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 
+async function forceDisconnect(r, profileId) {
+  const state = (await r.call('db:session-state', profileId)).data;
+  const result = await r.call('db:disconnect', profileId, { force: true, sessionId: state.sessionId, transactionRevision: state.transactionRevision });
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  return result;
+}
+
 async function analyzeFixture(options) {
   const r = setup(options);
   await r.call('db:connect', 'p1');
@@ -887,11 +894,11 @@ test('transaction controls pin the observed session, reject busy/stale state and
   session.inTransaction = true;
   assert.equal((await r.call('db:transaction', { ...payload, action: 'rollback' })).ok, true);
   assert.deepEqual(commands, ['COMMIT', 'ROLLBACK']);
-  await r.call('db:disconnect', 'p1', { force: true });
+  await forceDisconnect(r, 'p1');
   await r.call('db:connect', 'p1');
   assert.equal((await r.call('db:transaction', payload)).error.code, 'TRANSACTION_CONTEXT_CHANGED');
   const count = r.sessions.length;
-  await r.call('db:disconnect', 'p1', { force: true });
+  await forceDisconnect(r, 'p1');
   assert.equal((await r.call('db:transaction', payload)).error.code, 'TRANSACTION_CONTEXT_CHANGED');
   assert.equal(r.sessions.length, count);
 });
@@ -982,7 +989,7 @@ test('production approvals reject changed session, transaction, schema or policy
     r.sessions[0].updateRow = async () => {writes += 1;};
     const result = await r.call('db:update-row',{profileId:'prod',database:'demo',table:'items',keys:{id:1},values:{name:'new'}});
     const token = result.error.preview.token;
-    if (change === 'session') {await r.call('db:disconnect','prod',{force:true});await r.call('db:connect','prod');}
+    if (change === 'session') {await forceDisconnect(r,'prod');await r.call('db:connect','prod');}
     if (change === 'transaction') r.sessions[0].transactionRevision = 1;
     if (change === 'schema') r.sessions[0].columns = [{name:'id',type:'bigint'}];
     if (change === 'readonly') readonly.push('prod');
@@ -1067,7 +1074,7 @@ test('production Commit is cancelled by revision change, reconnect, busy state o
     const review=await r.call('db:transaction',{profileId:'prod',action:'commit',sessionId:state.sessionId,transactionRevision:0});
     const token=review.error.preview.token;
     if (change==='revision') session.transactionRevision=1;
-    if (change==='reconnect') {await r.call('db:disconnect','prod',{force:true});await r.call('db:connect','prod');}
+    if (change==='reconnect') {await forceDisconnect(r,'prod');await r.call('db:connect','prod');}
     if (change==='busy') session.activeTask={id:'busy'};
     if (change==='readonly') readonly.push('prod');
     if (change==='cancel') await r.call('db:cancel-production',token);
@@ -1196,7 +1203,7 @@ test('import và restore dùng phiên riêng, không đụng transaction của S
   assert.equal(JSON.stringify((await r.call('db:disconnect', 'p1')).data), JSON.stringify({
     disconnected: false,
     needsConfirmation: true,
-    profileId: 'p1'
+    profileId: 'p1', sessionId: (await r.call('db:session-state', 'p1')).data.sessionId, transactionRevision: 0
   }));
 
   const importing = r.call('db:import-file', {
@@ -1245,7 +1252,7 @@ test('import và restore dùng phiên riêng, không đụng transaction của S
   assert.equal(parent.inTransaction, true);
   assert.equal(parent.autocommit, false);
   assert.deepEqual(parent.canceled, []);
-  assert.equal(JSON.stringify((await r.call('db:disconnect', 'p1', { force: true })).data), JSON.stringify({
+  assert.equal(JSON.stringify((await forceDisconnect(r, 'p1')).data), JSON.stringify({
     disconnected: true,
     openProfiles: []
   }));

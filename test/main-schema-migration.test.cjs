@@ -132,7 +132,7 @@ test('Apply IPC cannot bypass policy with confirmed, token or environment flags,
   for (const payload of [undefined, { confirmed: true }, { planToken: 'forged', confirmed: true, readOnly: false, environment: 'local' }]) {
     const result = await r.call('db:apply-migration-plan', payload);
     assert.equal(result.ok, false);
-    assert.equal(result.error.code, 'MIGRATION_APPLY_NOT_READY');
+    assert.equal(result.error.code, 'INVALID_MIGRATION_APPLY');
   }
   assert.equal(r.sessions.length, 0);
   assert.equal(r.queries.length, 0);
@@ -200,7 +200,7 @@ test('full main integration proves only worker executes DDL, Editor session neve
   // Apply IPC continues to reject preview or forged apply
   const applyRes = await r.call('db:apply-migration-plan', { planId: planRes.data.planId });
   assert.equal(applyRes.ok, false);
-  assert.equal(applyRes.error.code, 'MIGRATION_APPLY_NOT_READY');
+  assert.equal(applyRes.error.code, 'INVALID_MIGRATION_APPLY');
 
   // 3. Construct ready candidate inside fixture
   const candidate = {

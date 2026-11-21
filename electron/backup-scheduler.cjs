@@ -120,16 +120,21 @@ class BackupScheduler {
         if (now < due) continue;
         const busy = this.isBusy();
         if (busy && now - due <= this.graceMs) continue;
-        const status = now - due > this.graceMs ? busy ? 'busy' : 'missed' : 'running';
-        const taskId = `scheduled-${crypto.randomBytes(16).toString('hex')}`;
-        const startedAt = new Date(now).toISOString();
         const nextRunAt = await this.nextRun(schedule, now);
         if (this.stopped || generation !== this.generation) break;
         const current = this.repository.read().find(item => item.id === schedule.id);
         if (!current?.enabled || current.revision !== schedule.revision || current.nextRunAt !== schedule.nextRunAt) continue;
         // A very short cron interval may elapse while calculating. Leave it for
         // the next tick rather than claim a past next run or replay twice.
-        if (Date.parse(nextRunAt) <= this.now()) continue;
+        const claimedAt = this.now();
+        if (claimedAt < due || Date.parse(nextRunAt) <= claimedAt) continue;
+        // Calendar calculation can yield to a worker. Recheck admission and
+        // grace against the current clock before persisting a claim.
+        const busyAtClaim = this.isBusy();
+        if (busyAtClaim && claimedAt - due <= this.graceMs) continue;
+        const status = claimedAt - due > this.graceMs ? busyAtClaim ? 'busy' : 'missed' : 'running';
+        const taskId = `scheduled-${crypto.randomBytes(16).toString('hex')}`;
+        const startedAt = new Date(claimedAt).toISOString();
         const claimed = this.repository.update(schedule.id, schedule.revision, item => ({ ...item,
           nextRunAt,
           lastRun: { status, scheduledFor: schedule.nextRunAt, startedAt, finishedAt: status === 'running' ? null : startedAt, taskId, backupId: null, errorCode: null } }));

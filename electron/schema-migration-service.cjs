@@ -28,6 +28,7 @@ class SchemaMigrationService {
     }
     this.snapshots = new Map();
     this.pendingPlans = new Map();
+    this.enableMySqlApply = options.enableMySqlApply === true;
   }
 
   clear() {
@@ -87,13 +88,16 @@ class SchemaMigrationService {
       targetName: `${target.database} (${target.scope.profileId})`
     });
     const planToken = crypto.randomBytes(32).toString('hex');
+    const applySupported = this.enableMySqlApply && !blockReason && statements.length > 0
+      && [source, target].every(snapshot => snapshot.scope.engine === 'MySQL' && /^8\./.test(snapshot.scope.serverVersion || ''));
     const plan = freeze({
       planId: `plan_${crypto.randomBytes(16).toString('hex')}`, planToken,
       createdAt: new Date().toISOString(), expiresAt: Date.now() + this.options.planTtlMs,
       sourceSnapshotId, targetSnapshotId, sourceScope: source.scope, targetScope: target.scope,
       comparison, sqlScript, exportSupported: !blockReason,
       status: blockReason ? 'blocked' : 'preview', blockReason,
-      applySupported: false, applyBlockReason: APPLY_BLOCK_REASON,
+      applySupported, applyBlockReason: applySupported ? null : APPLY_BLOCK_REASON,
+      options: structuredClone(options),
       statements: statements.map((statement, i) => ({ ...statement, id: `stmt_${i + 1}`, status: 'preview', enabled: false })),
       summary: { total: statements.length, executable: 0, blocked: 0 }
     });
@@ -110,7 +114,7 @@ class SchemaMigrationService {
       sourceSnapshotId: plan.sourceSnapshotId, targetSnapshotId: plan.targetSnapshotId,
       createdAt: plan.createdAt, expiresAt: new Date(plan.expiresAt).toISOString(),
       status: plan.status, blockReason: plan.blockReason,
-      applySupported: false, applyBlockReason: APPLY_BLOCK_REASON,
+      applySupported: plan.applySupported === true, applyBlockReason: plan.applyBlockReason,
       sourceScope: projectScope(plan.sourceScope), targetScope: projectScope(plan.targetScope),
       statements: plan.statements, summary: plan.summary,
       comparison: plan.comparison, sqlScript: plan.sqlScript, exportSupported: plan.exportSupported === true
@@ -128,6 +132,23 @@ class SchemaMigrationService {
       options: { ...options, sourceSnapshotId, targetSnapshotId },
       ttlMs
     });
+  }
+
+  getPreviewPlan(planToken) {
+    this.prune();
+    const plan = typeof planToken === 'string' && this.pendingPlans.get(planToken);
+    if (!plan) throw error('MIGRATION_PLAN_NOT_FOUND', 'Kế hoạch không tồn tại hoặc đã hết hạn. Hãy so sánh lại.');
+    return plan;
+  }
+
+  consumeApplyCandidate(planToken) {
+    const plan = this.getPreviewPlan(planToken);
+    if (plan.applySupported !== true) throw error(APPLY_BLOCK_REASON, 'Kế hoạch này chưa hỗ trợ áp dụng trực tiếp.');
+    this.pendingPlans.delete(planToken);
+    const remaining = plan.expiresAt - Date.now();
+    if (remaining <= 0) throw error('MIGRATION_PLAN_EXPIRED', 'Kế hoạch đã hết hạn.');
+    return this.createCandidatePlan({ sourceSnapshotId: plan.sourceSnapshotId, targetSnapshotId: plan.targetSnapshotId,
+      options: plan.options, ttlMs: remaining });
   }
 
   async applyPlan() {

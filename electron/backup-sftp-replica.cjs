@@ -113,7 +113,8 @@ async function replicateEncryptedArchive({ sourceFile, ssh, destinationDir, sign
       throw fail('REPLICA_CHECKSUM_MISMATCH', 'Checksum đọc lại từ SFTP không khớp nguồn; chưa công bố replica.');
     }
     let durability = 'server-acknowledged';
-    const handle = await invoke('open', temporary, 'r');
+    // Windows-backed SFTP servers need a writable handle for fsync.
+    const handle = await invoke('open', temporary, 'r+');
     try {
       try { await invoke('ext_openssh_fsync', handle); durability = 'fsync'; }
       catch (error) { if (error.code !== 8 && !/does not support.*extended/i.test(error.message)) throw error; }

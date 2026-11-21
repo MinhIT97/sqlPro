@@ -23,6 +23,7 @@ const columns = [
 let rowEditorColumns = columns;
 let schemaFixture = null;
 let pendingSchemaCapture = null;
+let migrationApplyFixture = null;
 const schemaService = new (require(path.join(root, 'electron/schema-migration-service.cjs')).SchemaMigrationService)();
 let dataDiffQuery = null;
 let autocompleteColumns = null;
@@ -62,13 +63,18 @@ handle('clipboard:write-text', async (text) => { await clipboard.writeText(text)
 handle('clipboard:read-text', async () => ok(await clipboard.readText()));
 handle('workspaces:list', () => ok([{ id: 'ws-personal', name: 'Personal' }]));
 handle('connections:list', () => ok([]));
+let navicatImportResponse = ok({ canceled: true });
+handle('connections:import-navicat', () => navicatImportResponse);
 handle('connections:test', () => sshTestResponses.shift() || ok({ version: '8.4-test' }));
 handle('connections:save', (payload) => ok({ ...payload, id: payload.id || 'saved-test' }));
 handle('db:open-profiles', () => ok([]));
 handle('db:session-state', (profileId) => ok({ profileId, connected: true, inTransaction: false, autocommit: true }));
 handle('db:confirm-production', () => ok({affectedRows:1}));
 handle('db:cancel-production', () => ok({cancelled:true}));
-handle('db:disconnect', () => ok({ disconnected: true, openProfiles: [] }));
+let holdDisconnectReply = false, pendingDisconnectReply = null, disconnectFixture = null;
+handle('db:disconnect', (id, options) => disconnectFixture ? disconnectFixture(id, options)
+  : holdDisconnectReply ? new Promise(resolve => { pendingDisconnectReply = resolve; })
+  : ok({ disconnected: true, openProfiles: [] }));
 handle('account:list-recovery', () => ok([]));
 handle('account:resolve-conflicts', () => ok({ state: 'synced', conflicts: [], conflictCount: 0 }));
 handle('account:restore-recovery', (id) => ok({ restored: true, id }));
@@ -97,7 +103,8 @@ handle('account:apply-local-kit', async payload => {
 });
 handle('account:cancel-local-kit', payload => ok({ revoked: localRecoveryManager.revoke(payload.token) }));
 
-handle('db:use-database', () => ok({}));
+let databaseUseFixture = null, columnsFixture = null;
+handle('db:use-database', payload => databaseUseFixture ? databaseUseFixture(payload) : ok({}));
 handle('db:databases', () => ok(schemaFixture ? ['source_schema', 'target_schema'] : ['test']));
 handle('db:schema-snapshot', async payload => {
   if (pendingSchemaCapture) return pendingSchemaCapture(payload);
@@ -109,12 +116,16 @@ handle('db:schema-snapshot', async payload => {
     views: [], routines: [], triggers: [], events: [] };
   const snapshot = { ...data, kind: 'sqlpro-schema-snapshot', version: 1, coverage: source && schemaFixture === 'partial' ? 'partial' : 'complete',
     snapshotIdentity: require(path.join(root, 'electron/schema-snapshot.cjs')).computeSchemaFingerprint(data),
-    scope: { profileId: payload.profileId, sessionId: 'schema-smoke', generation: 0, profileFingerprint: 'a'.repeat(64), database: payload.database, engine: 'MySQL', lowerCaseTableNames: 0 } };
+    scope: { profileId: payload.profileId, sessionId: 'schema-smoke', generation: 0, profileFingerprint: 'a'.repeat(64), database: payload.database, engine: 'MySQL', serverVersion: '8.4.0', lowerCaseTableNames: 0 } };
   return ok({ coverage: snapshot.coverage, snapshotId: schemaService.storeSnapshot(snapshot) });
 });
 handle('db:create-migration-plan', payload => ok(schemaService.createMigrationPlan(payload)));
+handle('db:apply-migration-plan', payload => {
+  schemaService.consumeApplyCandidate(payload.planToken);
+  return migrationApplyFixture(payload);
+});
 handle('db:tables', () => ok(tables));
-handle('db:columns', payload => ok(autocompleteColumns?.get(payload?.table) || rowEditorColumns));
+handle('db:columns', payload => columnsFixture ? columnsFixture(payload) : ok(autocompleteColumns?.get(payload?.table) || rowEditorColumns));
 handle('db:indexes', () => ok([]));
 handle('db:relations', () => ok({ outbound: [{ table: 'users', column: 'id', refTable: 'table_1', refColumn: 'id', refDatabase: 'test' }], inbound: [] }));
 handle('db:table-data', () => ok({ columns, primaryKey: ['id'], rows: [{ id: 1, name: 'Alice' }], total: 1, page: 1, pageSize: 100 }));
@@ -215,7 +226,7 @@ let cancelScheduleSave = true;
 handle('db:get-backup-schedule', () => ok({ schedule: savedSchedule, paused: false }));
 handle('db:save-backup-schedule', payload => {
   if (cancelScheduleSave) return ok({ canceled: true });
-  savedSchedule = { ...payload, nextRunAt: payload.mode === 'daily' ? require('../electron/backup-schedule-timing.cjs').nextScheduledAt(payload) : payload.nextRunAt, enabled: true, targetMatches: true, lastRun: null };
+  savedSchedule = { ...payload, nextRunAt: ['daily', 'cron'].includes(payload.mode) ? require('../electron/backup-schedule-timing.cjs').nextScheduledAt(payload) : payload.nextRunAt, enabled: true, targetMatches: true, lastRun: null };
   return ok({ schedule: savedSchedule });
 });
 handle('db:pause-backup-schedule', () => { savedSchedule.enabled = false; return ok({ paused: true }); });
@@ -1866,6 +1877,58 @@ app.whenReady().then(async () => {
 
     await evaluate('closeModal()');
   });
+  await check('schema Apply sends only a Main token, is single-flight, reports partial DDL, and cancels on modal replacement', async () => {
+    await evaluate("window.__schemaApplyState={connection:app.connection,connections:app.connections,database:app.database};app.connection={id:'schema-p',name:'Schema'};app.connections=[app.connection];app.database='source_schema'");
+    schemaFixture = 'simple'; schemaService.clear(); schemaService.enableMySqlApply = true;
+    const openPlan = async () => {
+      await evaluate('showSchemaDiffModal()'); await until("Boolean($('#diffRunCompareBtn'))");
+      await evaluate("$('#diffRunCompareBtn').click()"); await until("Boolean($('#diffGoMigrationBtn'))");
+      await evaluate("$('#diffGoMigrationBtn').click()");
+      assert.equal(await evaluate("$('#diffApplyTargetBtn').disabled"), false);
+    };
+    let finish;
+    try {
+      await openPlan();
+      migrationApplyFixture = () => new Promise(resolve => { finish = resolve; });
+      const before = calls.filter(c => c.name === 'db:apply-migration-plan').length;
+      await evaluate("$('#diffApplyTargetBtn').click();$('#diffApplyTargetBtn').click()");
+      await untilNode(() => Boolean(finish));
+      assert.equal(calls.filter(c => c.name === 'db:apply-migration-plan').length, before + 1);
+      const payload = calls.filter(c => c.name === 'db:apply-migration-plan').at(-1).args[0];
+      assert.deepEqual(Object.keys(payload).sort(), ['planToken', 'taskId']);
+      assert.equal(await evaluate("Boolean($('#modal [data-transfer-running]'))"), true);
+      const cancels = calls.filter(c => c.name === 'db:cancel-task').length;
+      await evaluate("$('#diffCancelApplyBtn').click()");
+      await untilNode(() => calls.filter(c => c.name === 'db:cancel-task').length > cancels);
+      assert.deepEqual(calls.filter(c => c.name === 'db:cancel-task').at(-1).args[0], { profileId: 'schema-p', taskId: payload.taskId });
+      finish(ok({ taskId: payload.taskId, job: { kind: 'sqlpro-migration-job', status: 'failed', executedCount: 1, totalCount: 2,
+        partialCommit: true, error: 'ER_DUP_ENTRY', statements: [{ id: 'stmt_1', status: 'executed' }, { id: '<img src=x>', status: 'failed', error: 'ER_DUP_ENTRY' }] } }));
+      await until("$('#diffApplyStatus').textContent.includes('Thất bại: 1/2')");
+      assert.match(await evaluate("$('#diffApplyStatus').textContent"), /thay đổi một phần/);
+      assert.equal(await evaluate("Boolean($('#diffApplyStatus img'))"), false);
+      assert.equal(await evaluate("$('#diffApplyTargetBtn').disabled && $('#diffCancelApplyBtn').hidden"), true);
+      await evaluate("$('#diffApplyTargetBtn').dispatchEvent(new Event('click'))");
+      assert.equal(calls.filter(c => c.name === 'db:apply-migration-plan').length, before + 1);
+      await captureReview('schema-migration-apply-result');
+
+      await openPlan(); finish = null;
+      await evaluate("$('#diffApplyTargetBtn').click()"); await untilNode(() => Boolean(finish));
+      const lateTask = calls.filter(c => c.name === 'db:apply-migration-plan').at(-1).args[0];
+      await evaluate("closeModal();modal('<section id=\"migrationReplacement\">Giữ nội dung mới</section>')");
+      await untilNode(() => calls.some(c => c.name === 'db:cancel-task' && c.args[0].taskId === lateTask.taskId));
+      finish(ok({ canceled: true }));
+      await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(await evaluate("$('#migrationReplacement').textContent"), 'Giữ nội dung mới');
+
+      migrationApplyFixture = async () => ok({ canceled: true });
+      await openPlan(); await evaluate("$('#diffApplyTargetBtn').click()");
+      await until("$('#diffApplyStatus').textContent.includes('Đã hủy xác nhận')");
+      assert.equal(await evaluate("$('#diffApplyTargetBtn').disabled"), true);
+    } finally {
+      schemaFixture = null; migrationApplyFixture = null; schemaService.enableMySqlApply = false; schemaService.clear();
+      await evaluate("closeModal();app.connection=window.__schemaApplyState.connection;app.connections=window.__schemaApplyState.connections;app.database=window.__schemaApplyState.database;delete window.__schemaApplyState");
+    }
+  });
   await check('schema diff uses Main previews, preserves index uniqueness and session settings in copied/editor SQL', async () => {
     await evaluate("window.__schemaState={connection:app.connection,connections:app.connections,database:app.database,queryTabs:[...queryTabs],activeQuery,queryId,query:app.query};app.connection={id:'schema-p',name:'Schema'};app.connections=[app.connection];app.database='source_schema'");
     schemaFixture = 'simple'; schemaService.clear();
@@ -3164,6 +3227,36 @@ app.whenReady().then(async () => {
     await evaluate("closeModal();mode='query';renderQueryView()");
   });
 
+  await check('cron backup validates fields, preserves canceled draft, saves by keyboard and reloads in a narrow window', async () => {
+    await evaluate("mode='backups';renderBackupsView();runBackupManagerAction('schedule')");
+    await until("!$('#saveBackupSchedule').disabled");
+    const before = calls.filter(c => c.name === 'db:save-backup-schedule').length;
+    await evaluate("$('#backupScheduleMode').value='cron';$('#backupScheduleMode').dispatchEvent(new Event('change'));$('#backupScheduleCron').value='* * *';$('#saveBackupSchedule').click()");
+    await until("$('#backupScheduleMessage').textContent.includes('5 trường')");
+    assert.equal(calls.filter(c => c.name === 'db:save-backup-schedule').length, before);
+    assert.equal(await evaluate("!$('#backupScheduleCron').disabled && !$('#backupScheduleZone').disabled && $('#backupScheduleTime').disabled && $('#backupScheduleHours').disabled"), true);
+    cancelScheduleSave = true;
+    await evaluate("$('#backupScheduleCron').value='0 2 * * 1-5';$('#backupScheduleZone').value='Asia/Bangkok';$('#backupScheduleCron').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return', modifiers: ['control'] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return', modifiers: ['control'] });
+    await until("$('#backupScheduleMessage').textContent.includes('Đã hủy lưu')");
+    assert.equal(await evaluate("$('#backupScheduleCron').value"), '0 2 * * 1-5');
+    cancelScheduleSave = false;
+    await evaluate("$('#saveBackupSchedule').click()"); await until("$('#backupScheduleMessage').textContent.includes('Đã lưu và bật')");
+    assert.equal(savedSchedule.mode, 'cron'); assert.equal(savedSchedule.cron, '0 2 * * 1-5');
+    assert.equal(Object.hasOwn(savedSchedule, 'intervalHours'), false); assert.equal(Object.hasOwn(savedSchedule, 'timeOfDay'), false);
+    assert.match(await evaluate("$('#backupScheduleState').textContent"), /Cron 0 2 \* \* 1-5/);
+    await evaluate("closeModal();runBackupManagerAction('schedule')"); await until("!$('#saveBackupSchedule').disabled");
+    assert.equal(await evaluate("$('#backupScheduleMode').value"), 'cron');
+    assert.equal(await evaluate('document.activeElement.id'), 'backupScheduleCron');
+    assert.equal(await evaluate("$('#backupScheduleCron').value"), '0 2 * * 1-5');
+    win.setContentSize(940, 700); await until('innerWidth===940 && innerHeight===700');
+    await evaluate("$('#saveBackupSchedule').scrollIntoView({block:'center'})");
+    assert.equal(await evaluate("(() => {const r=$('#saveBackupSchedule').getBoundingClientRect();return r.top>=0 && r.bottom<=innerHeight && $('#backupScheduleEditor').scrollWidth<=$('#backupScheduleEditor').clientWidth})()"), true);
+    await captureReview('backup-cron-schedule');
+    await evaluate("$('#deleteBackupSchedule').click()"); await until("$('#backupScheduleMessage').textContent.includes('Đã xóa lịch')");
+    await evaluate("closeModal();mode='query';renderQueryView()"); win.setContentSize(1280, 900);
+  });
   await check('backup includes routines, events and the strip-DEFINER option', async () => {
     const before = calls.filter((call) => call.name === 'db:backup').length;
     holdBackup = true;
@@ -3787,6 +3880,107 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate("$('#localRecoveryEditor').scrollWidth<=$('#localRecoveryEditor').clientWidth && $('#localRecoveryApply').getBoundingClientRect().bottom<=innerHeight"), true);
     await captureReview('local-recovery-small');
     await evaluate('closeModal();delete window.oldRecoveryKey'); win.setContentSize(1344,835);
+  });
+  await check('Navicat import through the keyboard preserves unrelated sessions and clears only updated profile views', async () => {
+    win.setContentSize(900, 650);
+    await evaluate(`
+      closeModal(); document.body.classList.remove('sidebar-hidden');
+      app.connection = {id:'unrelated', name:'Unrelated', workspaceId:'ws-personal'};
+      app.database = 'fixture'; mode = 'query'; renderQueryView();
+      $('#sql').value = 'SELECT 42'; syncActiveQuery();
+      for (const id of ['updated', 'unrelated']) { openConnectionIds.add(id); connectionViews.set(id, {}); }
+      $('#toast').textContent = '';
+      document.querySelector('[data-click="import-navicat"]').focus();
+    `);
+    const disconnected = calls.filter(call => call.name === 'db:disconnect').length;
+    navicatImportResponse = ok({ canceled: false, updated: 1, closedProfileIds: ['updated'], sessionsClosed: true });
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#toast').textContent.includes('Đã nhập kết nối Navicat')");
+    assert.equal(calls.filter(call => call.name === 'db:disconnect').length, disconnected);
+    assert.equal(await evaluate('app.connection.id'), 'unrelated');
+    assert.equal(await evaluate("connectionViews.has('updated')"), false);
+    assert.equal(await evaluate("connectionViews.has('unrelated')"), true);
+    assert.equal(await evaluate("$('#sql').value"), 'SELECT 42');
+    await evaluate("app.connection.id = 'updated'; $('#toast').textContent = ''; document.querySelector('[data-click=\"import-navicat\"]').focus()");
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: 'Return' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await until("$('#toast').textContent.includes('Đã nhập kết nối Navicat')");
+    assert.equal(calls.filter(call => call.name === 'db:disconnect').length, disconnected + 1);
+    assert.equal(await evaluate('app.connection'), null);
+    assert.equal(calls.filter(call => call.name === 'db:disconnect').at(-1).args[0], 'updated');
+    navicatImportResponse = ok({ canceled: true }); win.setContentSize(1344, 835);
+  });
+  await check('a late disconnect IPC reply preserves the new connection, SQL draft, focus and grid state', async () => {
+    win.setContentSize(900, 650);
+    await evaluate(`
+      app.connection = {id:'disconnect-old', name:'Old'}; app.database='old_db'; mode='query'; renderQueryView();
+      for (const id of ['disconnect-old', 'disconnect-new']) { openConnectionIds.add(id); connectionViews.set(id, {}); }
+    `);
+    holdDisconnectReply = true;
+    await evaluate('window.pendingDisconnect = disconnect(); void 0');
+    await untilNode(() => pendingDisconnectReply !== null);
+    await evaluate(`
+      app.connection = {id:'disconnect-new', name:'New'}; app.database='new_db'; app.rows=[{id:'retained'}];
+      $('#sql').value='SELECT 73'; syncActiveQuery(); $('#sql').focus();
+    `);
+    pendingDisconnectReply(ok({disconnected:true})); pendingDisconnectReply = null; holdDisconnectReply = false;
+    await evaluate('window.pendingDisconnect');
+    assert.equal(await evaluate('app.connection.id'), 'disconnect-new');
+    assert.equal(await evaluate('app.database'), 'new_db');
+    assert.equal(await evaluate('app.rows[0].id'), 'retained');
+    assert.equal(await evaluate("$('#sql').value"), 'SELECT 73');
+    assert.equal(await evaluate("document.activeElement === $('#sql')"), true);
+    assert.equal(await evaluate("openConnectionIds.has('disconnect-new') && connectionViews.has('disconnect-new')"), true);
+    assert.equal(await evaluate("openConnectionIds.has('disconnect-old') || connectionViews.has('disconnect-old')"), false);
+    await evaluate('delete window.pendingDisconnect'); win.setContentSize(1344, 835);
+  });
+  await check('late database selection and structure replies preserve the new connection, grid and focused SQL editor', async () => {
+    let finishUse, finishColumns;
+    databaseUseFixture = () => new Promise(resolve => { finishUse = resolve; });
+    await evaluate("app.connection={id:'selection-old',name:'Old'};app.database='old_db';window.pendingSelection=selectDatabase('requested_old');void 0");
+    await untilNode(() => Boolean(finishUse));
+    await evaluate(`app.connection={id:'selection-new',name:'New'};app.database='new_db';app.rows=[{id:'retained'}];
+      mode='query';renderQueryView();$('#sql').value='SELECT 87';syncActiveQuery();$('#sql').focus();`);
+    const reads = calls.filter(call => ['db:tables','db:list-backups'].includes(call.name)).length;
+    finishUse(ok({})); databaseUseFixture = null;
+    assert.equal(await evaluate('window.pendingSelection'), false);
+    assert.equal(calls.filter(call => ['db:tables','db:list-backups'].includes(call.name)).length, reads);
+    assert.equal(await evaluate('app.connection.id'), 'selection-new');
+    assert.equal(await evaluate('app.database'), 'new_db');
+    assert.equal(await evaluate('app.rows[0].id'), 'retained');
+    columnsFixture = () => new Promise(resolve => { finishColumns = resolve; });
+    await evaluate("app.connection={id:'metadata-old',name:'Old'};app.database='old_db';table='items';window.pendingMetadata=view('structure');void 0");
+    await untilNode(() => Boolean(finishColumns));
+    await evaluate(`app.connection={id:'metadata-new',name:'New'};app.database='new_db';app.columns=[{name:'retained'}];
+      mode='query';renderQueryView();$('#sql').value='SELECT 87';syncActiveQuery();$('#sql').focus();`);
+    finishColumns(ok([{name:'stale',type:'int'}])); columnsFixture = null;
+    await evaluate('window.pendingMetadata');
+    assert.equal(await evaluate('app.columns[0].name'), 'retained');
+    assert.equal(await evaluate("$('#sql').value"), 'SELECT 87');
+    assert.equal(await evaluate("document.activeElement === $('#sql')"), true);
+    await evaluate('delete window.pendingSelection;delete window.pendingMetadata');
+  });
+  await check('transaction disconnect forwards observed session context with keyboard confirmation and preserves the view on stale rejection', async () => {
+    disconnectFixture = (_id, options) => options?.force
+      ? {ok:false,error:{code:'DISCONNECT_CONTEXT_CHANGED',message:'Session changed; retry disconnect'}}
+      : ok({needsConfirmation:true,sessionId:'observed-wire-session',transactionRevision:17});
+    await evaluate("window.pendingDisconnect=disconnect();void 0");
+    await until("$('#modal').open && !!$('#confirmOk')");
+    await evaluate("$('#confirmOk').focus()");
+    win.webContents.sendInputEvent({type:'keyDown',keyCode:'Return'});
+    win.webContents.sendInputEvent({type:'char',keyCode:'Return'});
+    win.webContents.sendInputEvent({type:'keyUp',keyCode:'Return'});
+    await evaluate('window.pendingDisconnect');
+    const sent = calls.filter(call => call.name === 'db:disconnect').at(-1).args;
+    assert.equal(sent[0],'metadata-new'); assert.equal(sent[1].sessionId,'observed-wire-session');
+    assert.equal(sent[1].transactionRevision,17); assert.equal(sent[1].force,true);
+    assert.equal(await evaluate('app.connection.id'),'metadata-new');
+    assert.equal(await evaluate("$('#sql').value"),'SELECT 87');
+    assert.equal(await evaluate("$('#toast').textContent.includes('Session changed')"),true);
+    disconnectFixture = null; await evaluate('delete window.pendingDisconnect');
   });
   await check('no renderer exceptions or unhandled rejections', async () => {
     await evaluate('new Promise(resolve => setTimeout(resolve, 200))');

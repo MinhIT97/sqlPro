@@ -305,8 +305,9 @@ class SchemaMigrationJobManager {
         const entry = openSessions.get(scope.profileId);
         if (!entry || entry.sessionId !== scope.sessionId || entry.session?.dead || entry.exclusiveOperation
             || entry.productionWriteInProgress || entry.session?.activeTask || entry.session?.inTransaction
-            || entry.session?.autocommit === false || sessionRegistry.leases.get(entry)
-            || sessionRegistry.busy?.(entry)) throw error('SESSION_BUSY', 'Phiên nguồn/đích bận hoặc stale.');
+            || entry.session?.autocommit === false || sessionRegistry.leases.get(entry)) throw error('SESSION_BUSY', 'Phiên nguồn/đích bận hoặc stale.');
+        // Registry busy() also protects the selected Editor from LRU eviction.
+        // Selection alone is not an operation; the explicit checks above protect its work.
         entries.add(entry);
       }
       for (const entry of entries) {

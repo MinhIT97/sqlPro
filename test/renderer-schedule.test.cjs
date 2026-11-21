@@ -9,10 +9,11 @@ const saved = { enabled: true, intervalHours: 12, nextRunAt: '2027-01-01T12:00:0
 
 function setup(overrides = {}) {
   const elements = new Map();
-  for (const selector of ['#backupScheduleEditor', '#backupScheduleState', '#backupScheduleMessage', '#backupScheduleMode', '#backupScheduleTime', '#backupScheduleZone', '#backupScheduleHours', '#backupScheduleStart', '#saveBackupSchedule', '#pauseBackupSchedule', '#deleteBackupSchedule', '#refreshBackupSchedule']) {
+  for (const selector of ['#backupScheduleEditor', '#backupScheduleState', '#backupScheduleMessage', '#backupScheduleMode', '#backupScheduleTime', '#backupScheduleCron', '#backupScheduleZone', '#backupScheduleHours', '#backupScheduleStart', '#saveBackupSchedule', '#pauseBackupSchedule', '#deleteBackupSchedule', '#refreshBackupSchedule']) {
     elements.set(selector, { value: '', innerHTML: '', textContent: '', disabled: false, validity: { valid: true },
       listeners: {}, addEventListener(name, handler) { this.listeners[name] = handler; }, focus() { this.focused = true; } });
   }
+  elements.set('#modal', {open:true});
   elements.get('#backupScheduleMode').value = 'interval';
   elements.get('#backupScheduleTime').value = '02:00';
   elements.get('#backupScheduleZone').value = 'UTC';
@@ -104,4 +105,28 @@ test('daily timing sends no interval timestamp and preserves timezone and draft 
   });
   assert.equal(r.get('#backupScheduleTime').value, '03:45');
   assert.match(r.get('#backupScheduleMessage').textContent, /Đã hủy lưu/);
+});
+
+test('cron timing validates input, sends only cron scope, preserves canceled draft and reloads saved cron', async () => {
+  const r = setup(); await r.ready;
+  r.get('#backupScheduleMode').value = 'cron'; r.get('#backupScheduleMode').listeners.change();
+  assert.equal(r.get('#backupScheduleCron').disabled, false);
+  assert.equal(r.get('#backupScheduleTime').disabled, true);
+  assert.equal(r.get('#backupScheduleStart').disabled, true);
+  r.get('#backupScheduleCron').value = '* * *';
+  await r.click('#saveBackupSchedule'); assert.equal(r.calls.length, 0);
+  r.get('#backupScheduleCron').value = '0 2 * * 1-5'; r.get('#backupScheduleZone').value = 'Asia/Bangkok';
+  await r.click('#saveBackupSchedule');
+  assert.deepEqual(JSON.parse(JSON.stringify(r.calls[0][1])), {
+    profileId: 'p1', database: 'demo', mode: 'cron', cron: '0 2 * * 1-5', timeZone: 'Asia/Bangkok'
+  });
+  assert.equal(r.get('#backupScheduleCron').value, '0 2 * * 1-5');
+  assert.match(r.get('#backupScheduleMessage').textContent, /Đã hủy lưu/);
+  const s = setup({ getBackupSchedule: async () => ok({ schedule: { ...saved, mode: 'cron', cron: '*/15 * * * *' } }) });
+  await s.ready;
+  assert.equal(s.get('#backupScheduleMode').value, 'cron');
+  assert.equal(s.get('#backupScheduleCron').focused, true);
+  assert.match(s.get('#backupScheduleState').innerHTML, /Cron.*\*\/15/);
+  s.get('#modal').open = false;
+  await s.click('#saveBackupSchedule'); assert.equal(s.calls.length, 0);
 });

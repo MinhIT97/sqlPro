@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { scheduleTiming, nextScheduledAtAsync } = require('./backup-schedule-timing.cjs');
+const { scheduleTiming, nextScheduledAt, nextScheduledAtAsync } = require('./backup-schedule-timing.cjs');
 
 const HOUR = 3600000;
 const MAX_SCHEDULES = 50;
@@ -93,7 +93,7 @@ function createScheduleStore(root) {
 }
 
 class BackupScheduler {
-  constructor({ repository, run, isBusy, now = Date.now, graceMs = 60000, nextRun = nextScheduledAtAsync }) {
+  constructor({ repository, run, isBusy, now = Date.now, graceMs = 60000, nextRun = (item, clock) => scheduleTiming(item).mode === 'cron' ? nextScheduledAtAsync(item, clock) : nextScheduledAt(item, clock) }) {
     Object.assign(this, { repository, run, isBusy, now, graceMs, nextRun });
     this.busy = false; this.stopped = false; this.error = null; this.generation = 0;
   }
@@ -123,10 +123,13 @@ class BackupScheduler {
         const status = now - due > this.graceMs ? busy ? 'busy' : 'missed' : 'running';
         const taskId = `scheduled-${crypto.randomBytes(16).toString('hex')}`;
         const startedAt = new Date(now).toISOString();
-        const nextRunAt = await this.nextRun(schedule, now);
-        if (this.stopped || generation !== this.generation) break;
-        const current = this.repository.read().find(item => item.id === schedule.id);
-        if (!current?.enabled || current.revision !== schedule.revision || current.nextRunAt !== schedule.nextRunAt) continue;
+        let nextRunAt = this.nextRun(schedule, now);
+        if (nextRunAt && typeof nextRunAt.then === 'function') {
+          nextRunAt = await nextRunAt;
+          if (this.stopped || generation !== this.generation) break;
+          const current = this.repository.read().find(item => item.id === schedule.id);
+          if (!current?.enabled || current.revision !== schedule.revision || current.nextRunAt !== schedule.nextRunAt) continue;
+        }
         // A very short cron interval may elapse while calculating. Leave it for
         // the next tick rather than claim a past next run or replay twice.
         if (Date.parse(nextRunAt) <= this.now()) continue;

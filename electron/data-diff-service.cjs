@@ -42,10 +42,10 @@ function sanitizeDiffError(err) {
   const safeCode = SAFE_DIFF_CODES.has(code) ? code : 'DATA_DIFF_FAILED';
   // Driver errors may contain SQL, literals, credentials or server paths.
   const explanations = {
-    DATA_DIFF_NO_PRIMARY_KEY: 'Cần cùng khóa chính ở hai bảng; chưa dùng cờ UNI để suy khóa duy nhất.',
-    DATA_DIFF_SCHEMA_MISMATCH: 'Tên, kiểu hoặc thứ tự cột hai bảng khác nhau; chưa hỗ trợ mapping.',
-    DATA_DIFF_BUDGET_EXCEEDED: 'Kết quả vượt hạn mức hoặc bị cắt; chưa có báo cáo đầy đủ.',
-    DATA_DIFF_UNSUPPORTED_PK_TYPE: 'Kiểu hoặc collation khóa chính chưa có bằng chứng thứ tự phù hợp.',
+    DATA_DIFF_NO_PRIMARY_KEY: 'Cần cùng khóa chính ở hai bảng; bảng chưa có Primary Key hoặc chưa khớp.',
+    DATA_DIFF_SCHEMA_MISMATCH: 'Tên, kiểu hoặc thứ tự cột hai bảng khác nhau; chưa hỗ trợ mapping (hãy kiểm tra lại bảng đã chọn hoặc dùng Schema Diff).',
+    DATA_DIFF_BUDGET_EXCEEDED: 'Kết quả vượt hạn mức hoặc bị cắt; chưa có báo cáo đầy đủ (hãy giảm số dòng tối đa).',
+    DATA_DIFF_UNSUPPORTED_PK_TYPE: 'Kiểu hoặc collation khóa chính chưa có bằng chứng thứ tự phù hợp (hãy dùng khóa chính dạng số nguyên INT/BIGINT).',
     DATA_DIFF_CANCELLED: 'Đã hủy so sánh dữ liệu.',
     DATA_DIFF_CONTEXT_CHANGED: 'Cấu hình kết nối đã thay đổi; hãy đọc lại dữ liệu.'
   };

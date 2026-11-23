@@ -160,12 +160,12 @@ test('B01.3 [CONFIRMED REMEDIATION] Migration apply in app.js does not call db.q
   const appJsSource = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
 
   // Find the diffApplyTargetBtn block:
-  const applyBlockMatch = appJsSource.match(/\$\('#diffApplyTargetBtn'\)\?\.addEventListener\('click'[\s\S]*?\}\);/);
+  const applyBlockMatch = appJsSource.match(/\$\('#diffApplyTargetBtn'\)\?\.addEventListener\('click'[\s\S]*?\n\s{4}\}\);/);
   assert.ok(applyBlockMatch, 'Found diffApplyTargetBtn click handler in app.js');
 
   const applyBlockCode = applyBlockMatch[0];
   assert.ok(!applyBlockCode.includes('desktop.db.query'), 'Does not send raw queries to desktop.db.query');
-  assert.ok(applyBlockCode.includes('khoá an toàn') || applyBlockCode.includes('Editor'), 'Direct apply is safely locked with warning toast');
+  assert.ok(applyBlockCode.includes('applyMigrationPlan') || applyBlockCode.includes('khoá an toàn') || applyBlockCode.includes('Editor'), 'Direct apply routes safely through applyMigrationPlan or safe lock');
 });
 
 // --------------------------------------------------------------------------

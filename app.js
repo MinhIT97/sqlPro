@@ -126,12 +126,63 @@ function debounce(fn, delay = 250) {
 
 function toast(message, type = 'info') {
   const element = $('#toast');
-  element.setAttribute('role', type === 'error' ? 'alert' : 'status');
+  if (!element) return;
+  element.setAttribute?.('role', type === 'error' ? 'alert' : 'status');
   element.textContent = message;
   element.className = type === 'error' ? 'toast-error' : '';
-  element.style.display = 'block';
+  if (element.style) element.style.display = 'block';
+
+  if (typeof element.showPopover === 'function') {
+    try {
+      if (!element.hasAttribute?.('popover')) {
+        element.setAttribute?.('popover', 'manual');
+      }
+      if (element.matches && element.matches(':popover-open')) {
+        element.hidePopover();
+      }
+      element.showPopover();
+    } catch {
+      // Graceful fallback for non-popover or restricted environments
+    }
+  } else {
+    try {
+      const activeDialog = document.querySelector?.('dialog[open]');
+      if (activeDialog && element.parentElement !== activeDialog) {
+        activeDialog.appendChild(element);
+      }
+    } catch {}
+  }
+
+  if (!element.__sqlproToastBound) {
+    element.__sqlproToastBound = true;
+    element.addEventListener?.('click', () => {
+      clearTimeout(window.__sqlproToast);
+      if (element.style) element.style.display = 'none';
+      if (typeof element.hidePopover === 'function') {
+        try {
+          if (element.matches && element.matches(':popover-open')) element.hidePopover();
+        } catch {}
+      }
+      if (element.parentElement && element.parentElement !== document.body && document.body) {
+        document.body.appendChild(element);
+      }
+    });
+  }
+
   clearTimeout(window.__sqlproToast);
-  window.__sqlproToast = setTimeout(() => { element.style.display = 'none'; }, type === 'error' ? 8000 : 4000);
+  window.__sqlproToast = setTimeout(() => {
+    if (element.style) element.style.display = 'none';
+    if (typeof element.hidePopover === 'function') {
+      try {
+        if (element.matches && element.matches(':popover-open')) {
+          element.hidePopover();
+        }
+      } catch {}
+    }
+    if (element.parentElement && element.parentElement !== document.body && document.body) {
+      document.body.appendChild(element);
+    }
+  }, type === 'error' ? 8000 : 4000);
 }
 
 function formatBytes(value) {
@@ -153,6 +204,15 @@ function modal(html, wide = false) {
   dialog.className = wide ? 'wide' : '';
   dialog.innerHTML = html;
   if (!dialog.open) dialog.showModal();
+  const toastEl = $('#toast');
+  if (toastEl && toastEl.style?.display !== 'none' && typeof toastEl.showPopover === 'function') {
+    try {
+      if (toastEl.matches && toastEl.matches(':popover-open')) {
+        toastEl.hidePopover();
+      }
+      toastEl.showPopover();
+    } catch {}
+  }
 }
 
 function closeModal() {
@@ -2549,7 +2609,7 @@ async function showProcesslistModal() {
         <button class="secondary" data-click="close-modal">Đóng (Esc)</button>
       </div>
     </div>
-  `);
+  `, true);
 
   const target = activeQueryTarget();
   const profileName = app.connection.name || app.connection.host || target.profileId;
@@ -3167,7 +3227,7 @@ async function showServerVarsModal(defaultTab = 'variables') {
         <button class="secondary" data-click="close-modal">Đóng (Esc)</button>
       </div>
     </div>
-  `);
+  `, true);
 
   let currentMode = defaultTab;
   let cachedData = { variables: null, status: null };
@@ -3279,7 +3339,7 @@ async function showSchemaDiffModal() {
         <button class="secondary" data-click="close-modal">Đóng (Esc)</button>
       </div>
     </div>
-  `);
+  `, true);
 
   const openedRevision = modalRevision, dialog = $('#modal');
   const current = () => modalRevision === openedRevision && $('#modal') === dialog && dialog.open
@@ -3343,57 +3403,82 @@ async function showSchemaDiffModal() {
     container.innerHTML = `
       <div class="diff-config-pane">
         <div class="diff-compare-grid">
-          <div class="diff-side-box">
+          <div class="diff-side-box diff-side-source">
             <div class="diff-side-title">
-              <span>🔵</span> <strong>CSDL NGUỒN (Chuẩn / Mong muốn)</strong>
+              <span class="diff-badge-source">NGUỒN (SOURCE)</span>
+              <span class="diff-side-role">CSDL Chuẩn / Mong muốn</span>
             </div>
-            <label style="font-size:0.85em; color:#64748b;">Kết nối:</label>
-            <select id="diffSourceProfile" style="width:100%;">
-              ${profiles.map((p) => `<option value="${esc(p.id)}" ${p.id === sourceProfileId ? 'selected' : ''}>${esc(p.name || p.host)} (${esc(p.host)}:${p.port || 3306})</option>`).join('')}
-            </select>
-            <label style="font-size:0.85em; color:#64748b; margin-top:4px;">Cơ sở dữ liệu:</label>
-            <select id="diffSourceDb" style="width:100%;">
-              ${sourceDatabases.map((db) => `<option value="${esc(db)}" ${db === sourceDb ? 'selected' : ''}>${esc(db)}</option>`).join('')}
-            </select>
+            <div class="diff-form-group">
+              <label for="diffSourceProfile">Kết nối máy chủ:</label>
+              <select id="diffSourceProfile" class="diff-select">
+                ${profiles.map((p) => `<option value="${esc(p.id)}" ${p.id === sourceProfileId ? 'selected' : ''}>${esc(p.name || p.host)} (${esc(p.host)}:${p.port || 3306})</option>`).join('')}
+              </select>
+            </div>
+            <div class="diff-form-group">
+              <label for="diffSourceDb">Cơ sở dữ liệu:</label>
+              <select id="diffSourceDb" class="diff-select">
+                ${sourceDatabases.map((db) => `<option value="${esc(db)}" ${db === sourceDb ? 'selected' : ''}>${esc(db)}</option>`).join('')}
+              </select>
+            </div>
           </div>
 
-          <div style="display:flex; flex-direction:column; align-items:center; gap:8px;">
+          <div class="diff-swap-container">
             <button type="button" class="diff-swap-btn" id="diffSwapBtn" title="Đổi chiều Nguồn ⇄ Đích">⇄</button>
-            <span style="font-size:0.75em; color:#94a3b8;">So sánh</span>
+            <span class="diff-swap-label">Đổi chiều</span>
           </div>
 
-          <div class="diff-side-box">
+          <div class="diff-side-box diff-side-target">
             <div class="diff-side-title">
-              <span>🎯</span> <strong>CSDL ĐÍCH (Cần đồng bộ / Cũ)</strong>
+              <span class="diff-badge-target">ĐÍCH (TARGET)</span>
+              <span class="diff-side-role">CSDL Cần đồng bộ / Cũ</span>
             </div>
-            <label style="font-size:0.85em; color:#64748b;">Kết nối:</label>
-            <select id="diffTargetProfile" style="width:100%;">
-              ${profiles.map((p) => `<option value="${esc(p.id)}" ${p.id === targetProfileId ? 'selected' : ''}>${esc(p.name || p.host)} (${esc(p.host)}:${p.port || 3306})</option>`).join('')}
-            </select>
-            <label style="font-size:0.85em; color:#64748b; margin-top:4px;">Cơ sở dữ liệu:</label>
-            <select id="diffTargetDb" style="width:100%;">
-              ${targetDatabases.map((db) => `<option value="${esc(db)}" ${db === targetDb ? 'selected' : ''}>${esc(db)}</option>`).join('')}
-            </select>
+            <div class="diff-form-group">
+              <label for="diffTargetProfile">Kết nối máy chủ:</label>
+              <select id="diffTargetProfile" class="diff-select">
+                ${profiles.map((p) => `<option value="${esc(p.id)}" ${p.id === targetProfileId ? 'selected' : ''}>${esc(p.name || p.host)} (${esc(p.host)}:${p.port || 3306})</option>`).join('')}
+              </select>
+            </div>
+            <div class="diff-form-group">
+              <label for="diffTargetDb">Cơ sở dữ liệu:</label>
+              <select id="diffTargetDb" class="diff-select">
+                ${targetDatabases.map((db) => `<option value="${esc(db)}" ${db === targetDb ? 'selected' : ''}>${esc(db)}</option>`).join('')}
+              </select>
+            </div>
           </div>
         </div>
 
-        <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:14px;">
-          <div style="font-weight:600; font-size:0.9em; margin-bottom:10px;">⚙️ Tùy chọn so sánh & an toàn:</div>
-          <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; font-size:0.88em;">
-            <p style="grid-column:1/-1; margin:0;">Xuất SQL chỉ hỗ trợ các thay đổi đã kiểm chứng. DROP và thay đổi chưa hỗ trợ sẽ bị chặn.</p>
-            <label style="display:flex; align-items:center; gap:6px;">
+        <div class="diff-safety-card">
+          <div class="diff-safety-header">
+            <div class="diff-safety-title">
+              <span>⚙️</span>
+              <span>Tùy chọn so sánh & an toàn</span>
+            </div>
+            <span class="diff-safety-badge">🛡️ Cơ chế bảo vệ DDL</span>
+          </div>
+          <div class="diff-safety-notice">
+            <span>ℹ️</span>
+            <span>Xuất SQL chỉ hỗ trợ các câu lệnh cập nhật an toàn (ALTER). Mọi lệnh xóa (DROP) hoặc thao tác chưa hỗ trợ sẽ bị chặn tự động.</span>
+          </div>
+          <div class="diff-options-grid">
+            <label class="diff-option-tile" for="diffIgnoreComments">
               <input type="checkbox" id="diffIgnoreComments" ${ignoreComments ? 'checked' : ''}>
-              <span>Bỏ qua khác biệt ghi chú (Comments)</span>
+              <div class="diff-option-info">
+                <span class="diff-option-label">Bỏ qua khác biệt ghi chú (Comments)</span>
+                <span class="diff-option-desc">Không phát hiện thay đổi nếu chỉ khác ghi chú của bảng hoặc cột</span>
+              </div>
             </label>
-            <label style="display:flex; align-items:center; gap:6px;">
+            <label class="diff-option-tile" for="diffIgnoreCollation">
               <input type="checkbox" id="diffIgnoreCollation" ${ignoreCollation ? 'checked' : ''}>
-              <span>Bỏ qua khác biệt Collation</span>
+              <div class="diff-option-info">
+                <span class="diff-option-label">Bỏ qua khác biệt Collation</span>
+                <span class="diff-option-desc">Bỏ qua các sai khác về bộ mã bảng ký tự (Collation / Charset)</span>
+              </div>
             </label>
           </div>
         </div>
 
-        <div style="text-align:center; margin-top:8px;">
-          <button type="button" class="primary" id="diffRunCompareBtn" style="padding:10px 28px; font-size:1em;">
+        <div class="diff-action-row">
+          <button type="button" class="primary diff-run-compare-btn" id="diffRunCompareBtn">
             ⚡ Bắt đầu so sánh lược đồ
           </button>
         </div>
@@ -3858,7 +3943,7 @@ async function showDataDiffModal(initialTable = null) {
         <button class="secondary" data-click="close-modal">Đóng (Esc)</button>
       </div>
     </div>
-  `);
+  `, true);
 
   const modalRoot = $('#dataDiffModalBody');
   const modalCurrent = () => $('#modal')?.open && modalRoot?.isConnected && $('#dataDiffModalBody') === modalRoot;
@@ -3935,7 +4020,14 @@ async function showDataDiffModal(initialTable = null) {
       if (!targetDb && targetDatabases.length) targetDb = targetDatabases[0];
       if (targetDb) targetTables = await call(desktop.db.tables(targetDb, targetProfileId));
       if (!current()) return;
-      if (!targetTable && targetTables.length) targetTable = targetTables[0].name;
+
+      // Tự động tìm và chọn bảng cùng tên ở CSDL Đích nếu có
+      const matchedTarget = targetTables.find((t) => t.name === sourceTable);
+      if (matchedTarget && (!targetTable || !targetTables.some((t) => t.name === targetTable))) {
+        targetTable = matchedTarget.name;
+      } else if (!targetTable && targetTables.length) {
+        targetTable = targetTables[0].name;
+      }
     } catch {
       // Ignore initial loading errors
     }
@@ -3945,70 +4037,89 @@ async function showDataDiffModal(initialTable = null) {
       <div class="diff-config-container">
         <div class="diff-config-columns">
           <div class="diff-config-card source-card">
-            <div class="diff-side-badge source-badge">CSDL NGUỒN (Source / Desired Data)</div>
-            <div class="formrow" style="margin-top:12px;">
-              <label>Kết nối máy chủ:</label>
-              <select id="dataDiffSourceProfile">
-                ${connections.map((c) => `<option value="${esc(c.id)}" ${c.id === sourceProfileId ? 'selected' : ''}>${esc(c.name || c.host)}</option>`).join('')}
-              </select>
+            <div class="diff-card-header">
+              <span class="diff-side-badge source-badge">📂 CSDL NGUỒN (Source / Dữ liệu chuẩn)</span>
             </div>
-            <div class="formrow">
-              <label>Database:</label>
-              <select id="dataDiffSourceDb">
-                ${sourceDatabases.map((db) => `<option value="${esc(db)}" ${db === sourceDb ? 'selected' : ''}>${esc(db)}</option>`).join('')}
-              </select>
-            </div>
-            <div class="formrow">
-              <label>Bảng dữ liệu:</label>
-              <select id="dataDiffSourceTable">
-                ${sourceTables.map((t) => `<option value="${esc(t.name)}" ${t.name === sourceTable ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
-              </select>
+            <div class="diff-form-fields">
+              <div class="formrow diff-form-group">
+                <label for="dataDiffSourceProfile">Kết nối máy chủ:</label>
+                <select id="dataDiffSourceProfile">
+                  ${connections.map((c) => `<option value="${esc(c.id)}" ${c.id === sourceProfileId ? 'selected' : ''}>${esc(c.name || c.host)}</option>`).join('')}
+                </select>
+              </div>
+              <div class="formrow diff-form-group">
+                <label for="dataDiffSourceDb">Database:</label>
+                <select id="dataDiffSourceDb">
+                  ${sourceDatabases.map((db) => `<option value="${esc(db)}" ${db === sourceDb ? 'selected' : ''}>${esc(db)}</option>`).join('')}
+                </select>
+              </div>
+              <div class="formrow diff-form-group">
+                <label for="dataDiffSourceTable">Bảng dữ liệu:</label>
+                <select id="dataDiffSourceTable">
+                  ${sourceTables.map((t) => `<option value="${esc(t.name)}" ${t.name === sourceTable ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+                </select>
+              </div>
             </div>
           </div>
 
           <div class="diff-config-divider">
-            <span style="font-size:1.8em;">➔</span>
-            <span style="font-size:0.8em; color:#64748b; font-weight:600;">So sánh với</span>
+            <div class="diff-divider-circle">⇄</div>
+            <span class="diff-divider-label">So sánh với</span>
           </div>
 
           <div class="diff-config-card target-card">
-            <div class="diff-side-badge target-badge">CSDL ĐÍCH (Target / Existing Data)</div>
-            <div class="formrow" style="margin-top:12px;">
-              <label>Kết nối máy chủ:</label>
-              <select id="dataDiffTargetProfile">
-                ${connections.map((c) => `<option value="${esc(c.id)}" ${c.id === targetProfileId ? 'selected' : ''}>${esc(c.name || c.host)}</option>`).join('')}
-              </select>
+            <div class="diff-card-header">
+              <span class="diff-side-badge target-badge">🎯 CSDL ĐÍCH (Target / Cần đối chiếu)</span>
             </div>
-            <div class="formrow">
-              <label>Database:</label>
-              <select id="dataDiffTargetDb">
-                ${targetDatabases.map((db) => `<option value="${esc(db)}" ${db === targetDb ? 'selected' : ''}>${esc(db)}</option>`).join('')}
-              </select>
-            </div>
-            <div class="formrow">
-              <label>Bảng dữ liệu:</label>
-              <select id="dataDiffTargetTable">
-                ${targetTables.map((t) => `<option value="${esc(t.name)}" ${t.name === targetTable ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
-              </select>
+            <div class="diff-form-fields">
+              <div class="formrow diff-form-group">
+                <label for="dataDiffTargetProfile">Kết nối máy chủ:</label>
+                <select id="dataDiffTargetProfile">
+                  ${connections.map((c) => `<option value="${esc(c.id)}" ${c.id === targetProfileId ? 'selected' : ''}>${esc(c.name || c.host)}</option>`).join('')}
+                </select>
+              </div>
+              <div class="formrow diff-form-group">
+                <label for="dataDiffTargetDb">Database:</label>
+                <select id="dataDiffTargetDb">
+                  ${targetDatabases.map((db) => `<option value="${esc(db)}" ${db === targetDb ? 'selected' : ''}>${esc(db)}</option>`).join('')}
+                </select>
+              </div>
+              <div class="formrow diff-form-group">
+                <label for="dataDiffTargetTable">Bảng dữ liệu:</label>
+                <select id="dataDiffTargetTable">
+                  ${targetTables.map((t) => `<option value="${esc(t.name)}" ${t.name === targetTable ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+                </select>
+              </div>
             </div>
           </div>
         </div>
 
-        <div class="diff-options-bar" style="margin-top:16px;">
-          <div style="display:flex; align-items:center; gap:10px;">
-            <label style="font-weight:600; color:#475569;">Số dòng so sánh tối đa:</label>
-            <select id="dataDiffRowLimitSelect" style="padding:4px 8px; border-radius:4px; border:1px solid #cbd5e1;">
+        <div id="dataDiffMatchNotice" class="diff-match-notice">
+          ${sourceTable === targetTable
+            ? `<div class="match-success"><span>✓</span> <span>Đang so sánh cùng bảng <strong>${esc(sourceTable)}</strong> giữa CSDL Nguồn và CSDL Đích.</span></div>`
+            : `<div class="match-warning"><span>⚠️</span> <span>Chú ý: Bảng Nguồn (<strong>${esc(sourceTable)}</strong>) và Bảng Đích (<strong>${esc(targetTable)}</strong>) đang khác tên nhau. Để so sánh thành công, hai bảng phải có cùng cấu trúc cột.</span></div>`}
+        </div>
+
+        <div class="diff-options-bar">
+          <div class="diff-options-left">
+            <label for="dataDiffRowLimitSelect" class="diff-options-label">
+              <span>⚙️</span>
+              <span>Số dòng so sánh tối đa:</span>
+            </label>
+            <select id="dataDiffRowLimitSelect" class="diff-limit-select">
               <option value="200" ${rowLimit === 200 ? 'selected' : ''}>200 dòng</option>
               <option value="500" ${rowLimit === 500 ? 'selected' : ''}>500 dòng</option>
               <option value="1000" ${rowLimit === 1000 ? 'selected' : ''}>1.000 dòng</option>
               <option value="2000" ${rowLimit === 2000 ? 'selected' : ''}>2.000 dòng</option>
             </select>
           </div>
-          <button class="primary" id="dataDiffRunCompareBtn" style="padding:8px 20px; font-weight:600;">
-            ${isComparing ? '⏳ Đang so sánh...' : '⚖️ Bắt đầu so sánh dữ liệu'}
-          </button>
-          <button id="dataDiffCancelBtn" ${isComparing ? '' : 'hidden'}>Hủy so sánh</button>
-          <span id="dataDiffProgress" role="status" aria-live="polite"></span>
+          <div class="diff-options-right">
+            <button class="primary diff-run-btn" id="dataDiffRunCompareBtn">
+              ${isComparing ? '⏳ Đang so sánh...' : '⚖️ Bắt đầu so sánh dữ liệu'}
+            </button>
+            <button id="dataDiffCancelBtn" class="diff-cancel-btn" ${isComparing ? '' : 'hidden'}>Hủy so sánh</button>
+            <span id="dataDiffProgress" role="status" aria-live="polite"></span>
+          </div>
         </div>
 
         ${diffResult ? `
@@ -4041,6 +4152,14 @@ async function showDataDiffModal(initialTable = null) {
       if (!current()) return;
       invalidateComparison();
       sourceTable = e.target.value;
+      // Tự động chọn bảng cùng tên ở CSDL Đích nếu tồn tại
+      const match = targetTables.find((t) => t.name === sourceTable);
+      if (match) {
+        targetTable = match.name;
+        const targetSel = $('#dataDiffTargetTable');
+        if (targetSel) targetSel.value = targetTable;
+      }
+      updateMatchNotice();
     });
 
     $('#dataDiffTargetProfile')?.addEventListener('change', async (e) => {
@@ -4064,7 +4183,18 @@ async function showDataDiffModal(initialTable = null) {
       if (!current()) return;
       invalidateComparison();
       targetTable = e.target.value;
+      updateMatchNotice();
     });
+
+    function updateMatchNotice() {
+      const el = $('#dataDiffMatchNotice');
+      if (!el) return;
+      if (sourceTable === targetTable) {
+        el.innerHTML = `<div class="match-success"><span>✓</span> <span>Đang so sánh cùng bảng <strong>${esc(sourceTable)}</strong> giữa CSDL Nguồn và CSDL Đích.</span></div>`;
+      } else {
+        el.innerHTML = `<div class="match-warning"><span>⚠️</span> <span>Chú ý: Bảng Nguồn (<strong>${esc(sourceTable)}</strong>) và Bảng Đích (<strong>${esc(targetTable)}</strong>) đang khác tên nhau. Để so sánh thành công, hai bảng phải có cùng cấu trúc cột.</span></div>`;
+      }
+    }
 
     $('#dataDiffRowLimitSelect')?.addEventListener('change', (e) => {
       if (!current()) return;
@@ -4366,7 +4496,8 @@ async function getAuditLogs(filter) {
   if (typeof SqlAuditLog === 'undefined') return [];
   try {
     if (desktop?.auditLog?.read) {
-      return await desktop.auditLog.read(filter);
+      const res = await desktop.auditLog.read(filter);
+      return Array.isArray(res) ? res : (res?.ok && Array.isArray(res.data) ? res.data : []);
     }
     const local = JSON.parse(localStorage.getItem('sqlpro-audit-log') || '[]');
     return SqlAuditLog.filterAuditEntries(local, filter);
@@ -4451,7 +4582,7 @@ async function showAuditLogModal() {
         <button class="secondary" data-click="close-modal">Đóng (Esc)</button>
       </div>
     </div>
-  `);
+  `, true);
 
   let allEntries = [];
   let expandedEntryId = null;
@@ -4499,7 +4630,8 @@ async function showAuditLogModal() {
 
     const filtered = getFilteredEntries();
     if (headerCount) {
-      headerCount.textContent = `${filtered.length} / ${allEntries.length} bản ghi`;
+      const total = Array.isArray(allEntries) ? allEntries.length : 0;
+      headerCount.textContent = `${filtered.length} / ${total} bản ghi`;
     }
 
     if (!filtered.length) {
@@ -4662,7 +4794,9 @@ async function showAuditLogModal() {
     try {
       if (desktop?.auditLog?.prune) {
         const res = await desktop.auditLog.prune({ maxAgeDays: 30 });
-        toast(`Đã dọn dẹp ${res.prunedCount} bản ghi cũ`, 'success');
+        const pruneResult = res?.ok ? res.data : res;
+        const prunedCount = pruneResult?.prunedCount ?? 0;
+        toast(`Đã dọn dẹp ${prunedCount} bản ghi cũ`, 'success');
       } else {
         const pruned = SqlAuditLog.pruneAuditEntries(allEntries, { maxAgeDays: 30 });
         localStorage.setItem('sqlpro-audit-log', JSON.stringify(pruned));

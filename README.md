@@ -183,6 +183,12 @@ Các thông số được ánh xạ: host, port, username, password, database m�
 
 Chọn **CONNECTIONS → ⇩** hoặc menu **Tệp → Nhập kết nối Navicat…**.
 
+Khi nhập lại, chỉ những profile trùng khóa import được cập nhật và ngắt phiên để nạp cấu hình mới. Nếu một profile cần cập nhật còn transaction, autocommit OFF, đang kết nối hoặc chạy tác vụ, toàn bộ lượt nhập sẽ dừng trước khi ghi cấu hình; hãy hoàn tất tác vụ và commit/rollback trước khi thử lại. Các phiên không liên quan được giữ nguyên. Xóa hoặc sửa một kết nối cũng yêu cầu phiên đó hết bận và không còn transaction.
+
+Mật khẩu/passphrase rỗng tường minh trong file hoặc giải mã thành công thành chuỗi rỗng sẽ xóa secret đã lưu tương ứng. Trường bị thiếu hoặc không giải mã được giữ secret hiện có; với định dạng mật khẩu không được hỗ trợ, hãy nhập lại trong biểu mẫu kết nối.
+
+Nhập lại giữ lựa chọn `mysql_clear_password` đã bật. Nếu TLS/SSH trong tệp mới không đáp ứng chính sách vận chuyển, lượt nhập bị chặn trước khi ghi. Xác nhận ngắt transaction chỉ áp dụng cho phiên và revision đã quan sát; phiên thay đổi hoặc bắt đầu tác vụ khác thì cần kiểm tra trạng thái và xác nhận lại.
+
 Hai script cũ không còn là luồng nhập mật khẩu: `import-navicat-passwords.py` chỉ trả số lượng profile/có lưu credential, không giải mã hay xuất host/user/password; `sync-navicat-passwords.cjs` đã khóa ghi trực tiếp và chỉ hướng dẫn mở menu nhập. Luồng nhập trong ứng dụng mã hóa secret qua store repository và yêu cầu xác nhận SSH host key khi kết nối. Tệp `.ncx`/JSON và bản sao lưu có thể chứa credential, cần giữ ngoài repository và không đưa vào log/CI. Nếu từng chạy bản script cũ và lưu/chia sẻ output, kiểm tra nơi đã nhận output và đổi credential thực tế bị lộ; `.gitignore` không xóa lịch sử hoặc log cũ.
 
 ### Giới hạn tương thích

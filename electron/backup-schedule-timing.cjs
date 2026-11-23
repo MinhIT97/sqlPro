@@ -11,12 +11,12 @@ function scheduleTiming(value) {
   }
   if (mode === 'daily') {
     if (typeof value.timeOfDay !== 'string' || !/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(value.timeOfDay)
-      || value.cron !== undefined) throw new Error('Giờ backup phải có dạng HH:mm; chưa nhận cron tùy ý.');
+      || value.cron !== undefined) throw new Error('Giờ backup phải có dạng HH:mm và không kết hợp trường cron.');
     return { mode, timeOfDay: value.timeOfDay };
   }
   if (mode !== 'interval' || value.timeOfDay !== undefined || value.cron !== undefined
     || !Number.isInteger(value.intervalHours) || value.intervalHours < 1 || value.intervalHours > 168) {
-    throw new Error('Lịch backup không hợp lệ. Chọn chu kỳ 1–168 giờ hoặc lịch hằng ngày.');
+    throw new Error('Lịch backup không hợp lệ. Chọn chu kỳ 1–168 giờ, lịch hằng ngày hoặc cron 5 trường.');
   }
   return { intervalHours: value.intervalHours };
 }

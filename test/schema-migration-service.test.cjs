@@ -56,6 +56,37 @@ test('complete simple schemas produce a detached SQL preview, never executable s
   assert.equal(again.summary.executable, 0);
 });
 
+test('MySQL 8 Apply consumes a Main-owned preview once and derives SQL from immutable captures', () => {
+  const { service, request } = pair({ enableMySqlApply: true });
+  const options = { ignoreComments: false };
+  const preview = service.createMigrationPlan({ ...request, options });
+  assert.equal(preview.applySupported, true);
+  assert.equal(preview.applyBlockReason, null);
+  const expected = preview.statements.map(s => s.sql);
+  preview.statements[0].sql = 'DROP DATABASE sample'; options.allowDropTables = true;
+  const candidate = service.consumeApplyCandidate(preview.planToken);
+  assert.deepEqual(candidate.statements.map(s => s.sql), expected);
+  assert.equal(candidate.status, 'ready');
+  assert.notEqual(candidate.planToken, preview.planToken);
+  assert.ok(candidate.expiresAt <= Date.parse(preview.expiresAt) + 5);
+  assert.throws(() => service.consumeApplyCandidate(preview.planToken), { code: 'MIGRATION_PLAN_NOT_FOUND' });
+});
+
+test('Apply availability requires two supported MySQL 8 captures and nonempty supported changes', () => {
+  for (const [engine, serverVersion] of [['MariaDB', '10.11.0-MariaDB'], ['MySQL', '5.7.0'], ['MySQL', undefined]]) {
+    const { service, source, request } = pair({ enableMySqlApply: true });
+    source.scope.engine = engine; source.scope.serverVersion = serverVersion;
+    request.sourceSnapshotId = service.storeSnapshot(source);
+    const preview = service.createMigrationPlan(request);
+    assert.equal(preview.applySupported, false);
+    assert.throws(() => service.consumeApplyCandidate(preview.planToken), { code: 'MIGRATION_APPLY_NOT_READY' });
+  }
+  const { service, source, request } = pair({ enableMySqlApply: true });
+  source.scope.profileId = 'target'; source.scope.sessionId = 'session-target';
+  request.targetSnapshotId = service.storeSnapshot(source);
+  assert.equal(service.createMigrationPlan(request).applySupported, false);
+});
+
 test('incomplete coverage blocks all SQL including non-DROP and replacement statements', () => {
   for (const coverage of ['unknown', 'partial', undefined]) {
     const { service, request, source } = pair();

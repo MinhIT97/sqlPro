@@ -141,8 +141,11 @@ test('busy task released within grace can run, failures wait for next period and
 test('recovery marks an interrupted claim incomplete, skips old intervals and never replays it', async t => {
   const f = fixture(t);
   let now = BASE + HOUR, runs = 0;
-  const before = new BackupScheduler({ repository: f.repository, now: () => now, isBusy: () => false, run: () => new Promise(() => {}) });
+  const started = Promise.withResolvers();
+  const before = new BackupScheduler({ repository: f.repository, now: () => now, isBusy: () => false,
+    run: () => { started.resolve(); return new Promise(() => {}); } });
   void before.tick();
+  await started.promise;
   assert.equal(f.repository.read()[0].lastRun.status, 'running');
   const restarted = new BackupScheduler({ repository: createScheduleStore(f.root), now: () => now, isBusy: () => false, run: async () => { runs++; return { id: ID }; } });
   restarted.recover(); await restarted.tick();
@@ -154,13 +157,15 @@ test('pause and delete while another schedule awaits prevent stale queued work',
   const f = fixture(t);
   const second = f.repository.save({ ...f.input, database: 'second' }, BASE);
   const third = f.repository.save({ ...f.input, database: 'third' }, BASE);
-  let finish, runs = 0;
+  let runs = 0;
+  const started = Promise.withResolvers(), completion = Promise.withResolvers();
   const scheduler = new BackupScheduler({ repository: f.repository, now: () => BASE + HOUR, isBusy: () => false,
-    run: async () => { runs++; return new Promise(resolve => { finish = resolve; }); } });
+    run: async () => { runs++; started.resolve(); return completion.promise; } });
   const pending = scheduler.tick();
+  await started.promise;
   f.repository.update(second.id, second.revision, item => ({ ...item, enabled: false }));
   f.repository.remove(third.id);
-  finish({ canceled: true }); await pending;
+  completion.resolve({ canceled: true }); await pending;
   assert.equal(runs, 1); assert.equal(f.repository.read()[0].lastRun.status, 'canceled');
 });
 
@@ -180,11 +185,13 @@ test('stop and restart while a cycle awaits cannot enqueue stale work or duplica
   const context = { module: { exports: {} }, require: id => require(id.startsWith('./') ? path.join(__dirname, '../electron', id) : id), clearTimeout: timer => { if (timer) timer.cleared = true; },
     setTimeout: callback => { const timer = { callback, unref() {} }; timers.push(timer); return timer; } };
   vm.runInNewContext(source, context);
-  let finish;
+  const started = Promise.withResolvers(), completion = Promise.withResolvers();
   const scheduler = new context.module.exports.BackupScheduler({ repository: f.repository, now: () => BASE + HOUR, isBusy: () => false,
-    run: () => new Promise(resolve => { finish = resolve; }) });
-  scheduler.start(); const old = timers[0].callback(); scheduler.stop(); scheduler.start();
-  finish({ canceled: true }); await old;
+    run: () => { started.resolve(); return completion.promise; } });
+  scheduler.start(); const old = timers[0].callback();
+  await started.promise;
+  scheduler.stop(); scheduler.start();
+  completion.resolve({ canceled: true }); await old;
   assert.equal(timers.length, 2);
   await timers[1].callback(); assert.equal(timers.length, 3);
   scheduler.stop(); assert.equal(timers[2].cleared, true);
@@ -214,4 +221,58 @@ test('clock moving backward while another backup awaits does not run queued work
     run: async () => { runs++; now = BASE; return { id: ID }; } });
   await scheduler.tick();
   assert.equal(runs, 1); assert.equal(f.repository.read()[1].lastRun, null);
+});
+
+test('busy admission after calendar calculation keeps the due slot inside grace and runs when released', async t => {
+  const f = fixture(t), entered = Promise.withResolvers(), calculated = Promise.withResolvers();
+  let busy = false, now = BASE + HOUR, runs = 0;
+  const scheduler = new BackupScheduler({ repository: f.repository, now: () => now, isBusy: () => busy,
+    nextRun: () => { entered.resolve(); return calculated.promise; },
+    run: async () => { assert.equal(busy, false); runs++; return { id: ID }; } });
+  const pending = scheduler.tick(); await entered.promise;
+  busy = true; now += 60000; calculated.resolve(new Date(BASE + 25 * HOUR).toISOString());
+  await pending;
+  assert.equal(runs, 0); assert.equal(f.repository.read()[0].lastRun, null);
+  assert.equal(f.repository.read()[0].nextRunAt, f.saved.nextRunAt);
+  busy = false; await scheduler.tick();
+  assert.equal(runs, 1); assert.equal(f.repository.read()[0].lastRun.status, 'completed');
+  assert.equal(f.repository.read()[0].lastRun.startedAt, new Date(now).toISOString());
+});
+
+test('calendar calculation rechecks grace expiry and backwards clocks before any claim or backup', async t => {
+  for (const outcome of ['missed', 'busy', 'backwards', 'next-run-elapsed']) {
+    const f = fixture(t), entered = Promise.withResolvers(), calculated = Promise.withResolvers();
+    let now = BASE + HOUR, busy = false, runs = 0;
+    const scheduler = new BackupScheduler({ repository: f.repository, now: () => now, isBusy: () => busy,
+      nextRun: () => { entered.resolve(); return calculated.promise; }, run: async () => { runs++; return { id: ID }; } });
+    const pending = scheduler.tick(); await entered.promise;
+    now = outcome === 'backwards' ? BASE : outcome === 'next-run-elapsed' ? BASE + 25 * HOUR : now + 60001;
+    busy = outcome === 'busy'; calculated.resolve(new Date(BASE + 25 * HOUR).toISOString()); await pending;
+    const after = f.repository.read()[0];
+    assert.equal(runs, 0, outcome);
+    if (['missed', 'busy'].includes(outcome)) {
+      assert.equal(after.lastRun.status, outcome);
+      assert.equal(after.lastRun.startedAt, new Date(now).toISOString());
+    } else {
+      assert.equal(after.lastRun, null);
+      assert.equal(after.nextRunAt, f.saved.nextRunAt);
+    }
+  }
+});
+
+test('pause, deletion, revision changes and stop during calendar calculation cannot claim a stale slot', async t => {
+  for (const change of ['pause', 'delete', 'edit', 'stop']) {
+    const f = fixture(t), entered = Promise.withResolvers(), calculated = Promise.withResolvers();
+    let runs = 0;
+    const scheduler = new BackupScheduler({ repository: f.repository, now: () => BASE + HOUR, isBusy: () => false,
+      nextRun: () => { entered.resolve(); return calculated.promise; }, run: async () => { runs++; return { id: ID }; } });
+    const pending = scheduler.tick(); await entered.promise;
+    if (change === 'pause') f.repository.update(f.saved.id, f.saved.revision, item => ({ ...item, enabled: false }));
+    if (change === 'delete') f.repository.remove(f.saved.id);
+    if (change === 'edit') f.repository.save({ ...f.input, intervalHours: 12 }, BASE);
+    if (change === 'stop') scheduler.stop();
+    calculated.resolve(new Date(BASE + 25 * HOUR).toISOString()); await pending;
+    assert.equal(runs, 0, change);
+    assert.equal(f.repository.read()[0]?.lastRun || null, null);
+  }
 });

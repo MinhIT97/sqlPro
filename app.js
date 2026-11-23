@@ -1585,6 +1585,28 @@ async function refreshConnections() {
   renderSidebar();
 }
 
+function connectionSubtitle(connection) {
+  const user = connection.user || 'root';
+  const host = connection.host || 'localhost';
+  const port = connection.port || 3306;
+  const endpoint = `${user}@${host}:${port}`;
+
+  const tags = [];
+  if (connection.ssh?.enabled) {
+    tags.push('<span class="conntag ssh">SSH</span>');
+  }
+  if (connection.ssl?.enabled) {
+    const isVerified = connection.ssl.verify === true;
+    tags.push(`<span class="conntag tls${isVerified ? '' : ' unverified'}" title="${isVerified ? 'TLS đã xác thực' : 'TLS chưa xác thực'}">${isVerified ? 'TLS' : 'TLS⚠'}</span>`);
+  }
+  if (connection.readOnly) {
+    tags.push('<span class="conntag ro">CHỈ ĐỌC</span>');
+  }
+
+  const envBadge = connectionEnvironmentBadge(connection);
+  return `${envBadge ? `${envBadge} ` : ''}<span class="conn-endpoint" title="${esc(endpoint)}">${esc(endpoint)}</span>${tags.length ? ` <span class="conn-tags">${tags.join(' ')}</span>` : ''}`;
+}
+
 function renderSidebar() {
   const list = $('#connectionList');
   if (!list) return;
@@ -1602,7 +1624,8 @@ function renderSidebar() {
   });
 
   const activeBranch = app.connection ? renderDatabaseBranch(term) : '';
-  const chevronSvg = `<svg class="tree-chevron-svg" viewBox="0 0 16 16" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5l4.5 4.5-4.5 4.5"/></svg>`;
+  const chevronSvg = `<svg class="tree-chevron-svg" viewBox="0 0 16 16" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5l4.5 4.5-4.5 4.5"/></svg>`;
+  const dbIconSvg = `<svg class="conn-icon-svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>`;
 
   const activeConnectionId = app.connection?.id;
   const hasActiveInList = Boolean(activeConnectionId && connections.some((c) => c.id === activeConnectionId));
@@ -1616,18 +1639,24 @@ function renderSidebar() {
     );
     const isExpanded = active && !collapsedConnections.has(connection.id);
     const typeLabel = connection.type === 'mariadb' ? 'MARIA' : 'MYSQL';
+    const isConnected = active || openConnectionIds.has(connection.id);
     return `
       <div class="connitem ${active ? 'active' : ''}" data-connection-id="${esc(connection.id)}">
-        <div class="connhead">
-          <button class="conn-open" data-connection="${esc(connection.id)}" aria-label="Kết nối ${esc(connection.name)}"${active ? ' aria-current="true"' : ''}${active ? ` aria-expanded="${isExpanded}"` : ''}>
-            <span class="tree-chevron ${isExpanded ? 'open' : ''}" data-toggle-conn="${esc(connection.id)}">${chevronSvg}</span>
-            <i class="dot ${active || openConnectionIds.has(connection.id) ? 'connected' : ''}"></i>
-            <span class="name" title="${esc(connection.name)}">${esc(connection.name)}</span>
-            <span class="badge type">${typeLabel}</span>
-          </button>
-          <button class="more" data-menu="${esc(connection.id)}" title="Tùy chọn" aria-label="Tùy chọn kết nối ${esc(connection.name)}">···</button>
+        <div class="connitem-card" data-connection="${esc(connection.id)}" title="${esc(connection.name)} · ${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port}">
+          <div class="connhead">
+            <button class="conn-open" data-connection="${esc(connection.id)}" aria-label="Kết nối ${esc(connection.name)}"${active ? ' aria-current="true"' : ''}${active ? ` aria-expanded="${isExpanded}"` : ''}>
+              <span class="tree-chevron ${isExpanded ? 'open' : ''}" data-toggle-conn="${esc(connection.id)}">${chevronSvg}</span>
+              <span class="conn-icon-wrap ${isConnected ? 'connected' : ''}">
+                ${dbIconSvg}
+                <i class="dot ${isConnected ? 'connected' : ''}"></i>
+              </span>
+              <span class="name" title="${esc(connection.name)}">${esc(connection.name)}</span>
+              <span class="badge type">${typeLabel}</span>
+            </button>
+            <button class="more" data-menu="${esc(connection.id)}" title="Tùy chọn" aria-label="Tùy chọn kết nối ${esc(connection.name)}">···</button>
+          </div>
+          <div class="connmeta">${connectionSubtitle(connection)}</div>
         </div>
-        <div class="connmeta" title="${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port} · ${esc(connectionSecuritySummary(connection))}">${connectionEnvironmentBadge(connection)} ${esc(connection.user || 'root')}@${esc(connection.host)}:${connection.port}${connection.ssh?.enabled ? ' · SSH' : ''} · ${esc(connectionTransportBadge(connection))}</div>
         ${isExpanded ? `<div class="conn-children">${activeBranch}</div>` : ''}
       </div>
     `;
@@ -3255,7 +3284,7 @@ async function showSchemaDiffModal() {
   const openedRevision = modalRevision, dialog = $('#modal');
   const current = () => modalRevision === openedRevision && $('#modal') === dialog && dialog.open
     && app.connection?.id === currentProfileId && (app.database || '') === currentDb;
-  let revision = 0, isComparing = false, migrationPlan = null;
+  let revision = 0, isComparing = false, isApplying = false, migrationPlan = null;
   let currentTab = 'config';
   let diffResult = null;
   let migrationStatements = [];
@@ -3440,7 +3469,7 @@ async function showSchemaDiffModal() {
   }
 
   async function executeCompare() {
-    if (!current() || isComparing) return;
+    if (!current() || isComparing || isApplying) return;
     if (!sourceDb || !targetDb) {
       toast('Vui lòng chọn cả CSDL Nguồn và CSDL Đích.', 'error');
       return;
@@ -3499,7 +3528,7 @@ async function showSchemaDiffModal() {
   }
 
   function switchTab(tabName) {
-    if (!current()) return;
+    if (!current() || isApplying) return;
     currentTab = tabName;
     document.querySelectorAll('[data-diff-tab]').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.diffTab === tabName);
@@ -3681,12 +3710,14 @@ async function showSchemaDiffModal() {
 
         <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
           <span style="font-size:0.82em; color:#64748b;">
-            🔒 Luồng áp dụng trực tiếp đang khóa an toàn. Vui lòng bấm “▷ Mở trong Editor” để xem xét và thực thi từng lệnh DDL có kiểm soát.
+            ${plan.applySupported ? 'MySQL 8: tạo bảng, thêm cột cuối bảng và thêm index. Main xác nhận đúng đích trước khi chạy. DDL có thể commit một phần và không rollback toàn bộ.' : 'Áp dụng trực tiếp chưa hỗ trợ kế hoạch này. Có thể mở SQL trong Editor để xem xét.'}
           </span>
-          <button type="button" class="secondary" id="diffApplyTargetBtn" disabled style="cursor:not-allowed; opacity:0.6;">
-            🔒 Áp dụng trực tiếp đang khóa an toàn
+          <button type="button" class="secondary" id="diffApplyTargetBtn" ${plan.applySupported ? '' : 'disabled'}>
+            ${plan.applySupported ? 'Áp dụng vào đích…' : '🔒 Áp dụng trực tiếp chưa hỗ trợ'}
           </button>
         </div>
+        <div id="diffApplyStatus" role="status" aria-live="polite"></div>
+        <button type="button" class="secondary" id="diffCancelApplyBtn" hidden>Yêu cầu dừng</button>
       </div>
     `;
 
@@ -3726,8 +3757,52 @@ async function showSchemaDiffModal() {
       toast(`Đã mở mã Migration vào SQL Editor cho ${targetDb}`, 'info');
     });
 
-    $('#diffApplyTargetBtn')?.addEventListener('click', () => {
-      toast('Thao tác áp dụng tự động đang tạm khóa để thẩm định an toàn DDL. Vui lòng bấm "▷ Mở trong Editor" để xem xét từng câu lệnh.', 'warning');
+    $('#diffApplyTargetBtn')?.addEventListener('click', async () => {
+      if (!valid() || isApplying || plan.applySupported !== true) return;
+      isApplying = true;
+      const taskId = `migration-${crypto.randomUUID()}`, profileId = plan.targetScope.profileId;
+      const output = $('#diffApplyStatus'), cancelButton = $('#diffCancelApplyBtn');
+      const shown = () => current() && revision === version && $('#diffApplyStatus') === output;
+      let finished = false;
+      const cancel = () => call(desktop.db.cancelTask(profileId, taskId)).catch(() => {});
+      const lifecycle = new MutationObserver(() => {
+        if (!shown()) { if (!finished) void cancel(); lifecycle.disconnect(); }
+      });
+      lifecycle.observe(dialog, { childList: true, subtree: true, attributes: true, attributeFilter: ['open'] });
+      for (const button of container.querySelectorAll('button')) button.disabled = true;
+      cancelButton.hidden = false; cancelButton.disabled = false;
+      output.dataset.transferRunning = 'true';
+      output.textContent = 'Đang chờ xác nhận và kiểm tra lại nguồn/đích. Không tự retry khi có lỗi.';
+      cancelButton.onclick = async () => {
+        cancelButton.disabled = true;
+        if (shown()) output.textContent = 'Đã yêu cầu dừng. Đang đợi báo cáo; DDL đã chạy có thể đã commit.';
+        await cancel();
+      };
+      try {
+        const result = await call(desktop.db.applyMigrationPlan({ planToken: plan.planToken, taskId }));
+        if (!shown()) return;
+        if (result.canceled) output.textContent = 'Đã hủy xác nhận. Hãy so sánh lại trước khi áp dụng.';
+        else {
+          const job = result.job;
+          if (job?.kind !== 'sqlpro-migration-job') throw new Error('Không nhận được báo cáo migration. Hãy kiểm tra lại schema đích trước khi chạy tiếp.');
+          const labels = { completed: 'Hoàn tất', failed: 'Thất bại', uncertain: 'Chưa xác định kết quả', cancelled: 'Đã dừng', canceled: 'Đã dừng' };
+          output.innerHTML = `<strong>${esc(labels[job.status] || job.status)}: ${esc(job.executedCount)}/${esc(job.totalCount)} lệnh.</strong>
+            ${job.partialCommit || job.executionUncertain ? '<p>⚠ Đích có thể đã thay đổi một phần. Không tự chạy lại; hãy kiểm tra schema và báo cáo từng lệnh.</p>' : ''}
+            ${job.error ? `<p>Mã lỗi: ${esc(job.error)}</p>` : ''}
+            ${job.cleanupError ? `<p>Lỗi dọn phiên: ${esc(job.cleanupError)}</p>` : ''}
+            <ol>${(job.statements || []).map(item => `<li>${esc(item.id)}: ${esc(item.status)}${item.error ? ` (${esc(item.error)})` : ''}</li>`).join('')}</ol>
+            <p>Hãy so sánh lại để lấy trạng thái schema mới nhất.</p>`;
+        }
+      } catch (error) {
+        if (shown()) output.textContent = `${error.message} Hãy so sánh lại; không tự chạy lại kế hoạch cũ.`;
+      } finally {
+        finished = true; isApplying = false; lifecycle.disconnect();
+        if (shown()) {
+          delete output.dataset.transferRunning; cancelButton.hidden = true;
+          document.querySelectorAll('[data-diff-tab]').forEach(button => { button.disabled = button.dataset.diffTab !== 'config'; });
+          migrationPlan = null; diffResult = null; migrationStatements = [];
+        }
+      }
     });
   }
 
@@ -5308,10 +5383,11 @@ function setupContextMenu() {
         item.addEventListener('click', () => {
           closeMenu();
           const act = item.dataset.action;
+          if (['select-db', 'create-table', 'backup-db', 'restore-db', 'drop-db'].includes(act) && app.connection?.id !== dbConnId) return;
           if (act === 'select-db') selectDatabase(dbName);
-          else if (act === 'create-table') { selectDatabase(dbName).then(() => createTableModal()); }
-          else if (act === 'backup-db') selectDatabase(dbName).then(() => { if (app.database === dbName) backupDatabase(); });
-          else if (act === 'restore-db') selectDatabase(dbName).then(() => { if (app.database === dbName) restoreDatabase(); });
+          else if (act === 'create-table') { selectDatabase(dbName).then(selected => { if (selected && app.connection?.id === dbConnId) createTableModal(); }); }
+          else if (act === 'backup-db') selectDatabase(dbName).then(selected => { if (selected && app.connection?.id === dbConnId && app.database === dbName) backupDatabase(); });
+          else if (act === 'restore-db') selectDatabase(dbName).then(selected => { if (selected && app.connection?.id === dbConnId && app.database === dbName) restoreDatabase(); });
           else if (act === 'paste-db') pasteBackupModal(dbName, dbConnId);
           else if (act === 'copy-db') copyDatabaseAction(dbName, dbConnId);
           else if (act === 'drop-db') dropDatabaseAction(dbName);
@@ -5568,6 +5644,8 @@ async function connectProfile(id) {
   }
 }
 
+let connectionNavigationRevision = 0;
+
 async function connectTo(id, options = {}) {
   if (connectionSwitching) return;
   const profile = app.connections.find((connection) => connection.id === id);
@@ -5601,10 +5679,12 @@ async function connectTo(id, options = {}) {
     renderSidebar();
     return;
   }
+  const navigationRevision = ++connectionNavigationRevision;
   connectionSwitching = true;
   if (savedView) {
     try {
       const data = await connectProfile(id);
+      if (navigationRevision !== connectionNavigationRevision) return;
       connectedData = data;
       openConnectionIds.clear();
       for (const profileId of data.openProfiles || [id]) openConnectionIds.add(profileId);
@@ -5634,11 +5714,13 @@ async function connectTo(id, options = {}) {
         else if (mode === 'indexes' && app.indexes) renderIndexesView();
         else if (mode === 'relations' && app.relations) renderRelationsView();
         else await view(mode);
+        if (navigationRevision !== connectionNavigationRevision) return;
         setStatus(`Đã chuyển sang ${profile.name} • ${app.server}`);
         persistState();
         return;
       }
     } catch (error) {
+      if (navigationRevision !== connectionNavigationRevision) return;
       openConnectionIds.delete(id);
       connectionViews.delete(id);
       toast(error.message, 'error');
@@ -5647,6 +5729,8 @@ async function connectTo(id, options = {}) {
       connectionSwitching = false;
     }
   }
+  if (navigationRevision !== connectionNavigationRevision) return;
+  connectionSwitching = true;
   invalidateSqlAutocomplete();
   app.connection = profile;
   app.serverType = profile.type;
@@ -5667,6 +5751,7 @@ async function connectTo(id, options = {}) {
   renderConnectionLoading(profile);
   try {
     const data = connectedData || await connectProfile(id);
+    if (navigationRevision !== connectionNavigationRevision) return;
     openConnectionIds.clear();
     for (const profileId of data.openProfiles || [id]) openConnectionIds.add(profileId);
     app.server = data.server;
@@ -5678,17 +5763,19 @@ async function connectTo(id, options = {}) {
       ? preferredDatabase
       : (profile.database && app.databases.includes(profile.database) ? profile.database : null);
     if (preferred) {
-      await selectDatabase(preferred, { ...remembered, ...options });
+      if (await selectDatabase(preferred, { ...remembered, ...options }) === false) return;
     } else if (app.databases.length === 1) {
-      await selectDatabase(app.databases[0], options);
+      if (await selectDatabase(app.databases[0], options) === false) return;
     } else {
       renderSidebar();
       view('data');
     }
+    if (navigationRevision !== connectionNavigationRevision) return;
     setStatus(`Kết nối thành công • ${app.server}`);
     if (!options.silent) toast(`Đã kết nối ${profile.name}`);
     persistState();
   } catch (error) {
+    if (navigationRevision !== connectionNavigationRevision) return;
     openConnectionIds.delete(id);
     app.connection = null;
     app.sessionState = null;
@@ -5709,14 +5796,25 @@ async function connectTo(id, options = {}) {
   }
 }
 
+let databaseSelectionRevision = 0;
+
 async function selectDatabase(database, options = {}) {
+  const profileId = app.connection?.id;
+  if (!desktop?.db || !profileId) return false;
+  const requestId = ++databaseSelectionRevision;
+  const navigationRevision = connectionNavigationRevision;
+  const current = () => requestId === databaseSelectionRevision && navigationRevision === connectionNavigationRevision
+    && app.connection?.id === profileId;
+  const scopeCurrent = () => current() && app.database === database;
+  ++dataRequestId;
   invalidateSqlAutocomplete();
   try {
-    await call(desktop.db.useDatabase(database, app.connection?.id || null));
+    await call(desktop.db.useDatabase(database, profileId));
   } catch (error) {
-    toast(error.message, 'error');
-    return;
+    if (current()) toast(error.message, 'error');
+    return false;
   }
+  if (!current()) return false;
   app.database = database;
   app.backups = [];
   app.selectedBackupId = null;
@@ -5727,25 +5825,31 @@ async function selectDatabase(database, options = {}) {
   app.rows = [];
   app.total = null;
   try {
-    app.tables = await call(desktop.db.tables(database, app.connection?.id || null));
+    const tables = await call(desktop.db.tables(database, profileId));
+    if (!scopeCurrent()) return false;
+    app.tables = tables;
   } catch (error) {
+    if (!scopeCurrent()) return false;
     toast(error.message, 'error');
     app.tables = [];
   }
-  await refreshBackupList(database);
+  await refreshBackupList(database, profileId, scopeCurrent);
+  if (!scopeCurrent()) return false;
   renderSidebar();
   setConnectionState('connected', 'Đã kết nối');
-  void refreshSessionState();
+  void refreshSessionState(profileId);
   const candidate = options.table && app.tables.find((entry) => entry.name === options.table)
     ? options.table
     : (app.tables.find((entry) => entry.type === 'table')?.name || app.tables[0]?.name || null);
   if (candidate) {
-    await selectTable(candidate, { mode: options.mode, silent: options.silent });
+    await selectTable(candidate, { mode: options.mode, silent: options.silent, isCurrent: scopeCurrent });
   } else {
-    view(options.mode || 'data');
+    await view(options.mode || 'data');
   }
+  if (!scopeCurrent()) return false;
   loadOpenObjectGroups();
   persistState();
+  return true;
 }
 
 function backupChecksumNote(entry) {
@@ -5771,18 +5875,21 @@ function backupObjectSummary(entry) {
   return parts.join(' · ');
 }
 
-async function refreshBackupList(database = app.database, connectionId = app.connection?.id) {
+async function refreshBackupList(database = app.database, connectionId = app.connection?.id, isCurrent = () => true) {
   if (!desktop?.db?.listBackups || !database) return;
+  const navigationRevision = connectionNavigationRevision;
+  const current = () => navigationRevision === connectionNavigationRevision && isCurrent()
+    && app.database === database && app.connection?.id === connectionId;
   try {
     const backups = await call(desktop.db.listBackups(database, connectionId));
-    if (app.database === database && app.connection?.id === connectionId) {
+    if (current()) {
       app.backups = backups;
       if (app.selectedBackupId && !backups.some((entry) => entry.id === app.selectedBackupId)) app.selectedBackupId = null;
       renderSidebar();
       if (mode === 'backups') renderBackupsView();
     }
   } catch (error) {
-    toast(`Không đọc được danh sách backup: ${error.message}`, 'error');
+    if (current()) toast(`Không đọc được danh sách backup: ${error.message}`, 'error');
   }
 }
 
@@ -6459,13 +6566,15 @@ async function showBackupSchedule() {
   const localInput = date => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
   modal(`<section id="backupScheduleEditor"><h2>Lịch backup</h2><p>${esc(app.connection?.name || profileId || '')} · ${esc(database || '')}</p>
     <p>Sao lưu cấu trúc và dữ liệu của toàn bộ bảng, view, routine và event mà tài khoản nhìn thấy bằng phiên riêng, vào catalog trên máy này. Chính sách tự dọn đã bật sẽ áp dụng sau khi backup thành công.</p>
-    <label for="backupScheduleMode">Kiểu lịch</label><select id="backupScheduleMode"><option value="interval">Theo chu kỳ giờ</option><option value="daily">Hằng ngày theo múi giờ</option></select>
+    <label for="backupScheduleMode">Kiểu lịch</label><select id="backupScheduleMode"><option value="interval">Theo chu kỳ giờ</option><option value="daily">Hằng ngày theo múi giờ</option><option value="cron">Cron theo múi giờ</option></select>
     <label for="backupScheduleTime">Giờ hằng ngày (HH:mm)</label><input id="backupScheduleTime" type="time" value="02:00" disabled>
+    <label for="backupScheduleCron">Cron: phút giờ ngày tháng thứ</label><input id="backupScheduleCron" value="0 2 * * *" maxlength="128" spellcheck="false" autocomplete="off" disabled aria-describedby="backupScheduleCronHint">
+    <p id="backupScheduleCronHint" class="hint">Dùng số, *, danh sách, khoảng và bước. Ví dụ 0 2 * * *: 02:00 mỗi ngày; 0 2 * * 1-5: thứ Hai–thứ Sáu; */15 * * * *: mỗi 15 phút. Lần chạy kế tiếp xuất hiện trong hộp xác nhận.</p>
     <label for="backupScheduleZone">Múi giờ IANA</label><input id="backupScheduleZone" value="${esc(timeZone)}" maxlength="100" disabled>
     <label for="backupScheduleHours">Chu kỳ (giờ trôi qua, 1–168)</label><input id="backupScheduleHours" type="number" min="1" max="168" step="1" value="24">
     <label for="backupScheduleStart">Lần chạy đầu (${esc(timeZone)})</label><input id="backupScheduleStart" type="datetime-local" value="${localInput(new Date(Date.now() + 3600000))}">
     <p class="hint">Lịch chu kỳ tính theo số giờ trôi qua, không cố định giờ địa phương khi đổi DST. Quá hạn 60 giây do đóng app, sleep hoặc tác vụ khác sẽ được ghi nhận bỏ lỡ; không chạy bù và không tự retry. Tối đa một tác vụ database cùng lúc.</p>
-    <p>Lịch hằng ngày dùng múi giờ đã chọn: giờ không tồn tại khi đổi DST được bỏ qua; giờ lặp có thể chạy hai lần. Chỉ chạy khi app mở; không chạy bù hoặc tự retry.</p>
+    <p>Lịch hằng ngày và cron dùng múi giờ đã chọn: giờ không tồn tại khi đổi DST được bỏ qua; giờ lặp có thể chạy hai lần. Cron chỉ nhận 5 trường số, thứ từ 0–7 (0/7 là Chủ nhật). Chỉ chạy khi app mở; không chạy bù hoặc tự retry.</p>
     <div id="backupScheduleState" role="status" aria-live="polite">Đang đọc lịch…</div>
     <p id="backupScheduleMessage" role="status" aria-live="polite"></p>
     <div class="actions"><button data-click="close-modal">Đóng</button><button id="refreshBackupSchedule" disabled>Cập nhật trạng thái</button><button id="pauseBackupSchedule" disabled>Tạm dừng lịch</button><button id="deleteBackupSchedule" disabled>Xóa lịch</button><button id="saveBackupSchedule" class="primary" disabled>Lưu và bật lịch (Ctrl+Enter)</button></div></section>`, true);
@@ -6474,22 +6583,27 @@ async function showBackupSchedule() {
   const message = $('#backupScheduleMessage');
   const hours = $('#backupScheduleHours');
   const timing = $('#backupScheduleMode'), dailyTime = $('#backupScheduleTime'), zone = $('#backupScheduleZone');
+  const cron = $('#backupScheduleCron');
   const start = $('#backupScheduleStart');
   const save = $('#saveBackupSchedule');
   const pause = $('#pauseBackupSchedule');
   const remove = $('#deleteBackupSchedule');
   const refresh = $('#refreshBackupSchedule');
   let busy = false, loaded = false, schedule = null, edited = false;
-  const matches = () => $('#backupScheduleEditor') === editor && app.connection?.id === profileId && app.database === database;
+  const dialog = $('#modal'), dialogRevision = modalRevision;
+  const matches = () => dialog?.open && modalRevision === dialogRevision && $('#backupScheduleEditor') === editor
+    && app.connection?.id === profileId && app.database === database;
   const controls = () => {
     save.disabled = busy || !loaded;
     pause.disabled = busy || !loaded || !schedule?.enabled;
     remove.disabled = busy || !loaded || !schedule;
     refresh.disabled = busy;
-    const daily = timing.value === 'daily';
+    const daily = timing.value === 'daily', calendar = daily || timing.value === 'cron';
     timing.disabled = busy;
-    hours.disabled = start.disabled = busy || daily;
-    dailyTime.disabled = zone.disabled = busy || !daily;
+    hours.disabled = start.disabled = busy || calendar;
+    dailyTime.disabled = busy || !daily;
+    cron.disabled = busy || timing.value !== 'cron';
+    zone.disabled = busy || !calendar;
   };
   const renderState = result => {
     schedule = result.schedule;
@@ -6500,7 +6614,9 @@ async function showBackupSchedule() {
       RETENTION_STOPPED: 'Tự dọn đã dừng', RETENTION_SKIPPED: 'Đã bỏ qua tự dọn', RETENTION_HISTORY_FAILED: 'Lịch sử dọn chưa lưu đầy đủ' };
     const format = value => new Intl.DateTimeFormat('vi-VN', { timeZone: schedule.timeZone, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
     const run = schedule.lastRun;
-    state.innerHTML = `<p>${schedule.enabled ? 'Lịch đã bật' : 'Lịch đã tạm dừng'} · ${schedule.mode === 'daily' ? `Hằng ngày ${esc(schedule.timeOfDay)}` : `Mỗi ${esc(schedule.intervalHours)} giờ`} · Lần kế tiếp: ${esc(format(schedule.nextRunAt))} (${esc(schedule.timeZone)})</p>
+    const description = schedule.mode === 'cron' ? `Cron ${esc(schedule.cron)}`
+      : schedule.mode === 'daily' ? `Hằng ngày ${esc(schedule.timeOfDay)}` : `Mỗi ${esc(schedule.intervalHours)} giờ`;
+    state.innerHTML = `<p>${schedule.enabled ? 'Lịch đã bật' : 'Lịch đã tạm dừng'} · ${description} · Lần kế tiếp: ${esc(format(schedule.nextRunAt))} (${esc(schedule.timeZone)})</p>
       ${result.paused ? '<p class="errorbox">Bộ chạy lịch đang dừng trên phiên ứng dụng này. Lưu và bật lại để tiếp tục.</p>' : ''}
       ${schedule.targetMatches === false ? '<p class="errorbox">Đích kết nối đã thay đổi. Hãy kiểm tra kết nối và lưu lại lịch trước khi chạy tiếp.</p>' : ''}
       ${run ? `<p>Lần gần nhất: ${esc(labels[run.status] || run.status)} · Theo lịch ${esc(format(run.scheduledFor))}${run.backupId ? ` · ${esc(run.backupId)}` : ''}${run.errorCode ? ` · ${esc(run.errorCode)}` : ''}</p>` : '<p>Chưa có lần chạy được ghi nhận.</p>'}
@@ -6517,6 +6633,7 @@ async function showBackupSchedule() {
       if (initial && schedule && !edited) {
         timing.value = schedule.mode || 'interval';
         dailyTime.value = schedule.timeOfDay || '02:00';
+        cron.value = schedule.cron || '0 2 * * *';
         zone.value = schedule.timeZone;
         hours.value = String(schedule.intervalHours || 24);
         start.value = localInput(new Date(schedule.nextRunAt));
@@ -6529,19 +6646,25 @@ async function showBackupSchedule() {
     if (action === 'pause' && !schedule?.enabled || action === 'delete' && !schedule) return;
     let payload = { profileId, database };
     if (action === 'save') {
+      if (!['interval', 'daily', 'cron'].includes(timing.value)) { message.textContent = 'Hãy chọn kiểu lịch hợp lệ.'; timing.focus(); return; }
+      const calendar = timing.value === 'daily' || timing.value === 'cron';
       const intervalHours = Number(hours.value);
       const next = new Date(start.value);
-      if (timing.value !== 'daily' && (!Number.isInteger(intervalHours) || intervalHours < 1 || intervalHours > 168 || !hours.validity.valid)) {
+      if (!calendar && (!Number.isInteger(intervalHours) || intervalHours < 1 || intervalHours > 168 || !hours.validity.valid)) {
         message.textContent = 'Chu kỳ phải là số nguyên từ 1 đến 168 giờ.'; hours.focus(); return;
       }
-      if (timing.value !== 'daily' && (!start.value || !start.validity.valid || !Number.isFinite(next.getTime()) || next.getTime() <= Date.now())) {
+      if (!calendar && (!start.value || !start.validity.valid || !Number.isFinite(next.getTime()) || next.getTime() <= Date.now())) {
         message.textContent = 'Hãy chọn lần chạy đầu trong tương lai.'; start.focus(); return;
       }
-      if (timing.value === 'daily') {
-        if (!/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(dailyTime.value)) { message.textContent = 'Hãy nhập giờ HH:mm hợp lệ.'; dailyTime.focus(); return; }
+      if (calendar) {
+        if (timing.value === 'daily' && !/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(dailyTime.value)) { message.textContent = 'Hãy nhập giờ HH:mm hợp lệ.'; dailyTime.focus(); return; }
+        if (timing.value === 'cron' && (!cron.value.trim() || cron.value.length > 128 || cron.value.trim().split(/\s+/).length !== 5)) {
+          message.textContent = 'Cron cần đúng 5 trường: phút giờ ngày tháng thứ (tối đa 128 ký tự).'; cron.focus(); return;
+        }
         try { new Intl.DateTimeFormat('vi-VN', { timeZone: zone.value }).format(0); }
         catch { message.textContent = 'Múi giờ IANA không hợp lệ.'; zone.focus(); return; }
-        payload = { ...payload, mode: 'daily', timeOfDay: dailyTime.value, timeZone: zone.value };
+        payload = timing.value === 'cron' ? { ...payload, mode: 'cron', cron: cron.value, timeZone: zone.value }
+          : { ...payload, mode: 'daily', timeOfDay: dailyTime.value, timeZone: zone.value };
       } else payload = { ...payload, intervalHours, nextRunAt: next.toISOString(), timeZone };
     }
     busy = true; controls(); message.textContent = 'Đang xử lý…';
@@ -6559,6 +6682,7 @@ async function showBackupSchedule() {
   };
   timing.addEventListener('change', () => { edited = true; controls(); });
   dailyTime.addEventListener('input', () => { edited = true; });
+  cron.addEventListener('input', () => { edited = true; });
   zone.addEventListener('input', () => { edited = true; });
   hours.addEventListener('input', () => { edited = true; });
   start.addEventListener('input', () => { edited = true; });
@@ -6570,7 +6694,7 @@ async function showBackupSchedule() {
     if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void mutate('save'); }
   });
   await load(true);
-  if (matches()) (timing.value === 'daily' ? dailyTime : hours).focus();
+  if (matches()) (timing.value === 'cron' ? cron : timing.value === 'daily' ? dailyTime : hours).focus();
 }
 
 async function showBackupRetentionHistory() {
@@ -6622,16 +6746,36 @@ function previewBackupRetention() {
   modal(`<section id="backupRetentionEditor"><h2>Xem trước dọn backup</h2>
     <p>${esc(app.connection?.name || profileId || '')} · ${esc(database || '')}</p>
     <p>Nhập ít nhất một giới hạn. Công cụ đề xuất các bản cũ nhất để đáp ứng đồng thời các giới hạn, luôn giữ bản ghim, bản mới nhất và bản mới nhất đã xác minh checksum.</p>
-    <label for="retentionCount">Số bản tối đa</label><input id="retentionCount" type="number" min="1" max="100000" step="1" value="10">
-    <label for="retentionAge">Tuổi tối đa (ngày)</label><input id="retentionAge" type="number" min="1" max="36500" step="1" placeholder="Không giới hạn">
-    <label for="retentionMiB">Tổng dung lượng tối đa (MiB)</label><input id="retentionMiB" type="number" min="0.00000095367431640625" max="8589934591" step="any" placeholder="Không giới hạn">
+    <div class="retention-inputs-grid">
+      <div class="retention-field">
+        <label for="retentionCount">Số bản tối đa</label>
+        <input id="retentionCount" type="number" min="1" max="100000" step="1" value="10">
+      </div>
+      <div class="retention-field">
+        <label for="retentionAge">Tuổi tối đa (ngày)</label>
+        <input id="retentionAge" type="number" min="1" max="36500" step="1" placeholder="Không giới hạn">
+      </div>
+      <div class="retention-field">
+        <label for="retentionMiB">Tổng dung lượng tối đa (MiB)</label>
+        <input id="retentionMiB" type="number" min="0.00000095367431640625" max="8589934591" step="any" placeholder="Không giới hạn">
+      </div>
+    </div>
     <label class="checkline"><input id="retentionAutomatic" type="checkbox"> Tự dọn sau khi backup mới thành công</label>
     <p class="hint">Chỉ dọn bản cùng nguồn và cùng phạm vi lựa chọn với backup mới, giữ bản ghim. Bật tính năng cần xác nhận riêng; các lần backup sau sẽ tự áp dụng trên máy này. Xóa không thể hoàn tác.</p>
     <p class="hint">Xem trước không xóa tệp. Nút Dọn yêu cầu xác nhận riêng và kiểm tra lại backup. Dung lượng chỉ tính SQL; checksum không thay thế phục hồi thử.</p>
     <p id="backupRetentionPolicyStatus" role="status" aria-live="polite">Đang đọc chính sách đã lưu…</p>
-    <div class="actions"><button data-click="close-modal">Đóng</button><button id="saveRetentionPolicyBtn" disabled>Lưu chính sách</button><button id="clearRetentionPolicyBtn" disabled>Xóa chính sách đã lưu</button><button id="previewRetentionBtn" class="primary">Xem trước (Ctrl+Enter)</button></div>
-    <button id="applyRetentionBtn" class="danger" disabled>Dọn các bản đã xem trước…</button>
-    <button id="stopRetentionBtn" disabled hidden>Dừng dọn backup</button>
+    <div class="actions retention-actions">
+      <div class="retention-actions-left">
+        <button id="applyRetentionBtn" class="danger" disabled>Dọn các bản đã xem trước…</button>
+        <button id="stopRetentionBtn" disabled hidden>Dừng dọn backup</button>
+      </div>
+      <div class="retention-actions-right">
+        <button data-click="close-modal">Đóng</button>
+        <button id="saveRetentionPolicyBtn" disabled>Lưu chính sách</button>
+        <button id="clearRetentionPolicyBtn" disabled>Xóa chính sách đã lưu</button>
+        <button id="previewRetentionBtn" class="primary">Xem trước (Ctrl+Enter)</button>
+      </div>
+    </div>
     <p id="retentionTaskStatus" role="status" aria-live="polite"></p>
     <div id="backupRetentionResult" role="status" aria-live="polite"></div></section>`, true);
   const editor = $('#backupRetentionEditor');
@@ -7312,6 +7456,10 @@ async function onBackupManagerClick(event) {
 }
 
 async function selectTable(name, options = {}) {
+  if (options.isCurrent && !options.isCurrent()) return false;
+  const profileId = app.connection?.id, database = app.database, navigationRevision = connectionNavigationRevision;
+  const current = () => app.connection?.id === profileId && app.database === database && table === name
+    && navigationRevision === connectionNavigationRevision && (!options.isCurrent || options.isCurrent());
   ++dataRequestId;
   table = name;
   app.tablePreferencePending = true;
@@ -7330,7 +7478,9 @@ async function selectTable(name, options = {}) {
   renderSidebar();
   const nextMode = options.mode && options.mode !== 'history' ? options.mode : 'data';
   await view(nextMode);
+  if (!current()) return false;
   persistState();
+  return true;
 }
 
 async function loadData({ keepScroll = false } = {}) {
@@ -7342,6 +7492,7 @@ async function loadData({ keepScroll = false } = {}) {
   const database = app.database;
   const targetTable = table;
   const connectionId = app.connection.id;
+  const navigationRevision = connectionNavigationRevision;
   const box = keepScroll ? $('#grid .tablebox') : null;
   const scroll = box ? { left: box.scrollLeft, top: box.scrollTop } : null;
   if (box) box.classList.add('loading-soft');
@@ -7350,7 +7501,8 @@ async function loadData({ keepScroll = false } = {}) {
   try {
     if (app.tablePreferencePending) {
       const scope = { profileId: connectionId, database, table: targetTable };
-      const current = () => requestId === dataRequestId && database === app.database && targetTable === table && connectionId === app.connection?.id && mode === 'data';
+      const current = () => requestId === dataRequestId && navigationRevision === connectionNavigationRevision
+        && database === app.database && targetTable === table && connectionId === app.connection?.id && mode === 'data';
       try {
         const saved = await call(desktop.tablePreferences.read(scope));
         if (!current()) return;
@@ -7375,7 +7527,7 @@ async function loadData({ keepScroll = false } = {}) {
       }
     }
     const data = await call(desktop.db.tableData({
-      profileId: app.connection?.id || null,
+      profileId: connectionId,
       database,
       table: targetTable,
       page: app.page,
@@ -7389,7 +7541,7 @@ async function loadData({ keepScroll = false } = {}) {
       sorts: app.sorts,
       orderDir: app.orderDir
     }));
-    if (requestId !== dataRequestId || database !== app.database || targetTable !== table || connectionId !== app.connection?.id || mode !== 'data') return;
+    if (requestId !== dataRequestId || navigationRevision !== connectionNavigationRevision || database !== app.database || targetTable !== table || connectionId !== app.connection?.id || mode !== 'data') return;
     app.columns = data.columns;
     app.primaryKey = data.primaryKey;
     app.rows = data.rows;
@@ -7407,7 +7559,7 @@ async function loadData({ keepScroll = false } = {}) {
     }
     setStatus(`Đã tải ${data.rows.length} dòng • ${app.database}.${table}`);
   } catch (error) {
-    if (requestId === dataRequestId && mode === 'data' && database === app.database && targetTable === table && connectionId === app.connection?.id) renderError(error);
+    if (requestId === dataRequestId && navigationRevision === connectionNavigationRevision && mode === 'data' && database === app.database && targetTable === table && connectionId === app.connection?.id) renderError(error);
   } finally {
     box?.classList.remove('loading-soft');
   }
@@ -7714,7 +7866,13 @@ function updateChrome() {
   document.title = `${mode === 'query' ? 'SQL Editor' : mode === 'history' ? 'Lịch sử' : mode === 'backups' ? 'Backups' : mode === 'transfer' ? 'Tác vụ' : (table || 'Workspace')} — ${app.database || 'SqlPro'} — SqlPro`;
 }
 
+let viewRequestId = 0;
+
 async function view(nextMode) {
+  const requestId = ++viewRequestId, navigationRevision = connectionNavigationRevision;
+  const profileId = app.connection?.id, database = app.database, selectedTable = table;
+  const current = () => requestId === viewRequestId && navigationRevision === connectionNavigationRevision
+    && app.connection?.id === profileId && app.database === database && table === selectedTable && mode === nextMode;
   if (mode === 'query' && nextMode !== 'query') syncActiveQuery();
   mode = nextMode;
   updateChrome();
@@ -7753,10 +7911,12 @@ async function view(nextMode) {
     }
     workspaceLoading();
     try {
-      app.columns = await call(desktop.db.columns(app.database, table, app.connection?.id || null));
+      const columns = await call(desktop.db.columns(database, selectedTable, profileId));
+      if (!current()) return;
+      app.columns = columns;
       renderStructureView();
     } catch (error) {
-      renderError(error);
+      if (current()) renderError(error);
     }
   } else if (nextMode === 'indexes') {
     if (!table) {
@@ -7765,10 +7925,12 @@ async function view(nextMode) {
     }
     workspaceLoading();
     try {
-      app.indexes = await call(desktop.db.indexes(app.database, table, app.connection?.id || null));
+      const indexes = await call(desktop.db.indexes(database, selectedTable, profileId));
+      if (!current()) return;
+      app.indexes = indexes;
       renderIndexesView();
     } catch (error) {
-      renderError(error);
+      if (current()) renderError(error);
     }
   } else if (nextMode === 'relations') {
     if (!table) {
@@ -7777,13 +7939,15 @@ async function view(nextMode) {
     }
     workspaceLoading();
     try {
-      app.relations = await call(desktop.db.relations(app.database, table, app.connection?.id || null));
+      const relations = await call(desktop.db.relations(database, selectedTable, profileId));
+      if (!current()) return;
+      app.relations = relations;
       renderRelationsView();
     } catch (error) {
-      renderError(error);
+      if (current()) renderError(error);
     }
   }
-  persistState();
+  if (current()) persistState();
 }
 
 function workspaceLoading() {
@@ -9519,79 +9683,202 @@ async function runExplainQuery() {
 function showShortcutsModal() {
   modal(`
     <div class="modal-card shortcuts-modal-card">
-      <div class="modal-header">
-        <h3>⌨️ Bảng Tra Cứu Phím Tắt SqlPro</h3>
-        <button class="close-btn" data-click="close-modal">✕</button>
+      <div class="modal-header shortcuts-modal-header">
+        <div class="shortcuts-header-title">
+          <span class="shortcuts-header-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="4" width="20" height="16" rx="3"></rect>
+              <line x1="6" y1="8" x2="6.01" y2="8"></line>
+              <line x1="10" y1="8" x2="10.01" y2="8"></line>
+              <line x1="14" y1="8" x2="14.01" y2="8"></line>
+              <line x1="18" y1="8" x2="18.01" y2="8"></line>
+              <line x1="6" y1="12" x2="6.01" y2="12"></line>
+              <line x1="10" y1="12" x2="10.01" y2="12"></line>
+              <line x1="14" y1="12" x2="14.01" y2="12"></line>
+              <line x1="18" y1="12" x2="18.01" y2="12"></line>
+              <line x1="7" y1="16" x2="17" y2="16"></line>
+            </svg>
+          </span>
+          <div>
+            <h3>Phím Tắt & Thao Tác Nhanh</h3>
+            <p class="shortcuts-header-subtitle">Danh sách các tổ hợp phím và thao tác chuột tiện ích trong SqlPro</p>
+          </div>
+        </div>
+        <button class="shortcuts-close-btn" data-click="close-modal" title="Đóng (Esc)">✕</button>
       </div>
-      <div class="modal-body">
-        <table class="shortcuts-table">
-          <thead>
-            <tr>
-              <th style="width: 220px;">Phím tắt</th>
-              <th>Chức năng</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><kbd>F5</kbd> / <kbd>Ctrl</kbd>+<kbd>Enter</kbd></td>
-              <td><strong>Thực thi SQL</strong> (toàn bộ hoặc đoạn đang bôi đen)</td>
-            </tr>
-            <tr>
-              <td><kbd>Ctrl</kbd> + <kbd>E</kbd></td>
-              <td><strong>Phân tích EXPLAIN</strong> kế hoạch thực thi câu lệnh</td>
-            </tr>
-            <tr>
-              <td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>F</kbd></td>
-              <td><strong>Định dạng SQL (Beautifier)</strong> tự động căn lề chuẩn đẹp</td>
-            </tr>
-            <tr>
-              <td><kbd>Ctrl</kbd> + <kbd>Z</kbd> / <kbd>Ctrl</kbd> + <kbd>Y</kbd></td>
-              <td><strong>Hoàn tác / làm lại</strong> nội dung SQL trong tab hiện tại</td>
-            </tr>
-            <tr>
-              <td><kbd>Ctrl</kbd> + <kbd>T</kbd></td>
-              <td><strong>Mở tab truy vấn mới</strong></td>
-            </tr>
-            <tr>
-              <td><kbd>Ctrl</kbd> + <kbd>W</kbd></td>
-              <td><strong>Đóng tab truy vấn hiện tại</strong></td>
-            </tr>
-            <tr>
-              <td><kbd>Ctrl</kbd> + <kbd>Space</kbd></td>
-              <td>Bật menu <strong>Autocomplete từ khóa & bảng/cột</strong></td>
-            </tr>
-            <tr>
-              <td><kbd>Nhấp đúp chuột vào ô</kbd></td>
-              <td><strong>Chỉnh sửa ô trực tiếp</strong> (Inline Cell Editing) trên lưới</td>
-            </tr>
-            <tr>
-              <td><kbd>Enter</kbd> (trong ô sửa)</td>
-              <td><strong>Lưu giá trị ô</strong> (thực thi UPDATE tự động theo Primary Key)</td>
-            </tr>
-            <tr>
-              <td><kbd>Esc</kbd></td>
-              <td>Hủy sửa ô / Đóng hộp thoại Modal / Đóng Context Menu</td>
-            </tr>
-            <tr>
-              <td><kbd>Chuột phải trên ô/dòng</kbd></td>
-              <td>Sao chép giá trị, sao chép JSON, xuất lệnh INSERT, đặt NULL...</td>
-            </tr>
-            <tr>
-              <td><kbd>F1</kbd></td>
-              <td>Mở bảng tra cứu phím tắt này</td>
-            </tr>
-            <tr>
-              <td><kbd>F2</kbd></td>
-              <td><strong>Mở thư viện mẫu SQL (Snippets)</strong></td>
-            </tr>
-          </tbody>
-        </table>
+
+      <div class="modal-body shortcuts-modal-body">
+        <!-- Nhóm 1: Truy vấn SQL -->
+        <div class="shortcuts-section">
+          <div class="shortcuts-section-title">
+            <span class="sec-dot"></span> Soạn Thảo & Thực Thi SQL
+          </div>
+          <div class="shortcuts-grid">
+            <div class="shortcut-row">
+              <div class="shortcut-desc">
+                <strong>Thực thi câu lệnh SQL</strong>
+                <span>Chạy toàn bộ hoặc đoạn văn bản đang bôi đen</span>
+              </div>
+              <div class="shortcut-keys">
+                <kbd>F5</kbd> <span class="key-or">hoặc</span> <kbd>Ctrl</kbd><span class="key-plus">+</span><kbd>Enter</kbd>
+              </div>
+            </div>
+
+            <div class="shortcut-row">
+              <div class="shortcut-desc">
+                <strong>Phân tích kế hoạch EXPLAIN</strong>
+                <span>Xem sơ đồ kế hoạch thực thi câu lệnh SQL</span>
+              </div>
+              <div class="shortcut-keys">
+                <kbd>Ctrl</kbd><span class="key-plus">+</span><kbd>E</kbd>
+              </div>
+            </div>
+
+            <div class="shortcut-row">
+              <div class="shortcut-desc">
+                <strong>Định dạng SQL (Beautifier)</strong>
+                <span>Tự động thụt lề và chuẩn hóa cú pháp câu lệnh</span>
+              </div>
+              <div class="shortcut-keys">
+                <kbd>Ctrl</kbd><span class="key-plus">+</span><kbd>Shift</kbd><span class="key-plus">+</span><kbd>F</kbd>
+              </div>
+            </div>
+
+            <div class="shortcut-row">
+              <div class="shortcut-desc">
+                <strong>Gợi ý từ khóa & bảng/cột (Autocomplete)</strong>
+                <span>Mở menu gợi ý thông minh tại con trỏ</span>
+              </div>
+              <div class="shortcut-keys">
+                <kbd>Ctrl</kbd><span class="key-plus">+</span><kbd>Space</kbd>
+              </div>
+            </div>
+
+            <div class="shortcut-row">
+              <div class="shortcut-desc">
+                <strong>Hoàn tác / Làm lại (Undo / Redo)</strong>
+                <span>Khôi phục hoặc hoàn tác nội dung vừa gõ</span>
+              </div>
+              <div class="shortcut-keys">
+                <kbd>Ctrl</kbd><span class="key-plus">+</span><kbd>Z</kbd> <span class="key-or">/</span> <kbd>Ctrl</kbd><span class="key-plus">+</span><kbd>Y</kbd>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Nhóm 2: Quản lý Tab & Phím chức năng -->
+        <div class="shortcuts-section">
+          <div class="shortcuts-section-title">
+            <span class="sec-dot"></span> Quản Lý Tab & Tiện Ích
+          </div>
+          <div class="shortcuts-grid">
+            <div class="shortcut-row">
+              <div class="shortcut-desc">
+                <strong>Mở tab truy vấn mới</strong>
+                <span>Tạo tab truy vấn mới gắn với kết nối hiện tại</span>
+              </div>
+              <div class="shortcut-keys">
+                <kbd>Ctrl</kbd><span class="key-plus">+</span><kbd>T</kbd>
+              </div>
+            </div>
+
+            <div class="shortcut-row">
+              <div class="shortcut-desc">
+                <strong>Đóng tab truy vấn hiện tại</strong>
+                <span>Đóng tab đang mở</span>
+              </div>
+              <div class="shortcut-keys">
+                <kbd>Ctrl</kbd><span class="key-plus">+</span><kbd>W</kbd>
+              </div>
+            </div>
+
+            <div class="shortcut-row">
+              <div class="shortcut-desc">
+                <strong>Đổi tên tab truy vấn</strong>
+                <span>Mở hộp thoại đặt tên tùy chỉnh cho tab</span>
+              </div>
+              <div class="shortcut-keys">
+                <span class="mouse-tag">Nhấp đúp vào tab</span>
+              </div>
+            </div>
+
+            <div class="shortcut-row">
+              <div class="shortcut-desc">
+                <strong>Thư viện mẫu SQL (Snippets)</strong>
+                <span>Mở danh sách các đoạn mã SQL mẫu thường dùng</span>
+              </div>
+              <div class="shortcut-keys">
+                <kbd>F2</kbd>
+              </div>
+            </div>
+
+            <div class="shortcut-row">
+              <div class="shortcut-desc">
+                <strong>Bảng tra cứu phím tắt</strong>
+                <span>Mở cửa sổ trợ giúp này</span>
+              </div>
+              <div class="shortcut-keys">
+                <kbd>F1</kbd>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Nhóm 3: Thao tác Dữ liệu & Lưới -->
+        <div class="shortcuts-section">
+          <div class="shortcuts-section-title">
+            <span class="sec-dot"></span> Thao Tác Trên Lưới Dữ Liệu
+          </div>
+          <div class="shortcuts-grid">
+            <div class="shortcut-row">
+              <div class="shortcut-desc">
+                <strong>Sửa trực tiếp ô dữ liệu (Inline Edit)</strong>
+                <span>Kích hoạt chế độ sửa giá trị ngay trên lưới</span>
+              </div>
+              <div class="shortcut-keys">
+                <span class="mouse-tag">Nhấp đúp chuột vào ô</span>
+              </div>
+            </div>
+
+            <div class="shortcut-row">
+              <div class="shortcut-desc">
+                <strong>Lưu giá trị vừa sửa</strong>
+                <span>Cập nhật giá trị vào DB theo Primary Key</span>
+              </div>
+              <div class="shortcut-keys">
+                <kbd>Enter</kbd> <span class="key-hint">(khi đang sửa ô)</span>
+              </div>
+            </div>
+
+            <div class="shortcut-row">
+              <div class="shortcut-desc">
+                <strong>Hủy sửa ô / Đóng hộp thoại Modal</strong>
+                <span>Khôi phục giá trị cũ hoặc đóng popup</span>
+              </div>
+              <div class="shortcut-keys">
+                <kbd>Esc</kbd>
+              </div>
+            </div>
+
+            <div class="shortcut-row">
+              <div class="shortcut-desc">
+                <strong>Menu ngữ cảnh tiện ích</strong>
+                <span>Sao chép JSON, xuất lệnh INSERT, gán NULL...</span>
+              </div>
+              <div class="shortcut-keys">
+                <span class="mouse-tag">Chuột phải trên dòng / ô</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-      <div class="modal-footer" style="text-align: right; margin-top: 16px;">
-        <button class="primary" data-click="close-modal">Đóng (Esc)</button>
+
+      <div class="modal-footer shortcuts-modal-footer">
+        <span class="shortcuts-tip">💡 Mẹo: Nhấn <kbd>Esc</kbd> bất kỳ lúc nào để đóng bảng tra cứu.</span>
+        <button class="primary" data-click="close-modal">Đã hiểu</button>
       </div>
     </div>
-  `);
+  `, true);
 }
 
 document.addEventListener('keydown', (e) => {
@@ -12423,7 +12710,11 @@ async function importNavicat() {
   try {
     const result = await call(desktop.connections.importNavicat(app.activeWorkspaceId));
     if (result.canceled) return;
-    if (result.sessionsClosed) await disconnect();
+    for (const id of result.closedProfileIds || []) {
+      openConnectionIds.delete(id);
+      connectionViews.delete(id);
+    }
+    if (result.closedProfileIds?.includes(app.connection?.id)) await disconnect();
     await refreshWorkspaces();
     await refreshConnections();
     renderSidebar();
@@ -12492,9 +12783,10 @@ async function finishTransaction(action) {
 async function refreshSessionState(profileId = transactionProfileId() || app.connection?.id || null) {
   if (!desktop || !profileId || typeof desktop.db.sessionState !== 'function') return;
   const requestId = ++sessionStateRequestId;
+  const navigationRevision = connectionNavigationRevision;
   try {
     const state = await call(desktop.db.sessionState(profileId));
-    if (requestId !== sessionStateRequestId) return;
+    if (requestId !== sessionStateRequestId || navigationRevision !== connectionNavigationRevision) return;
     if (transactionProfileId() === profileId) {
       app.transactionState = state;
       renderTransactionBar();
@@ -12512,29 +12804,39 @@ async function refreshSessionState(profileId = transactionProfileId() || app.con
 
 async function disconnect() {
   if (!desktop) return;
-  invalidateSqlAutocomplete();
   const profileId = app.connection?.id || null;
+  if (!profileId) return;
+  const navigationRevision = ++connectionNavigationRevision;
+  const current = () => navigationRevision === connectionNavigationRevision && app.connection?.id === profileId;
+  invalidateSqlAutocomplete();
   let result = null;
   try {
     result = await call(desktop.db.disconnect(profileId));
     if (result?.needsConfirmation) {
+      if (!current()) return;
+      const observed = { sessionId: result.sessionId, transactionRevision: result.transactionRevision };
+      if (typeof observed.sessionId !== 'string' || !observed.sessionId || !Number.isSafeInteger(observed.transactionRevision) || observed.transactionRevision < 0) {
+        throw new Error('Không xác minh được phiên cần ngắt. Hãy cập nhật trạng thái rồi thử lại.');
+      }
       const confirmed = await confirmAction(
         'Transaction chưa hoàn tất',
         'Phiên đang mở transaction chưa commit. Ngắt kết nối sẽ rollback các thay đổi chưa commit của transaction đó.',
         'Vẫn ngắt kết nối'
       );
-      if (!confirmed) return;
-      result = await call(desktop.db.disconnect(result.profileId || profileId, { force: true }));
+      if (!confirmed || !current()) return;
+      result = await call(desktop.db.disconnect(profileId, { force: true, ...observed }));
     }
   } catch (error) {
-    toast(error.message, 'error');
+    if (current()) toast(error.message, 'error');
     return;
   }
-  invalidateSqlAutocomplete();
-  if (app.connection) {
-    openConnectionIds.delete(app.connection.id);
-    connectionViews.delete(app.connection.id);
+  if (result?.disconnected !== true) return;
+  if (current() || app.connection?.id !== profileId) {
+    openConnectionIds.delete(profileId);
+    connectionViews.delete(profileId);
   }
+  if (!current()) return;
+  invalidateSqlAutocomplete();
   app.sessionState = null;
   app.connection = null;
   app.database = null;

@@ -76,3 +76,52 @@ test('new Navicat imports require TLS certificate verification unless the file e
   assert.equal(imported.find((entry) => entry.name === 'explicit-off').ssl.verify, false);
   assert.equal(imported.find((entry) => entry.name === 'explicit-on').ssl.verify, true);
 });
+
+test('Navicat TLS weak-validation flags preserve verification unless explicitly enabled', () => {
+  for (const [verifyCa, weak, expected] of [
+    [undefined, false, true], [undefined, '0', true], [undefined, true, false],
+    [true, false, true], [true, true, false], [false, false, false],
+    [null, false, true], ['', false, true], ['unknown', false, true], [0, false, false], ['FALSE', false, false]
+  ]) {
+    const parser = parserFixture(() => JSON.stringify({ Connections: [{ Hostname: 'db.example', UseSSL: true,
+      SSL: { VerifyCA: verifyCa, WeakCertValidation: weak } }] }));
+    assert.equal(parser.parseNavicatFile('fixture.json').connections[0].ssl.verify, expected);
+  }
+  for (const [weak, expected] of [['false', true], ['0', true], ['true', false]]) {
+    const parser = parserFixture(() => `<Connections><Connection Host='db.example' SSL='true' SSL_WeakCertValidation='${weak}' /></Connections>`);
+    assert.equal(parser.parseNavicatFile('fixture.ncx').connections[0].ssl.verify, expected);
+  }
+});
+
+test('Navicat XML supports quoted >, both attribute quotes and exactly one entity decoding pass', () => {
+  const parser = parserFixture(() => `<?xml version="1.0"?><Connections>
+    <!-- <Connection Host="comment.invalid" /> -->
+    <![CDATA[<Connection Host="cdata.invalid" />]]>
+    <Connection ConnectionName="prod > standby &amp; &quot;report&quot;" Host='db.example' UserName="fixture" />
+    <Connection ConnectionName='it&apos;s > &#x42; &#67; &#38;quot;' Host="other.example" UserName='fixture'></Connection>
+    <Connection ConnType="POSTGRESQL" Host="unsupported.example" />
+  </Connections>`);
+  const result = parser.parseNavicatFile('fixture.ncx');
+  assert.equal(result.connections.length, 2);
+  assert.equal(result.skipped, 1);
+  assert.equal(result.connections[0].name, 'prod > standby & "report"');
+  assert.equal(result.connections[0].host, 'db.example');
+  assert.equal(result.connections[1].name, "it's > B C &quot;");
+  assert.equal(result.connections[1].host, 'other.example');
+});
+
+test('Navicat password decoding preserves data resembling padding and rejects invalid UTF-8', () => {
+  const parser = parserFixture(() => '');
+  const encrypt = bytes => {
+    const cipher = crypto.createCipheriv('aes-128-cbc', Buffer.from('libcckeylibcckey'), Buffer.from('libcciv libcciv '));
+    return Buffer.concat([cipher.update(bytes), cipher.final()]);
+  };
+  const passwords = ['', 'fixture\u0000', 'fixture�', 'mật khẩu'];
+  for (let pad = 1; pad <= 16; pad++) passwords.push('fixture' + String.fromCharCode(pad).repeat(pad));
+  for (const password of passwords) {
+    const encrypted = encrypt(Buffer.from(password));
+    for (const encoding of ['hex', 'base64']) assert.equal(parser.decryptPassword(encrypted.toString(encoding)), password);
+  }
+  assert.equal(parser.decryptPassword(encrypt(Buffer.from([0xff])).toString('hex')), '');
+  assert.equal(parser.decryptPassword('invalid-ciphertext'), '');
+});

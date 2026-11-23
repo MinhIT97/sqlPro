@@ -484,13 +484,8 @@ function createMainContextHooks({
           if (leaseCount > 0 && (!isJobOwner() || leaseCount !== 1)) {
             return false;
           }
-          if (typeof sessionRegistry.busy === 'function') {
-            const otherBusy = Boolean(entry.session?.activeTask || entry.session?.inTransaction
-              || entry.session?.autocommit === false
-              || (typeof sessionRegistry.isProtected === 'function' && sessionRegistry.isProtected(entry) && !isJobOwner()));
-            if (otherBusy) return false;
-            if (leaseCount > 0 && (!isJobOwner() || leaseCount !== 1)) return false;
-          }
+          // isProtected() pins the selected Editor against LRU eviction, even when idle.
+          // Active operations/transactions and foreign leases are checked explicitly above.
         }
       }
     }

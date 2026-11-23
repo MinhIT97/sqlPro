@@ -7,28 +7,17 @@ const AES_KEY = Buffer.from('libcckeylibcckey', 'utf8');
 const AES_IV = Buffer.from('libcciv libcciv ', 'utf8');
 
 function decodeXml(value) {
-  return String(value)
-    .replace(/&#x([0-9a-f]+);/gi, (_m, hex) => String.fromCodePoint(parseInt(hex, 16)))
-    .replace(/&#(\d+);/g, (_m, dec) => String.fromCodePoint(Number(dec)))
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&');
+  const entities = { quot: '"', apos: "'", lt: '<', gt: '>', amp: '&' };
+  return String(value).replace(/&(#x[0-9a-f]+|#\d+|quot|apos|lt|gt|amp);/gi, (match, entity) => {
+    if (/^#x/i.test(entity)) return String.fromCodePoint(parseInt(entity.slice(2), 16));
+    if (entity.startsWith('#')) return String.fromCodePoint(Number(entity.slice(1)));
+    return entities[entity] ?? match;
+  });
 }
 
-function pkcsUnpad(buffer) {
-  if (!buffer.length) return buffer;
-  const pad = buffer[buffer.length - 1];
-  if (pad < 1 || pad > 16 || pad > buffer.length) return buffer;
-  for (let i = buffer.length - pad; i < buffer.length; i += 1) {
-    if (buffer[i] !== pad) return buffer;
-  }
-  return buffer.subarray(0, buffer.length - pad);
-}
-
-function decryptPassword(encoded) {
-  if (typeof encoded !== 'string' || encoded.length === 0) return '';
+function decodePassword(encoded) {
+  if (typeof encoded !== 'string') return undefined;
+  if (encoded.length === 0) return '';
   const candidates = [];
   if (encoded.length % 2 === 0 && /^[0-9a-f]+$/i.test(encoded)) {
     candidates.push(Buffer.from(encoded, 'hex'));
@@ -43,18 +32,20 @@ function decryptPassword(encoded) {
     if (!ciphertext.length || ciphertext.length % 16 !== 0) continue;
     try {
       const decipher = crypto.createDecipheriv('aes-128-cbc', AES_KEY, AES_IV);
-      let plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-      plain = pkcsUnpad(plain);
-      let end = plain.length;
-      while (end > 0 && plain[end - 1] === 0) end -= 1;
-      const text = plain.subarray(0, end).toString('utf8');
-      if (text && !text.includes('�')) return text;
-      if (!text) return '';
+      // Node removes PKCS padding in final(); all remaining bytes are password data.
+      const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      const text = plain.toString('utf8');
+      if (Buffer.from(text, 'utf8').equals(plain)) return text;
     } catch {
       // try the next encoding
     }
   }
-  return '';
+  return undefined;
+}
+
+function decryptPassword(encoded) {
+  // Keep the diagnostic API compatible; imports preserve the missing/error state.
+  return decodePassword(encoded) ?? '';
 }
 
 function toBoolean(value) {
@@ -64,7 +55,8 @@ function toBoolean(value) {
 
 function verifyCertificateValue(verifyCa, weakValidation) {
   if (verifyCa === undefined && weakValidation === undefined) return undefined;
-  return toBoolean(verifyCa) && !toBoolean(weakValidation);
+  const explicitlyDisabled = ['false', '0'].includes(String(verifyCa).toLowerCase());
+  return !explicitlyDisabled && !toBoolean(weakValidation);
 }
 
 function toPort(value, fallback) {
@@ -89,7 +81,7 @@ function buildConnection(raw) {
     host: String(raw.host).slice(0, 255),
     port: toPort(raw.port, 3306),
     user: String(raw.user || '').slice(0, 128),
-    password: raw.password || '',
+    password: raw.password,
     database: String(raw.database || '').slice(0, 128),
     ssl: {
       enabled: Boolean(raw.sslEnabled),
@@ -97,7 +89,7 @@ function buildConnection(raw) {
       ca: raw.sslCa || '',
       cert: raw.sslCert || '',
       key: raw.sslKey || '',
-      passphrase: raw.sslKeyPassword || ''
+      passphrase: raw.sslKeyPassword
     },
     ssh: {
       enabled: Boolean(sshEnabled),
@@ -105,9 +97,9 @@ function buildConnection(raw) {
       port: toPort(raw.sshPort, 22),
       user: sshEnabled ? String(raw.sshUser || '').slice(0, 128) : '',
       authMethod: raw.sshAuthMethod === 'key' ? 'key' : 'password',
-      password: sshEnabled ? raw.sshPassword || '' : '',
+      password: sshEnabled ? raw.sshPassword : undefined,
       privateKeyPath: sshEnabled ? raw.sshKeyPath || '' : '',
-      passphrase: sshEnabled ? raw.sshPassphrase || '' : ''
+      passphrase: sshEnabled ? raw.sshPassphrase : undefined
     },
     source: 'navicat',
     importKey: [
@@ -131,22 +123,22 @@ function fromJsonServer(server) {
     host: server.Hostname,
     port: server.Port,
     user: server.Username,
-    password: decryptPassword(server.Password),
+    password: decodePassword(server.Password),
     database: server.Database || server.DefaultDatabase || '',
     sslEnabled: toBoolean(server.UseSSL),
     sslVerify: verifyCertificateValue(ssl.VerifyCA, ssl.WeakCertValidation),
     sslCa: ssl.CACert || ssl.RootCert || '',
     sslCert: ssl.ClientCertFile || '',
     sslKey: ssl.ClientKeyFile || '',
-    sslKeyPassword: ssl.ClientKeyPassword ? decryptPassword(ssl.ClientKeyPassword) : '',
+    sslKeyPassword: decodePassword(ssl.ClientKeyPassword),
     sshEnabled: toBoolean(server.UseSSH),
     sshHost: ssh.Host || '',
     sshPort: ssh.Port,
     sshUser: ssh.UserName || '',
     sshAuthMethod: authMethod.includes('key') || authMethod.includes('public') ? 'key' : 'password',
-    sshPassword: ssh.Password ? decryptPassword(ssh.Password) : '',
+    sshPassword: decodePassword(ssh.Password),
     sshKeyPath: ssh.PrivateKeyPath || '',
-    sshPassphrase: ssh.Passphrase ? decryptPassword(ssh.Passphrase) : ''
+    sshPassphrase: decodePassword(ssh.Passphrase)
   });
 }
 
@@ -158,22 +150,22 @@ function fromXmlAttributes(attrs) {
     host: attrs.Host,
     port: attrs.Port,
     user: attrs.UserName,
-    password: decryptPassword(attrs.Password),
+    password: decodePassword(attrs.Password),
     database: attrs.Database || '',
     sslEnabled: toBoolean(attrs.SSL),
     sslVerify: verifyCertificateValue(attrs.SSL_VerifyCA, attrs.SSL_WeakCertValidation),
     sslCa: attrs.SSL_CACert || attrs.SSL_RootCert || '',
     sslCert: attrs.SSL_ClientCert || '',
     sslKey: attrs.SSL_ClientKey || '',
-    sslKeyPassword: attrs.SSL_PEMClientKeyPassword ? decryptPassword(attrs.SSL_PEMClientKeyPassword) : '',
+    sslKeyPassword: decodePassword(attrs.SSL_PEMClientKeyPassword),
     sshEnabled: toBoolean(attrs.SSH),
     sshHost: attrs.SSH_Host || '',
     sshPort: attrs.SSH_Port,
     sshUser: attrs.SSH_UserName || '',
     sshAuthMethod: authMethod.includes('key') || authMethod.includes('public') ? 'key' : 'password',
-    sshPassword: attrs.SSH_Password ? decryptPassword(attrs.SSH_Password) : '',
+    sshPassword: decodePassword(attrs.SSH_Password),
     sshKeyPath: attrs.SSH_PrivateKey || '',
-    sshPassphrase: attrs.SSH_Passphrase ? decryptPassword(attrs.SSH_Passphrase) : ''
+    sshPassphrase: decodePassword(attrs.SSH_Passphrase)
   });
 }
 
@@ -201,14 +193,16 @@ function parseJson(text) {
 
 function parseXml(text) {
   const connections = [];
-  const connectionPattern = /<Connection\b([^>]*?)\/?>/g;
+  // Quoted attribute values may contain >; comments/CDATA are not connections.
+  const connectionPattern = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<Connection(?=[\s/>])((?:[^<>"']|"[^"]*"|'[^']*')*)\/?>/g;
   let match;
   while ((match = connectionPattern.exec(text)) !== null) {
-    const attributes = {};
-    const attributePattern = /([A-Za-z_][\w.-]*)\s*=\s*"([^"]*)"/g;
+    if (match[1] === undefined) continue;
+    const attributes = Object.create(null);
+    const attributePattern = /([A-Za-z_][\w.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
     let attribute;
     while ((attribute = attributePattern.exec(match[1])) !== null) {
-      attributes[attribute[1]] = decodeXml(attribute[2]);
+      attributes[attribute[1]] = decodeXml(attribute[2] ?? attribute[3]);
     }
     connections.push(fromXmlAttributes(attributes));
   }

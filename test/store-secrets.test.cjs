@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const crypto = require('node:crypto');
 const { normalizeVault } = require('../electron/store-schema.cjs');
 
 function setup() {
@@ -160,6 +161,78 @@ const syncVault = (id, password) => normalizeVault({
     ssl: {},
     ssh: {}
   }]
+});
+
+test('Navicat import checks all existing target IDs before writing any profile or secret', () => {
+  const r = setup();
+  const inputs = ['first', 'second'].map(name => ({ name, host: 'fixture.example', importKey: name, password: 'original' }));
+  const initial = r.store.importMany(inputs);
+  const file = path.join('/fixture', 'connections.json');
+  const before = r.files.get(file);
+  let targets;
+  assert.throws(() => r.store.importMany(inputs.map(input => ({ ...input, password: 'replacement' })), undefined, {
+    beforeWrite(ids) { targets = [...ids]; throw Object.assign(new Error('transaction'), { code: 'PROFILE_TRANSACTION_OPEN' }); }
+  }), { code: 'PROFILE_TRANSACTION_OPEN' });
+  assert.deepEqual(targets, initial.connections.map(profile => profile.id));
+  assert.equal(r.files.get(file), before);
+  for (const profile of initial.connections) assert.equal(r.store.getWithSecrets(profile.id).password, 'original');
+});
+
+test('Navicat JSON/XML imports clear explicit empty secrets and preserve missing or undecodable secrets', () => {
+  const encrypted = value => {
+    const cipher = crypto.createCipheriv('aes-128-cbc', Buffer.from('libcckeylibcckey'), Buffer.from('libcciv libcciv '));
+    return Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]).toString('hex');
+  };
+  const parse = (format, secret) => {
+    const attrs = { ConnectionName: 'fixture', Host: 'fixture.example', SSL: 'true', SSH: 'true', SSH_Host: 'ssh.example',
+      Password: secret, SSL_PEMClientKeyPassword: secret, SSH_Password: secret, SSH_Passphrase: secret };
+    const text = format === 'json' ? JSON.stringify({ Connections: [{ Name: 'fixture', Hostname: 'fixture.example',
+      UseSSL: true, UseSSH: true, Password: secret, SSL: { ClientKeyPassword: secret },
+      SSH: { Host: 'ssh.example', Password: secret, Passphrase: secret } }] })
+      : `<Connections><Connection ${Object.entries(attrs).filter(([, value]) => value !== undefined)
+        .map(([key, value]) => `${key}="${value}"`).join(' ')} /></Connections>`;
+    const module = { exports: {} };
+    vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../electron/navicat.cjs'), 'utf8'), {
+      module, Buffer, require: id => id === 'node:fs' ? { readFileSync: () => text } : require(id)
+    });
+    return module.exports.parseNavicatFile('fixture');
+  };
+  for (const format of ['json', 'xml']) {
+    for (const [input, expected] of [[encrypted(''), ''], ['', ''], [undefined, 'original'],
+      ['invalid-ciphertext', 'original'], [encrypted('replacement'), 'replacement']]) {
+      const r = setup();
+      const first = r.store.importMany(parse(format, encrypted('original')).connections).connections[0];
+      const parsed = parse(format, input), result = r.store.importMany(parsed.connections);
+      assert.equal(result.updated, 1, format);
+      const profile = r.store.getWithSecrets(first.id);
+      assert.equal(profile.password, expected, format);
+      assert.equal(profile.sshPassword, expected, format);
+      assert.equal(profile.sshPassphrase, expected, format);
+      assert.equal(profile.ssl.passphrase, expected, format);
+      if (input === undefined || input === 'invalid-ciphertext') {
+        assert.equal(parsed.connections[0].password, undefined);
+        assert.equal(parsed.connections[0].ssh.password, undefined);
+        assert.equal(parsed.connections[0].ssl.passphrase, undefined);
+      }
+      assert.equal(JSON.stringify(result).includes('replacement'), false);
+    }
+  }
+});
+
+test('cleartext authentication opt-in survives Navicat reimport but never survives an insecure transport change', () => {
+  const r = setup(), input = { name: 'fixture', host: 'fixture.example', importKey: 'fixture', ssl: { enabled: true, verify: true } };
+  const id = r.store.importMany([input]).connections[0].id;
+  assert.equal(r.store.getWithSecrets(id).allowCleartextPassword, false);
+  r.store.save({ ...input, id, allowCleartextPassword: true });
+  r.store.importMany([input]); assert.equal(r.store.getWithSecrets(id).allowCleartextPassword, true);
+  const before = r.files.get(path.join('/fixture', 'connections.json'));
+  for (const ssl of [{ enabled: false }, { enabled: true, verify: false }]) {
+    assert.throws(() => r.store.importMany([{ ...input, ssl }]), { code: 'CLEARTEXT_AUTH_INSECURE_TRANSPORT' });
+    assert.equal(r.files.get(path.join('/fixture', 'connections.json')), before);
+  }
+  assert.throws(() => r.store.save({ ...input, id, allowCleartextPassword: 'true' }), /mysql_clear_password/);
+  r.store.save({ ...input, id, allowCleartextPassword: false });
+  r.store.importMany([input]); assert.equal(r.store.getWithSecrets(id).allowCleartextPassword, false);
 });
 
 test('sync base và bản phục hồi được mã hóa, chống trùng và giới hạn số bản lưu', () => {

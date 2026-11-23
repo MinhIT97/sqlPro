@@ -85,7 +85,7 @@ const {
 } = require('./schema-migration-admission.cjs');
 const { SchemaMigrationJobManager } = require('./schema-migration-jobs.cjs');
 const { SchemaMigrationOrchestrator } = require('./schema-migration-orchestrator.cjs');
-const schemaMigrationService = new SchemaMigrationService();
+const schemaMigrationService = new SchemaMigrationService({ enableMySqlApply: true });
 const schemaMigrationAdmission = new SchemaMigrationAdmission();
 const schemaMigrationApproval = new SchemaMigrationApproval();
 const schemaMigrationJobManager = new SchemaMigrationJobManager();
@@ -115,7 +115,7 @@ function stopBackupSchedules() {
   operationApprovalManager?.clear();
   backupInspection.invalidate?.();
   scheduleServices?.scheduler.stop();
-  if (activeDatabaseTransfer?.scheduleId || ['backup-retention', 'backup-selection-preview', 'selective-restore', 'restore-selective', 'data-sync', 'backup-encrypt', 'backup-decrypt', 'backup-archive-import', 'backup-archive-export', 'backup-archive-delete', 'backup-archive-sftp'].includes(activeDatabaseTransfer?.operation)) {
+  if (activeDatabaseTransfer?.scheduleId || ['schema-migration', 'backup-retention', 'backup-selection-preview', 'selective-restore', 'restore-selective', 'data-sync', 'backup-encrypt', 'backup-decrypt', 'backup-archive-import', 'backup-archive-export', 'backup-archive-delete', 'backup-archive-sftp'].includes(activeDatabaseTransfer?.operation)) {
     cancelDatabaseTransfer(activeDatabaseTransfer);
   }
 }
@@ -428,6 +428,7 @@ function transferLabel(operation) {
     restore: 'phục hồi',
     import: 'nhập dữ liệu',
     export: 'xuất dữ liệu',
+    'schema-migration': 'áp dụng lược đồ',
     'backup-retention': 'dọn backup cục bộ',
     'backup-selection-preview': 'kiểm tra metadata đích'
   }[operation] || 'database';
@@ -539,6 +540,21 @@ const schemaMigrationOrchestrator = new SchemaMigrationOrchestrator({
   admission: schemaMigrationAdmission,
   approval: schemaMigrationApproval,
   jobManager: schemaMigrationJobManager
+});
+
+const { SchemaMigrationApply } = require('./schema-migration-apply.cjs');
+const schemaMigrationApply = new SchemaMigrationApply({
+  service: schemaMigrationService, orchestrator: schemaMigrationOrchestrator, store,
+  checkSnapshot: snapshot => {
+    const entry = assertSchemaSnapshotScope(snapshot);
+    if (entry.productionWriteInProgress || entry.exclusiveOperation || sessionRegistry.leases.get(entry)
+        || entry.session.activeTask || entry.session.inTransaction || entry.session.autocommit === false) {
+      throw Object.assign(new Error('Phiên nguồn/đích đang bận hoặc có transaction. Hãy kết thúc tác vụ rồi so sánh lại.'), { code: 'SESSION_BUSY' });
+    }
+  }, checkPolicy: checkConnectionPolicy,
+  getGeneration: () => backupContextGeneration, claimTransfer: claimDatabaseTransfer,
+  releaseTransfer: transfer => { if (activeDatabaseTransfer === transfer) activeDatabaseTransfer = null; },
+  confirm: options => dialog.showMessageBox(mainWindow, options)
 });
 
 async function confirmProductionTransfer(profileId, database, filePath, operation, details) {
@@ -670,7 +686,7 @@ function cancelDatabaseTransfer(transfer) {
     void transfer.session?.close().catch(() => {});
     return true;
   }
-  if (['backup-retention', 'selective-restore', 'restore-selective', 'data-sync', 'backup-encrypt', 'backup-decrypt', 'backup-archive-import', 'backup-archive-export', 'backup-archive-delete', 'backup-archive-sftp'].includes(transfer.operation)) {
+  if (['backup-retention', 'selective-restore', 'restore-selective', 'schema-migration', 'data-sync', 'backup-encrypt', 'backup-decrypt', 'backup-archive-import', 'backup-archive-export', 'backup-archive-delete', 'backup-archive-sftp'].includes(transfer.operation)) {
     transfer.canceled = true;
     transfer.controller?.abort();
     if (transfer.cancelController && transfer.cancelController !== transfer.controller) {
@@ -695,7 +711,7 @@ function confirmStopActiveTransfer() {
   const active = activeDatabaseTransfer;
   if (!active) return true;
   const label = transferLabel(active.operation);
-  const partialRisk = active.operation === 'restore' || active.operation === 'import';
+  const partialRisk = ['restore', 'import', 'schema-migration'].includes(active.operation);
   const message = `Tác vụ ${label} đang chạy. Thoát bây giờ sẽ hủy tác vụ${partialRisk ? ' và có thể để database ở trạng thái đã áp dụng một phần' : ''}.`;
   const options = {
     type: 'warning',
@@ -1278,17 +1294,23 @@ handle('file:open-text', async (payload) => {
 
 handle('connections:list', () => store.list());
 
-handle('connections:save', async (payload) => {
-  if (payload?.id && activeDatabaseTransfer?.profileId === payload.id) {
+function assertConnectionMutable(profileId) {
+  if (activeDatabaseTransfer?.profileId === profileId || sessionRegistry.opening.has(profileId)) {
     throw Object.assign(new Error('Kết nối đang chạy tác vụ truyền dữ liệu. Hãy đợi hoàn tất trước khi sửa cấu hình.'), { code: 'SESSION_BUSY' });
   }
-  const current = payload?.id ? openSessions.get(payload.id) : null;
-  if (current && (current.session.activeTask || sessionRegistry.leases.get(current))) {
+  const current = openSessions.get(profileId);
+  if (current && (current.session.activeTask || current.exclusiveOperation
+      || current.productionWriteInProgress || sessionRegistry.leases.get(current))) {
     throw Object.assign(new Error('Kết nối đang chạy tác vụ. Hãy đợi hoàn tất trước khi sửa cấu hình.'), { code: 'SESSION_BUSY' });
   }
   if (current && (current.session.inTransaction || current.session.autocommit === false)) {
     throw Object.assign(new Error('Hãy kết thúc transaction và bật lại autocommit trước khi sửa cấu hình kết nối. Dữ liệu chưa commit được giữ nguyên.'), { code: 'PROFILE_TRANSACTION_OPEN' });
   }
+  return current;
+}
+
+handle('connections:save', async (payload) => {
+  const current = payload?.id ? assertConnectionMutable(payload.id) : null;
   const saved = store.save(payload);
   if (payload?.id) await closeSession(payload.id, current);
   sync.schedule();
@@ -1296,8 +1318,10 @@ handle('connections:save', async (payload) => {
 });
 
 handle('connections:remove', async (id) => {
-  await closeSession(id);
+  if (typeof id !== 'string' || !id) throw new Error('Kết nối không hợp lệ.');
+  const current = assertConnectionMutable(id);
   store.remove(id);
+  await closeSession(id, current);
   sync.schedule();
   return { removed: true };
 });
@@ -1326,8 +1350,13 @@ handle('connections:import-navicat', async (workspaceId) => {
   });
   if (result.canceled || !result.filePaths.length) return { canceled: true };
   const parsed = parseNavicatFile(result.filePaths[0]);
-  const imported = store.importMany(parsed.connections, workspaceId);
-  if (imported.updated) await closeAllSessions();
+  const affected = new Map();
+  const imported = store.importMany(parsed.connections, workspaceId, {
+    beforeWrite: ids => { for (const id of ids) affected.set(id, assertConnectionMutable(id)); }
+  });
+  // Start all invalidations before yielding; unrelated sessions remain connected.
+  const closedProfileIds = [...affected.keys()];
+  await Promise.all([...affected].map(([id, current]) => closeSession(id, current)));
   sync.schedule();
   return {
     canceled: false,
@@ -1335,7 +1364,8 @@ handle('connections:import-navicat', async (workspaceId) => {
     added: imported.added,
     updated: imported.updated,
     skipped: parsed.skipped,
-    sessionsClosed: imported.updated > 0
+    sessionsClosed: closedProfileIds.length > 0,
+    closedProfileIds
   };
 });
 
@@ -1463,10 +1493,21 @@ handle('db:connect', async (profileId, options = {}) => {
 
 handle('db:disconnect', async (profileId, options = {}) => {
   const target = typeof profileId === 'string' && profileId ? openSessions.get(profileId) : activeSession;
-  if (target?.session.inTransaction && (!options || options.force !== true)) {
-    return { disconnected: false, needsConfirmation: true, profileId: target.profileId };
+  if (options?.force === true) {
+    if (!target || typeof options.sessionId !== 'string' || !options.sessionId || options.sessionId !== target.sessionId
+        || !Number.isSafeInteger(options.transactionRevision) || options.transactionRevision < 0
+        || options.transactionRevision !== (target.session.transactionRevision || 0)) {
+      throw Object.assign(new Error('Phiên hoặc transaction đã thay đổi. Hãy kiểm tra lại trước khi ngắt kết nối.'), { code: 'DISCONNECT_CONTEXT_CHANGED' });
+    }
+    if (target.session.activeTask || sessionRegistry.leases.get(target) || target.exclusiveOperation || target.productionWriteInProgress) {
+      throw Object.assign(new Error('Phiên đang bận. Hãy hủy hoặc hoàn tất tác vụ trước khi ngắt transaction.'), { code: 'SESSION_BUSY' });
+    }
+  } else if (target && (target.session.inTransaction || target.session.autocommit === false)) {
+    return { disconnected: false, needsConfirmation: true, profileId: target.profileId,
+      sessionId: target.sessionId, transactionRevision: target.session.transactionRevision || 0 };
   }
-  if (typeof profileId === 'string' && profileId) await closeSession(profileId);
+  if (target) await closeSession(target.profileId, target);
+  else if (typeof profileId === 'string' && profileId) await closeSession(profileId);
   else await closeActiveSession();
   return { disconnected: true, openProfiles: [...openSessions.keys()] };
 });
@@ -1668,8 +1709,7 @@ handle('db:create-migration-plan', (payload) => {
   return schemaMigrationService.createMigrationPlan(payload);
 });
 
-// Fail closed at the IPC boundary too: confirmed/production flags cannot enable DDL.
-handle('db:apply-migration-plan', () => schemaMigrationService.applyPlan());
+handle('db:apply-migration-plan', payload => schemaMigrationApply.execute(payload));
 
 handle('db:migration-job-status', (payload) => {
   if (!payload || typeof payload !== 'object' || typeof payload.jobId !== 'string' || !/^job_[a-f0-9]{32}$/.test(payload.jobId)) {

@@ -291,7 +291,11 @@ function normalizeProfile(input, existing, store) {
   if (ssh.enabled && !ssh.host) throw new Error('SSH host không được để trống.');
   const type = input.type === 'mariadb' ? 'mariadb' : 'mysql';
   const ssl = normalizeSsl(input.ssl, existing && existing.ssl);
-  const allowCleartextPassword = input.allowCleartextPassword === true;
+  if (input.allowCleartextPassword !== undefined && typeof input.allowCleartextPassword !== 'boolean') {
+    throw new Error('Tùy chọn mysql_clear_password không hợp lệ.');
+  }
+  const allowCleartextPassword = input.allowCleartextPassword === undefined
+    ? existing?.allowCleartextPassword === true : input.allowCleartextPassword;
   const sshToLocalMysql = ssh.enabled && ['localhost', '127.0.0.1', '::1'].includes(host.toLowerCase());
   if (allowCleartextPassword && !(ssl.enabled && ssl.verify) && !sshToLocalMysql) {
     const error = new Error('mysql_clear_password yêu cầu TLS đã xác thực hoặc SSH tunnel tới MySQL trên chính máy SSH (host localhost/127.0.0.1/::1).');
@@ -474,8 +478,12 @@ function getWithSecrets(id) {
   return decryptProfile(profile);
 }
 
-function importMany(imported, targetWorkspaceId) {
+function importMany(imported, targetWorkspaceId, { beforeWrite = () => {} } = {}) {
   const store = readStore();
+  const updatedProfileIds = [...new Set(imported.map(input => input.importKey
+    ? store.connections.find(profile => profile.importKey === input.importKey)?.id : null).filter(Boolean))];
+  // Guard every existing target before sealing secrets or changing the store.
+  beforeWrite(updatedProfileIds);
   const workspaceId = workspaceIds(store).has(targetWorkspaceId)
     ? targetWorkspaceId
     : DEFAULT_WORKSPACE_ID;
@@ -491,12 +499,8 @@ function importMany(imported, targetWorkspaceId) {
     const payload = {
       ...input,
       workspaceId,
-      password: input.password || undefined,
-      sshPassword: sshPassword || undefined,
-      sshPassphrase: sshPassphrase || undefined,
-      ssl: input.ssl
-        ? { ...input.ssl, passphrase: input.ssl.passphrase || undefined }
-        : input.ssl
+      sshPassword,
+      sshPassphrase
     };
     const profile = normalizeProfile(payload, existing, store);
     profile.source = 'navicat';
@@ -510,7 +514,7 @@ function importMany(imported, targetWorkspaceId) {
     }
   }
   writeStore(store);
-  return { added, updated, connections: store.connections.map(sanitize) };
+  return { added, updated, updatedProfileIds, connections: store.connections.map(sanitize) };
 }
 
 function listWorkspaces() {
